@@ -1,0 +1,11 @@
+{
+  "request_id": "req_01JD0000000000000000000001",
+  "outcome": "deny",
+  "reasons": [{"policy_id": "taint-unknown-destination", "message": "Untrusted on-chain content in context; destination not allowlisted"}],
+  "policy_bundle_hash": "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+  "payload_hash": "keccak256:5c6ffbdd40d9556b73a21e63c3e0e904ad2e3a8b9f2d4c5f6a7b8c9d0e1f2a3b",
+  "approvals": [],
+  "reservation_id": null,
+  "issued_at": "2026-11-02T10:00:00.012Z",
+  "expires_at": "2026-11-02T10:01:00.012Z"
+}

@@ -1,0 +1,29 @@
+{
+  "id": "req_01JD0000000000000000000001",
+  "tenant": "acme",
+  "nonce": "Zml4dHVyZS1ub25jZS0wMDAx",
+  "issued_at": "2026-11-02T10:00:00Z",
+  "ttl_seconds": 60,
+  "actor": {
+    "agent_id": "trading-bot-1",
+    "workload_identity": "spiffe://acme/agents/trading-bot-1",
+    "session_id": "sess_01",
+    "on_behalf_of": "user:123"
+  },
+  "action": {
+    "kind": "evm_tx",
+    "chain_id": 8453,
+    "from": "0x2222222222222222222222222222222222222222",
+    "to": "0x3333333333333333333333333333333333333333",
+    "value_wei": "0",
+    "data": "0xa9059cbb0000000000000000000000009f30000000000000000000000000000000000c21000000000000000000000000000000000000000000027b46536c66c8e3000000",
+    "tool": null,
+    "args": null
+  },
+  "provenance": {
+    "labels": ["untrusted_onchain", "decoded"],
+    "sources": [{"label": "untrusted_onchain", "ref": "nft:base:0x4444444444444444444444444444444444444444/42", "hash": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}],
+    "sdk": {"name": "countersign-ts", "version": "0.1.0"}
+  },
+  "parent_request_id": null
+}
