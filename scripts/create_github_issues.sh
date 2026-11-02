@@ -7,7 +7,7 @@ REPO="${1:?usage: $0 owner/repo}"
 cd "$(dirname "$0")/.."
 
 python3 - "$REPO" <<'PY'
-import csv, json, subprocess, sys
+import csv, json, subprocess, sys, time
 repo = sys.argv[1]
 PH = {"P0":"Phase 0 - Foundations","P1":"Phase 1 - Agent-wallet MVP","P2":"Phase 2 - Corpus & community",
       "P3":"Phase 3 - Code-mode agents","P4":"Phase 4 - Custody grade"}
@@ -40,4 +40,5 @@ for r in rows:
     args = ["issue", "create", "--repo", repo, "--title", title, "--body", body, "--milestone", PH[r["phase"]]]
     for l in labels: args += ["--label", l]
     print(gh(*args).strip())
+    time.sleep(1.2)  # stay under GitHub's secondary rate limit for content creation
 PY
