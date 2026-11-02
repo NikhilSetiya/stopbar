@@ -1,0 +1,26 @@
+name: corpus
+on:
+  pull_request:
+    paths: ["corpus/**", "examples/policies/**"]
+  push:
+    branches: [main]
+permissions: {contents: read}
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4   # pin to SHA in CS-004
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install jsonschema pyyaml
+      - name: Validate corpus entries against schema
+        run: |
+          python - <<'PY'
+          import glob, json, yaml, jsonschema, sys
+          s = json.load(open("corpus/schema.json")); bad = 0
+          for f in sorted(glob.glob("corpus/attacks/*.yaml")):
+              try: jsonschema.validate(yaml.safe_load(open(f)), s); print("ok  ", f)
+              except jsonschema.ValidationError as e: bad += 1; print("FAIL", f, e.message)
+          sys.exit(bad)
+          PY
+      # Replay against policies is added in CS-192 once the engine exists.

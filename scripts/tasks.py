@@ -1,0 +1,165 @@
+"""Single source of truth for the build backlog.
+
+Run `python3 scripts/tasks.py` to regenerate docs/TASKS.md and docs/tasks.csv.
+Fields: id, phase, epic, title, detail, acceptance, est_days, depends, refs
+"""
+import csv
+import pathlib
+
+PHASES = {
+    "P0": "Phase 0 - Foundations (weeks 0-2)",
+    "P1": "Phase 1 - Agent-wallet MVP (weeks 2-8)",
+    "P2": "Phase 2 - Corpus & community (weeks 8-12)",
+    "P3": "Phase 3 - Code-mode agents (months 3-9)",
+    "P4": "Phase 4 - Custody grade (year 2)",
+}
+
+T = []
+def t(id, phase, epic, title, detail, acceptance, est, depends="", refs=""):
+    T.append(dict(id=id, phase=phase, epic=epic, title=title, detail=detail,
+                  acceptance=acceptance, est_days=est, depends=depends, refs=refs))
+
+# ---------------- Phase 0 ----------------
+E = "E0 Foundations"
+t("CS-001","P0",E,"Create GitHub repo, license, README, docs","Public repo, Apache-2.0, README, PRD/HLD/LLD/TASKS committed.","Repo public; docs render; LICENSE detected by GitHub.",0.5)
+t("CS-002","P0",E,"Go module + repo layout","Create Go module and directory layout per LLD §1 with placeholder packages.","`go build ./...` passes; layout matches LLD.",0.5,"CS-001")
+t("CS-003","P0",E,"CI pipeline","GitHub Actions: lint (golangci-lint), test, race detector, govulncheck, build on PR.","PR shows green checks; failing test blocks merge.",1,"CS-002")
+t("CS-004","P0",E,"Supply-chain hygiene","Dependabot, pinned action SHAs, SECURITY.md, CODEOWNERS, branch protection.","Branch protection on main; Dependabot PRs appear.",0.5,"CS-003","NFR-7")
+t("CS-005","P0",E,"Core data model","Implement ActionRequest, IntentSummary, EnrichedRequest, Decision, AuditRecord structs + JSON schema in spec/.","Round-trip JSON tests; schemas validate fixtures.",2,"CS-002","LLD §3")
+t("CS-006","P0",E,"JCS canonicalisation + hashing utils","RFC 8785 canonical JSON; payload_hash and record hash helpers.","Matches RFC 8785 test vectors.",1,"CS-005","LLD §3.5")
+t("CS-007","P0",E,"Cedar spike","Prototype cedar-go with Countersign schema; validate decimal/set context and escalate-annotation approach.","Spike doc in docs/adr/0001-cedar.md with go/no-go.",2,"CS-005","PRD §13 Q1")
+t("CS-008","P0",E,"Decision token spec","Write spec/decision-token-v1.md (JWS claims, payload binding, expiry, nonce).","Spec merged; test vectors included.",1,"CS-006","LLD §10.1")
+t("CS-009","P0",E,"ADR log","docs/adr with ADRs: enforcement modes, Go, Cedar, fail-closed.","4 ADRs merged.",0.5,"CS-001")
+
+# ---------------- Phase 1 ----------------
+E = "E1 Gateway & engine"
+t("CS-101","P1",E,"HTTP gateway skeleton","/v1/evaluate, /healthz, /metrics; JSON schema validation; size limits.","Invalid requests 400 with typed code; tests.",2,"CS-005","FR-INT-1")
+t("CS-102","P1",E,"Nonce + TTL checks","Nonce store (bbolt) with TTL; clock-skew window.","Replayed nonce -> NONCE_REPLAYED; expired -> EXPIRED.",1,"CS-101","FR-INT-4")
+t("CS-103","P1",E,"API key auth (dev) + mTLS option","API key for sidecar; mTLS with client cert identity for service mode.","Unauthenticated -> 401; identity propagated to actor.",1.5,"CS-101")
+t("CS-104","P1",E,"Engine orchestration","Pipeline normalize->decode->enrich->policy->limiter->sign->audit with fail-closed mapping.","Any component error -> deny with FAIL_CLOSED_*; panic recovered.",3,"CS-101","LLD §2, §12")
+t("CS-105","P1",E,"Commit/release endpoints","/v1/actions/{id}/commit and /release wired to limiter.","Reservation lifecycle e2e test passes.",1,"CS-104,CS-122")
+
+E = "E2 Policy"
+t("CS-111","P1",E,"Cedar schema + loader","Load .cedar files + schema; validate; compute bundle hash.","Invalid policy rejected with line number; hash stable across file order.",2,"CS-007","FR-POL-1")
+t("CS-112","P1",E,"Outcome combiner","Deny/escalate/allow via @outcome annotations; default deny; reasons list.","Table tests for all combinations.",1.5,"CS-111","FR-POL-2,3")
+t("CS-113","P1",E,"Starter policy pack","examples/policies/agent-wallet.cedar per LLD §5.3.","All seed corpus attacks get expected outcome.",1,"CS-112")
+t("CS-114","P1",E,"Policy dry-run","`countersign policy test` against corpus + recorded requests.","Diff of outcomes printed; non-zero exit on regression.",1.5,"CS-112,CS-192","FR-POL-4")
+t("CS-115","P1",E,"Activation + cooling-off","Signed activation; loosening caps delayed by configurable period.","Loosening change inactive until delay passes; audited.",2,"CS-111,CS-151","FR-POL-5")
+
+E = "E3 Limiter"
+t("CS-121","P1",E,"Sliding-window counters","Sub-bucket windows for {usd,count} per scope key (bbolt impl).","Rollover tests pass; no double count.",2,"CS-005","FR-LIM-2")
+t("CS-122","P1",E,"Reserve/commit/release","Atomic reservations with TTL and janitor.","Property test: 1,000 concurrent reserves never exceed cap.",2.5,"CS-121","FR-LIM-4")
+t("CS-123","P1",E,"Per-tx and % balance caps","Absolute and pct_of_balance caps via policy context + limiter config.","OpenClaw fixture escalates.",1,"CS-122,CS-133","FR-LIM-1")
+t("CS-124","P1",E,"Circuit breaker","Tenant outflow breaker; M-of-N reset via CLI.","Breach -> CIRCUIT_OPEN until reset; alert metric emitted.",1.5,"CS-122","FR-LIM-3")
+
+E = "E4 Enrichment"
+t("CS-131","P1",E,"Price oracle client","Chainlink + CoinGecko with staleness bound and cache.","Stale -> price_stale=true; tests with fake clock.",2,"CS-104","FR-LIM-5")
+t("CS-132","P1",E,"Balance provider","RPC balance reads (native + ERC-20) with cache.","Anvil test returns correct balances.",1,"CS-104")
+t("CS-133","P1",E,"Destination registry","Known destinations per tenant; similarity check (prefix/suffix).","Poisoned address flagged similar_to_known.",1.5,"CS-104","FR-IR-2")
+
+E = "E5 Decoder & intent"
+t("CS-141","P1",E,"EVM decoder core","Native, ERC-20/721/1155, Permit2, multicall, Safe execTransaction; recursion depth 4.","Golden tests for each type.",3,"CS-005","FR-IR-1")
+t("CS-142","P1",E,"Risk flags","unlimited_approval, delegatecall, proxy_upgrade, new/similar destination, first_time_contract, opaque, unknown_call.","Each flag has positive + negative test.",2,"CS-141,CS-133","FR-IR-2")
+t("CS-143","P1",E,"Human renderer + checksum phrase","Plain-language template + 6-word address checksum.","Snapshot tests; look-alike addresses yield different phrases.",1.5,"CS-142","FR-IR-3")
+t("CS-144","P1",E,"Decoder fuzzing","Go native fuzz targets on calldata.","24h fuzz run with no panics.",1,"CS-141")
+
+E = "E6 Escalation"
+t("CS-151","P1",E,"Approver keys + CLI approvals","Ed25519 approver keys; `countersign approve/reject <id>` signs over payload_hash.","Wrong hash or key rejected; quorum honoured.",2,"CS-104","FR-ESC-1,2")
+t("CS-152","P1",E,"Escalation lifecycle","Create, poll (/v1/decisions), timeout -> deny, reject -> deny.","E2E: escalate -> approve -> signed tx returned.",1.5,"CS-151","FR-ESC-3")
+
+E = "E7 Decision & signer"
+t("CS-161","P1",E,"Decision signer (JWS Ed25519)","Sign decisions; JWKS endpoint; local key provider (dev-only guard).","Tokens verify with published JWKS; prod mode refuses local key.",1.5,"CS-008","LLD §10")
+t("CS-162","P1",E,"Gatekeeper local signer adapter","Holds agent keystore; verifies decision token + payload_hash before signing.","Signing without valid token impossible (test).",2,"CS-161","FR-INT-3")
+t("CS-163","P1",E,"AWS KMS signer + decision key","KMS secp256k1 for tx signing; KMS for decision key.","Integration test against KMS (or localstack).",2,"CS-162")
+t("CS-164","P1",E,"Turnkey adapter","Gatekeeper via Turnkey API key held only by Countersign.","Sandbox org test passes.",2,"CS-162")
+
+E = "E8 Audit"
+t("CS-171","P1",E,"Hash-chained log","Append-only bbolt bucket; record per event in same tx as state change.","Tampering one record fails verify.",2,"CS-006","FR-AUD-1")
+t("CS-172","P1",E,"Checkpoints + verify CLI","Signed Merkle checkpoints; `countersign audit verify`.","Verify passes clean log, fails tampered.",1.5,"CS-171,CS-161","FR-AUD-2,3")
+
+E = "E9 SDKs & provenance"
+t("CS-181","P1",E,"TypeScript SDK","Client, context API with labels, evaluate/commit/release, typed errors.","Example agent protected end-to-end.",3,"CS-104","FR-INT-1, FR-PRV-1,2")
+t("CS-182","P1",E,"Python SDK","Parity with TS SDK.","Same example in Python passes.",2,"CS-181")
+t("CS-183","P1",E,"Encoding detector","Detect base64/hex/Morse/ROT-n/zero-width in untrusted inputs -> add 'decoded'.","Grok-pattern fixture labelled decoded.",1,"CS-181")
+t("CS-184","P1",E,"Framework integrations","Wrappers for one agent framework + viem/ethers signer shim.","Drop-in signer replacement demo.",2,"CS-181")
+
+E = "E10 Corpus & replay"
+t("CS-191","P1",E,"Corpus schema","corpus/schema.json finalized; validator CLI.","All seed attacks validate.",1,"CS-005","FR-COR-1")
+t("CS-192","P1",E,"Replay harness","Seed state from setup; evaluate; assert outcome + policy_ids; CI job.","CI fails when a policy regression unblocks an attack.",2,"CS-191,CS-112","FR-COR-2")
+t("CS-193","P1",E,"10 seed attacks","Grok/Bankr encoded injection; Bankr unauthorised signing; OpenClaw over-transfer; unlimited approval; delegatecall (Bybit pattern); proxy upgrade; address poisoning; velocity drain; stale-price under-valuation; multicall-hidden transfer.","All 10 present and blocked/escalated as expected.",3,"CS-192")
+
+E = "E11 DX & release"
+t("CS-195","P1",E,"CLI: init","`countersign init --persona agent-wallet` generates config + policies + keys.","Fresh machine to protected agent < 30 min (timed).",1.5,"CS-113","FR-DX-1,3")
+t("CS-196","P1",E,"Docker image + binaries","goreleaser; signed releases (cosign); SBOM.","Release artifacts signed and verifiable.",1,"CS-003","FR-DX-2, NFR-7")
+t("CS-197","P1",E,"Benchmarks","Latency/throughput benchmarks vs. NFR-1/2.","p99 < 25ms sidecar at 1k rps published in docs.",1.5,"CS-104")
+t("CS-198","P1",E,"Quickstart + E2E demo","Anvil + sample agent + attack replay video/GIF.","Demo reproducible from README.",1.5,"CS-195,CS-193")
+
+# ---------------- Phase 2 ----------------
+E = "E12 Community"
+t("CS-201","P2",E,"Contribution flow for attacks","PR template, auto-validation, labels, CONTRIBUTING.","External contributor can add an attack without help.",1.5,"CS-192","FR-COR-3")
+t("CS-202","P2",E,"Docs site","MkDocs/Docusaurus from docs/; spec pages.","Site live via GitHub Pages.",1.5,"CS-198")
+t("CS-203","P2",E,"Slack/Telegram escalation channels","Push rendered intent + signing link.","Approve from phone e2e.",2,"CS-152")
+t("CS-204","P2",E,"Launch","Write-up of thesis + incident analysis; HN/X/LinkedIn; outreach to 20 agent builders.","Launch posted; metrics dashboard live.",2,"CS-198,CS-202")
+t("CS-205","P2",E,"Design partners","Recruit 3 agent-wallet teams for shadow (advisory) mode.","3 partners running advisory mode with feedback logged.",5,"CS-204")
+t("CS-206","P2",E,"Kill/pivot review","Review month-3 metrics vs PRD §11.","Written decision: continue / pivot.",0.5,"CS-205","PRD §11")
+
+# ---------------- Phase 3 ----------------
+E = "E13 Code-mode"
+t("CS-301","P3",E,"Binding wrapper runtime (TS)","Instrumented bindings for sandboxed scripts; each call -> ActionRequest(tool_call).","Script calls blocked by policy raise exception inside sandbox.",5,"CS-181","FR-PRV-5")
+t("CS-302","P3",E,"Field-level taint propagation","Tainted<T> wrappers + propagation through derived values.","Exfil fixture (crm.export -> email.send external) denied.",8,"CS-301","LLD §8.3")
+t("CS-303","P3",E,"Python binding runtime","Parity for Python sandboxes.","Same fixtures pass.",5,"CS-302")
+t("CS-304","P3",E,"MCP gateway adapter","Enforce policy on MCP tool calls at a gateway.","MCP server calls evaluated with taint.",5,"CS-301")
+t("CS-305","P3",E,"Static pre-execution checks","Flag loops over sensitive bindings feeding network calls before running.","Pre-check catches seeded exfil script.",5,"CS-302")
+t("CS-306","P3",E,"Postgres + Redis store","Production stores; Lua reserve script.","Concurrency property tests pass on Redis.",4,"CS-122")
+t("CS-307","P3",E,"Code-mode corpus","10 attacks: loop exfil, injected script, tool chaining, etc.","All blocked.",3,"CS-302")
+
+# ---------------- Phase 4 ----------------
+E = "E14 Custody grade"
+t("CS-401","P4",E,"CountersignGuard (Safe Guard)","Solidity guard verifying EIP-712 countersignature + nonce.","Foundry tests; external audit scheduled.",8,"CS-161","LLD §10.2")
+t("CS-402","P4",E,"MPC share integration","Countersign as one share holder with an MPC provider.","Tx impossible without Countersign share in test.",10,"CS-161")
+t("CS-403","P4",E,"HSM / Nitro Enclave decision key","PKCS#11 and enclave key providers; attestation.","Key never leaves HSM/enclave; attestation verified.",8,"CS-161","NFR-5")
+t("CS-404","P4",E,"Deploy-event ingestion","/v1/events/deploy; minutes_since_code_change; unsigned artifact -> deny.","Binance-pattern fixture escalates/denies.",4,"CS-104","FR-PRV-4")
+t("CS-405","P4",E,"HA mode","Active/passive with shared store; fail-closed failover.","Chaos test: failover with no cap violations.",8,"CS-306","NFR-3")
+t("CS-406","P4",E,"Passkey approvals","WebAuthn approvals bound to payload_hash.","Approve via passkey e2e.",4,"CS-203")
+t("CS-407","P4",E,"Solana support","Decoder + signer adapter for Solana.","Seed Solana attacks blocked.",8,"CS-141")
+t("CS-408","P4",E,"External security audit","Independent audit of core + guard.","Report published; criticals fixed.",15,"CS-401,CS-403")
+
+THIN_SLICE = ["CS-001","CS-002","CS-003","CS-005","CS-006","CS-101","CS-104","CS-111","CS-112",
+              "CS-113","CS-121","CS-133","CS-122","CS-141","CS-142","CS-161","CS-162","CS-171","CS-181",
+              "CS-183","CS-191","CS-192","CS-193"]
+
+def write():
+    root = pathlib.Path(__file__).resolve().parent.parent
+    with open(root/"docs/tasks.csv","w",newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(T[0].keys()))
+        w.writeheader(); w.writerows(T)
+    lines = ["# Countersign — Build Backlog","",
+             "> Generated from `scripts/tasks.py`. Edit there, then run `python3 scripts/tasks.py`.","",
+             "Estimates are focused build days for one engineer. IDs are stable; reference them in commits (`CS-122: …`).",""]
+    lines += ["## Summary","","| Phase | Tasks | Est. days |","|---|---|---|"]
+    for p, name in PHASES.items():
+        ts = [x for x in T if x["phase"] == p]
+        lines.append(f"| {name} | {len(ts)} | {sum(x['est_days'] for x in ts):g} |")
+    lines.append("")
+    ts = [x for x in T if x["id"] in THIN_SLICE]
+    lines += ["## Capacity reality","",
+              "Phase windows assume full-time focus. Part-time (~12 h/week) multiplies calendar time by ~3x.",
+              "Ship the **thin slice** first: the minimum path to a public demo where Countersign blocks the seed attacks against an EVM agent wallet.","",
+              f"**Thin slice: {len(ts)} tasks, ~{sum(x['est_days'] for x in ts):g} build days** — " + ", ".join(THIN_SLICE),"",
+              "Everything else in Phase 1 hardens or widens the slice after it's public.",""]
+    for p, name in PHASES.items():
+        lines += [f"## {name}",""]
+        epics = []
+        for x in T:
+            if x["phase"] == p and x["epic"] not in epics: epics.append(x["epic"])
+        for e in epics:
+            lines += [f"### {e}","","| ID | Task | Detail | Acceptance criteria | Est | Depends | Refs |","|---|---|---|---|---|---|---|"]
+            for x in T:
+                if x["phase"] == p and x["epic"] == e:
+                    lines.append(f"| {x['id']} | {x['title']} | {x['detail']} | {x['acceptance']} | {x['est_days']:g}d | {x['depends']} | {x['refs']} |")
+            lines.append("")
+    (root/"docs/TASKS.md").write_text("\n".join(lines))
+    print(f"{len(T)} tasks written")
+
+if __name__ == "__main__":
+    write()

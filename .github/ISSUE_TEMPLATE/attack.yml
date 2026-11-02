@@ -1,0 +1,25 @@
+name: New attack for the corpus
+description: Report an agent / wallet / signer attack pattern to add as a regression test
+labels: ["corpus"]
+body:
+  - type: input
+    id: title
+    attributes: {label: Short title, placeholder: "Encoded instruction in NFT metadata drives agent transfer"}
+    validations: {required: true}
+  - type: dropdown
+    id: target
+    attributes:
+      label: Target
+      options: [agent_wallet.evm, agent_wallet.solana, code_mode, custody.hot_wallet]
+    validations: {required: true}
+  - type: textarea
+    id: how
+    attributes: {label: How the attack works, description: Steps, preconditions, what the signer saw}
+    validations: {required: true}
+  - type: textarea
+    id: refs
+    attributes: {label: Public references (links)}
+  - type: dropdown
+    id: expected
+    attributes: {label: What should a correct policy do?, options: [deny, escalate]}
+    validations: {required: true}

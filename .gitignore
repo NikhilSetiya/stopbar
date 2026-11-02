@@ -1,0 +1,9 @@
+/bin/
+/dist/
+/data/
+/keys/
+*.db
+.env
+node_modules/
+__pycache__/
+.DS_Store
