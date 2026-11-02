@@ -1,7 +1,7 @@
 name: corpus
 on:
   pull_request:
-    paths: ["corpus/**", "examples/policies/**"]
+    paths: ["corpus/**", "examples/policies/**", "spec/**"]
   push:
     branches: [main]
 permissions: {contents: read}
@@ -13,14 +13,23 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: pip install jsonschema pyyaml
-      - name: Validate corpus entries against schema
+      - name: Validate corpus entries and spec fixtures against schemas
         run: |
           python - <<'PY'
-          import glob, json, yaml, jsonschema, sys
-          s = json.load(open("corpus/schema.json")); bad = 0
-          for f in sorted(glob.glob("corpus/attacks/*.yaml")):
-              try: jsonschema.validate(yaml.safe_load(open(f)), s); print("ok  ", f)
-              except jsonschema.ValidationError as e: bad += 1; print("FAIL", f, e.message)
+          import glob, json, yaml, sys
+          from jsonschema import Draft202012Validator as V
+          corpus = V(json.load(open("corpus/schema.json")))
+          req = V(json.load(open("spec/schemas/action_request.v1.schema.json")))
+          dec = V(json.load(open("spec/schemas/decision.v1.schema.json")))
+          checks = [(corpus, f, lambda d: d) for f in glob.glob("corpus/attacks/*.yaml")]
+          checks += [(req, f, lambda d: d["request"]) for f in glob.glob("corpus/attacks/*.yaml")]
+          checks += [(req, f, lambda d: d) for f in glob.glob("spec/fixtures/action_request.*.json")]
+          checks += [(dec, f, lambda d: d) for f in glob.glob("spec/fixtures/decision.*.json")]
+          bad = 0
+          for v, f, pick in sorted(checks, key=lambda c: c[1]):
+              errs = list(v.iter_errors(pick(yaml.safe_load(open(f)))))
+              bad += bool(errs)
+              print("FAIL" if errs else "ok  ", f, *[e.message for e in errs])
           sys.exit(bad)
           PY
       # Replay against policies is added in CS-192 once the engine exists.

@@ -2,7 +2,12 @@
 
 **An open-source intent firewall for signers.** Nothing gets signed — by an AI agent, a hot wallet, or an enterprise system — unless an independent policy engine countersigns it first.
 
-> Status: pre-alpha. Design phase. See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
+> Status: pre-alpha. Foundations in progress — Go module, CI, core data model and RFC 8785 canonical hashing are in (CS-002/003/005/006). See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
+
+```bash
+make check   # vet + race tests
+make fuzz    # fuzz the canonicaliser
+```
 
 ---
 
@@ -52,6 +57,7 @@ Sits between the requester (agent, service, UI) and the signer, in a **separate 
 | [LLD](docs/LLD.md) | Data models, policy language, algorithms, APIs |
 | [TASKS](docs/TASKS.md) | Full build backlog with acceptance criteria |
 | [Attack corpus](corpus/) | Schema + seed attacks |
+| [Spec](spec/) | Wire schemas, fixtures, audit-hash v1 |
 
 ## Roadmap (summary)
 
