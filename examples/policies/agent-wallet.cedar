@@ -15,6 +15,9 @@ when { context.flags.contains("unlimited_approval") };
 @id("delegatecall") @message("delegatecall hands control of the wallet to another contract") @outcome("deny")
 forbid (principal, action, resource) when { context.flags.contains("delegatecall") };
 
+@id("excessive-fee") @message("Fee terms (gas limit × max fee) could burn far more than a normal transaction") @outcome("deny")
+forbid (principal, action, resource) when { context.flags.contains("excessive_fee") };
+
 @id("proxy-upgrade") @message("Proxy upgrade changes the code behind the contract") @outcome("deny")
 forbid (principal, action, resource) when { context.flags.contains("proxy_upgrade") };
 

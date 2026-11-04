@@ -272,10 +272,20 @@ func keys(er model.EnrichedRequest) map[Scope]string {
 
 func amountOf(er model.EnrichedRequest) (amount, error) {
 	amt := amount{count: 1, units: new(big.Int)}
-	if er.AmountUSD != nil {
+	// USD spend = value moved + the most the tx can pay in fees. Either one
+	// unknown makes the request unpriced: a fee drain must not hide behind a
+	// missing price.
+	if er.AmountUSD != nil && (er.MaxFeeUSD != nil || er.Request.Action.Kind != model.KindEVMTx) {
 		v, err := parseUSD(*er.AmountUSD, true)
 		if err != nil {
 			return amt, fmt.Errorf("limiter: amount_usd: %w", err)
+		}
+		if er.MaxFeeUSD != nil {
+			f, err := parseUSD(*er.MaxFeeUSD, true)
+			if err != nil {
+				return amt, fmt.Errorf("limiter: max_fee_usd: %w", err)
+			}
+			v.Add(v, f)
 		}
 		amt.usd = v
 	}

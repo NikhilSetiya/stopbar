@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/NikhilSetiya/stopbar/internal/canon"
+	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 	"github.com/NikhilSetiya/stopbar/internal/nonce"
 )
@@ -116,7 +117,9 @@ func fail(c Code, format string, a ...any) *apiError {
 type Config struct {
 	Evaluator Evaluator  // nil: /v1/evaluate answers ENGINE_UNAVAILABLE
 	Nonces    NonceStore // nil: an in-memory store (replays reopen on restart)
-	Logger    *slog.Logger
+	// Keys lists the decision-token keys (active and retired) for /v1/keys.
+	Keys   func() []decision.JWK
+	Logger *slog.Logger
 	// Clock is for tests. stopbard never sets it: a configurable clock would
 	// be a switch that turns freshness checks off.
 	Clock func() time.Time
@@ -126,6 +129,7 @@ type Config struct {
 type Gateway struct {
 	eval    Evaluator
 	nonces  NonceStore
+	keys    func() []decision.JWK
 	clock   func() time.Time
 	log     *slog.Logger
 	metrics *metrics
@@ -134,7 +138,7 @@ type Gateway struct {
 
 // New returns a Gateway.
 func New(cfg Config) *Gateway {
-	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux()}
+	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, keys: cfg.Keys, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux()}
 	if g.log == nil {
 		g.log = slog.New(slog.DiscardHandler)
 	}
@@ -147,6 +151,7 @@ func New(cfg Config) *Gateway {
 	g.route("/v1/evaluate", http.MethodPost, g.evaluate)
 	g.route("/healthz", http.MethodGet, g.healthz)
 	g.route("/metrics", http.MethodGet, g.serveMetrics)
+	g.route("/v1/keys", http.MethodGet, g.serveKeys)
 	g.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		g.writeError(w, "other", fail(CodeNotFound, "no route for %s", r.URL.Path))
 	})
@@ -318,6 +323,16 @@ func checkIntegerPrecision(body []byte) error {
 
 func (g *Gateway) healthz(w http.ResponseWriter, _ *http.Request) error {
 	return g.writeJSON(w, "/healthz", http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// serveKeys publishes the decision keys so verifiers can pin them out of
+// band. Retired keys are listed: they still verify, never sign.
+func (g *Gateway) serveKeys(w http.ResponseWriter, _ *http.Request) error {
+	keys := []decision.JWK{}
+	if g.keys != nil {
+		keys = g.keys()
+	}
+	return g.writeJSON(w, "/v1/keys", http.StatusOK, map[string]any{"keys": keys})
 }
 
 func (g *Gateway) serveMetrics(w http.ResponseWriter, _ *http.Request) error {

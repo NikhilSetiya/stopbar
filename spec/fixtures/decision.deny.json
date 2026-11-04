@@ -3,7 +3,7 @@
   "outcome": "deny",
   "reasons": [{"code": "POLICY", "policy_id": "taint-unknown-destination", "message": "Untrusted on-chain content in context; destination not allowlisted"}],
   "policy_bundle_hash": "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
-  "payload_hash": "sha256:b5bca7463fe403a7a02e44efb34dfc683f3c0701edd97cf8f6cb42f9487e17a7",
+  "payload_hash": "sha256:115a07fa95f9351e06647d316e88a53bbdbdd1928cf495214742e519fd8fc601",
   "approvals": [],
   "reservation_id": null,
   "issued_at": "2026-11-02T10:00:00.012Z",

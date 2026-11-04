@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
 
@@ -433,5 +434,16 @@ func TestNonceStoreFailureFailsClosed(t *testing.T) {
 	res, b := do(t, g, "POST", "/v1/evaluate", "application/json", fixture(t, "action_request.evm_tx.json"))
 	if res.StatusCode != 500 || errCode(t, b) != CodeInternal || evaluations.Load() != 0 {
 		t.Fatalf("got %d %s, evaluations=%d", res.StatusCode, b, evaluations.Load())
+	}
+}
+
+func TestKeysEndpoint(t *testing.T) {
+	g := newGW(Config{Keys: func() []decision.JWK { return []decision.JWK{{Kty: "OKP", Kid: "k1", Status: "active"}} }})
+	res, b := do(t, g, "GET", "/v1/keys", "", nil)
+	if res.StatusCode != 200 || !bytes.Contains(b, []byte(`"kid":"k1"`)) {
+		t.Fatalf("%d %s", res.StatusCode, b)
+	}
+	if res, b := do(t, newGW(Config{}), "GET", "/v1/keys", "", nil); res.StatusCode != 200 || !bytes.Contains(b, []byte(`{"keys":[]}`)) {
+		t.Fatalf("no keys: %d %s", res.StatusCode, b)
 	}
 }

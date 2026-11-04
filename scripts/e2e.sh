@@ -34,6 +34,11 @@ go test -count=1 -run 'TestDecisionTokenVectors|TestPayloadHash' ./internal/deci
 step "engine: fail-closed matrix, invariants, gateway wiring (CS-104)"
 go test -race -count=1 ./internal/engine/
 
+step "trusted core is stdlib-only (canon, decision, model)"
+bad="$(go list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./internal/canon ./internal/decision ./internal/model | grep -v '^github.com/NikhilSetiya/stopbar/' || true)"
+[[ -z "$bad" ]] || { echo "FAIL third-party imports in the trusted core: $bad"; exit 1; }
+echo "ok   no third-party imports"
+
 step "corpus + spec fixtures against schemas"
 python3 scripts/validate_corpus.py
 
@@ -41,7 +46,7 @@ step "binaries"
 BIN="$(mktemp -d)"
 trap 'kill "${PID:-}" 2>/dev/null || true; rm -rf "$BIN"' EXIT
 go build -o "$BIN/" ./cmd/...
-"$BIN/stopbar"
+"$BIN/stopbar" version
 "$BIN/stopbard" -version
 
 step "gateway over HTTP (CS-101)"
@@ -59,7 +64,7 @@ kill -TERM "$PID"; wait "$PID" && echo "ok   graceful shutdown on SIGTERM (exit 
 PID=
 
 step "corpus attacks through live stopbard: real engine + policy, dev stubs (CS-111/112)"
-python3 scripts/e2e_corpus.py "$BIN/stopbard"
+python3 scripts/e2e_corpus.py "$BIN/stopbard" "$BIN/stopbar"
 
 # Tool pins; keep in step with .github/workflows/ci.yml.
 GOLANGCI_LINT=v2.15.0
@@ -79,7 +84,6 @@ if [[ "${OFFLINE:-0}" != 1 ]]; then
 fi
 
 # Pending stages, enabled as they land:
-#   CS-161/162  real signer + adapter verifier pass spec/vectors/decision-token-v1.json
 #   CS-121+     replace dev stubs with real limiter/enrichers; replay stays green
 #   CS-171      audit chain verify over the replay run
 #   CS-191..193 full corpus replay (test/replay)

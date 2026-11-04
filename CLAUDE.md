@@ -12,12 +12,14 @@ Status is pre-alpha. Implemented so far:
 - `internal/canon`: RFC 8785 JCS and hashing.
 - `internal/gateway`: the HTTP API with strict request checks. See LLD §4 for check order and error codes.
 - `internal/engine`: pipeline orchestration with fail-closed mapping and invariants between stages (LLD §2, §12). It consumes components through interfaces; the real ones arrive in CS-111/121/141/161/171.
-- `internal/decision`: the payload binding (`PayloadHash`).
+- `internal/decision`: the payload binding (`PayloadHash`), which covers **every** EVM tx field (nonce, gas, fees).
 - `internal/policy`: Cedar bundle loader and outcome combiner (CS-111/112, LLD §5). The spike tests stay as a regression gate on cedar-go behaviour.
 - `internal/limiter`: sliding-window caps with reserve/commit/release, written to bbolt before being applied (CS-121/122, LLD §7.3a). Its property test is the acceptance bar.
-- `internal/devstub`: **dev-only** stand-ins for the decoder, price/balance enricher, signer and audit log. Each one names the task that replaces it. Its signer issues tokens that every verifier rejects.
+- `internal/decision`: also the production token signer and verifier, the key ring with rotation, and the JWK type (CS-161). Trusted core, stdlib only.
+- `internal/signer`: the gatekeeper adapter and `Gatekeeper` wrapper (CS-162). This is **edge** code, so go-ethereum is allowed here and only here, and it touches no key until the core verifier has accepted the token.
+- `internal/devstub`: **dev-only** stand-ins for the decoder, price/balance enricher and audit log. Each one names the task that replaces it. Its signer issues tokens that every verifier rejects.
 
-The Cedar spike (`internal/policy`) and the decision-token signer/verifier reference exist only as tests. Every other `internal/*` package is a placeholder `doc.go` whose responsibilities are defined in LLD §1. `cmd/stopbard` serves the gateway on loopback only until auth exists (CS-103). Without flags it has no engine, and `/v1/evaluate` answers 503. `-state-dir` makes nonces and limiter state durable. `stopbard -dev-world <setup.json>` runs the real gateway, engine, limiter and policy bundle, with devstub components seeded from a corpus-style `setup` (which may set `limits`). Corpus entries may be `requests` sequences with `expected.at_step`. `make e2e` replays every corpus attack through it over HTTP (`scripts/e2e_corpus.py`) and requires the expected status and policy IDs.
+The Cedar spike tests stay as a regression gate on cedar-go. Every other `internal/*` package is a placeholder `doc.go` whose responsibilities are defined in LLD §1. `cmd/stopbard` serves the gateway on loopback only until auth exists (CS-103). Without flags it has no engine, and `/v1/evaluate` answers 503. `-state-dir` makes nonces and limiter state durable. `stopbard -dev-world <setup.json> [-dev-wallet <file>]` runs the real gateway, engine, limiter, policy bundle and decision signer (gatekeeper mode with a wallet), with devstub components seeded from a corpus-style `setup` (which may set `limits`). Corpus entries may be `requests` sequences with `expected.at_step`. `make e2e` replays every corpus attack through it over HTTP (`scripts/e2e_corpus.py`) and requires the expected status and policy IDs.
 
 ## Commands
 
@@ -65,7 +67,8 @@ gateway → normalize → decode intent (`decode/evm`) → enrich (price, balanc
 
 ## Decisions already made (don't relitigate without reason)
 
-- **The trusted core is stdlib-only.** Anything that feeds a hash or signature takes no third-party dependencies, which is why JCS is hand-written in `internal/canon`.
+- **The trusted core is stdlib-only.** Anything that feeds a hash or signature takes no third-party dependencies, which is why JCS and compact JWS are hand-written. Wallet signing (secp256k1) is edge code in `internal/signer`.
+- **Bind the whole transaction.** The requester sends the complete unsigned EIP-1559 tx and the adapter fills in nothing. Max fee counts as USD spend. Allowed-but-loses-money patterns (fee drain, zero-min-out) get a decoder flag and a corpus entry.
 - **Amounts are decimal strings, never JSON numbers**, because wei exceeds 2^53. Never route them through float64.
 - **Audit hash v1** = `sha256(JCS({v, seq, ts, type, body, prev_hash}))`, not raw concatenation (`spec/audit-hash-v1.md`, `canon.RecordHash`).
 - **Threat tiers:** T1 is an injected model with an honest harness, T2 is agent error, T3 is a compromised requester, and T4 is a scheming agent. Every control is rated by the tier it holds at. v1 SDK taint holds only at T1. Against T3/T4, only caps, allowlists, the circuit breaker and gatekeeper mode hold.

@@ -50,7 +50,8 @@
         "code_mode.loop_abuse",
         "freshness.expired",
         "freshness.replay",
-        "freshness.future"
+        "freshness.future",
+        "fee_drain"
       ]
     },
     "target": {

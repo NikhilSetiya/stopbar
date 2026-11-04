@@ -3,9 +3,9 @@ package devstub
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"math/big"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,13 +17,38 @@ import (
 var (
 	_ engine.Decoder  = Decoder{}
 	_ engine.Enricher = (*World)(nil)
-	_ engine.Signer   = UnsignedSigner{}
 	_ engine.AuditLog = (*Audit)(nil)
 )
 
 func evm(data string) model.Action {
-	c := uint64(8453)
-	return model.Action{Kind: model.KindEVMTx, ChainID: &c, From: "0x2222222222222222222222222222222222222222", To: "0x3333333333333333333333333333333333333333", ValueWei: "0", Data: data}
+	c, two := uint64(8453), 2
+	return model.Action{Kind: model.KindEVMTx, ChainID: &c, From: "0x2222222222222222222222222222222222222222", To: "0x3333333333333333333333333333333333333333", ValueWei: "0", Data: data,
+		TxType: &two, TxNonce: "0", GasLimit: "100000", MaxFeePerGas: "2000000000", MaxPriorityFeePerGas: "1000000000"}
+}
+
+func TestExcessiveFeeFlag(t *testing.T) {
+	for name, tt := range map[string]struct {
+		gas, fee string
+		flagged  bool
+	}{
+		"normal":                {"100000", "2000000000", false},
+		"30M gas x 5000 gwei":   {"30000000", "5000000000000", true},
+		"huge per-gas fee":      {"21000", "2000000000000", true},
+		"huge gas limit":        {"20000000", "1", true},
+		"0.05 ETH max fee edge": {"50000", "1000000000000", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := evm("")
+			a.GasLimit, a.MaxFeePerGas = tt.gas, tt.fee
+			in, err := Decoder{}.Decode(context.Background(), a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(in.Flags, "excessive_fee"); got != tt.flagged {
+				t.Fatalf("flags %v", in.Flags)
+			}
+		})
+	}
 }
 
 func TestDecoder(t *testing.T) {
@@ -60,16 +85,19 @@ func TestWorldEnrich(t *testing.T) {
 	w := &World{
 		KnownDestinations: []string{"0x1111111111111111111111111111111111111111"},
 		Balances:          map[string]string{"DRB": "3000000"},
-		PricesUSD:         map[string]string{"DRB": "0.058"},
+		PricesUSD:         map[string]string{"DRB": "0.058", "ETH": "3500"},
 		Tokens:            map[string]Token{"0x3333333333333333333333333333333333333333": {Symbol: "DRB", Decimals: 18}},
 	}
 	in, err := Decoder{}.Decode(context.Background(), evm("0xa9059cbb0000000000000000000000009f30000000000000000000000000000000000c21000000000000000000000000000000000000000000027b46536c66c8e3000000"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	er := &model.EnrichedRequest{Intent: in, Velocity: map[string]model.Velocity{}}
+	er := &model.EnrichedRequest{Request: model.ActionRequest{Action: evm("")}, Intent: in, Velocity: map[string]model.Velocity{}}
 	if err := w.Enrich(context.Background(), er); err != nil {
 		t.Fatal(err)
+	}
+	if er.MaxFeeUSD == nil || *er.MaxFeeUSD != "0.7" { // 100,000 gas x 2 gwei = 0.0002 ETH x $3,500
+		t.Fatalf("max fee usd %v", er.MaxFeeUSD)
 	}
 	if *er.AmountUSD != "174000" || *er.PctOfBalance != "1" || er.PriceStale || er.Destination.Known {
 		t.Fatalf("got amount=%v pct=%v %+v", *er.AmountUSD, *er.PctOfBalance, er)
@@ -77,13 +105,13 @@ func TestWorldEnrich(t *testing.T) {
 
 	// Missing price: stale and no amount, so policy fails closed.
 	w.PricesUSD = nil
-	er = &model.EnrichedRequest{Intent: in, Velocity: map[string]model.Velocity{}}
+	er = &model.EnrichedRequest{Request: model.ActionRequest{Action: evm("")}, Intent: in, Velocity: map[string]model.Velocity{}}
 	if err := w.Enrich(context.Background(), er); err != nil || er.AmountUSD != nil || !er.PriceStale {
 		t.Fatalf("missing price: %+v %v", er, err)
 	}
 	// Address poisoning lookalike.
 	in.Destination = "0x1111000000000000000000000000000000001111"
-	er = &model.EnrichedRequest{Intent: in, Velocity: map[string]model.Velocity{}}
+	er = &model.EnrichedRequest{Request: model.ActionRequest{Action: evm("")}, Intent: in, Velocity: map[string]model.Velocity{}}
 	if err := w.Enrich(context.Background(), er); err != nil || !er.Destination.SimilarToKnown || er.Destination.Known {
 		t.Fatalf("lookalike: %+v %v", er.Destination, err)
 	}
@@ -93,23 +121,6 @@ func TestDecimalStringRoundsUp(t *testing.T) {
 	r, _ := new(big.Rat).SetString("1/3")
 	if got := *decimalString(r); got != "0.333333333333333334" {
 		t.Fatalf("1/3 -> %s", got)
-	}
-}
-
-// TestUnsignedTokenIsNotAToken: the dev token must fail decision-token-v1
-// §4 step 1 (alg must be EdDSA), so it can never authorise a signature.
-func TestUnsignedTokenIsNotAToken(t *testing.T) {
-	tok, err := UnsignedSigner{}.Sign(context.Background(), model.Decision{RequestID: "r", Outcome: model.Allow})
-	if err != nil {
-		t.Fatal(err)
-	}
-	hdr, err := base64.RawURLEncoding.DecodeString(strings.Split(tok, ".")[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	var h map[string]string
-	if err := json.Unmarshal(hdr, &h); err != nil || h["alg"] == "EdDSA" || h["typ"] == "stopbar-decision+jws" {
-		t.Fatalf("dev token header %s looks like a real one", hdr)
 	}
 }
 

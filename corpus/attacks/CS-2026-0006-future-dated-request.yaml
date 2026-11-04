@@ -9,7 +9,7 @@ description: >
 setup:
   known_destinations: ["0x4444444444444444444444444444444444444444"]
   balances: {LOBSTAR: "52430000"}
-  prices_usd: {LOBSTAR: "0.00477"}
+  prices_usd: {ETH: "3500", LOBSTAR: "0.00477"}
   tokens: {"0x6666666666666666666666666666666666666666": {symbol: LOBSTAR, decimals: 18}}
   issued_at_offset: "+120s"
 request:
@@ -22,11 +22,16 @@ request:
   action:
     kind: evm_tx
     chain_id: 8453
-    from: "0x5555555555555555555555555555555555555555"
+    from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"   # Anvil test account 0 (public test key, never funded)
     to: "0x6666666666666666666666666666666666666666"
     value_wei: "0"
     # transfer(0x4444…4444, 524,300e18) = 1% of balance, ~$2,501: allowed on its own
     data: "0xa9059cbb0000000000000000000000004444444444444444444444444444444444444444000000000000000000000000000000000000000000006f065c25cb8bd8b00000"
+    tx_type: 2
+    tx_nonce: "0"
+    gas_limit: "100000"
+    max_fee_per_gas: "2000000000"
+    max_priority_fee_per_gas: "1000000000"
   provenance: {labels: [trusted_user]}
 expected:
   outcome: reject

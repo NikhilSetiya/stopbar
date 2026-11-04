@@ -92,7 +92,9 @@ func (l *fakeLimiter) Release(_ context.Context, id string) error {
 
 type signFunc func(context.Context, model.Decision) (string, error)
 
-func (f signFunc) Sign(ctx context.Context, d model.Decision) (string, error) { return f(ctx, d) }
+func (f signFunc) Sign(ctx context.Context, _ model.ActionRequest, d model.Decision) (string, error) {
+	return f(ctx, d)
+}
 
 var goodSigner = signFunc(func(context.Context, model.Decision) (string, error) { return "aGVhZA.cGF5bG9hZA.c2ln", nil })
 
@@ -377,7 +379,7 @@ func TestCommitAndReleaseAreAudited(t *testing.T) {
 	if err := e.Commit(context.Background(), "req-1", "0xabc"); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Release(context.Background(), "req-2"); err != nil {
+	if err := e.Release(context.Background(), "req-2", "client"); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join([]string{string(r.audit.records[0]), string(r.audit.records[1])}, ",") != "commit,release" {

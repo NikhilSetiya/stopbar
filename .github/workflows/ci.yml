@@ -34,8 +34,8 @@ jobs:
       - name: corpus replay over HTTP
         run: |
           pip install pyyaml
-          go build -o "$RUNNER_TEMP/stopbard" ./cmd/stopbard
-          python3 scripts/e2e_corpus.py "$RUNNER_TEMP/stopbard"
+          go build -o "$RUNNER_TEMP/" ./cmd/stopbard ./cmd/stopbar
+          python3 scripts/e2e_corpus.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
   lint:
     runs-on: ubuntu-latest
     steps:

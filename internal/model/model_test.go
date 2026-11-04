@@ -66,13 +66,16 @@ func TestDecisionFixture(t *testing.T) {
 	}
 }
 
+var txType2 = 2
+
 func validEVM() ActionRequest {
 	chain := uint64(8453)
 	return ActionRequest{
 		ID: "req_1", Tenant: "t", Nonce: "0123456789abcdef", IssuedAt: time.Now(), TTLSeconds: 60,
 		Actor: Actor{AgentID: "a"},
 		Action: Action{Kind: KindEVMTx, ChainID: &chain, ValueWei: "0",
-			From: "0x2222222222222222222222222222222222222222", To: "0x3333333333333333333333333333333333333333"},
+			From: "0x2222222222222222222222222222222222222222", To: "0x3333333333333333333333333333333333333333",
+			TxType: &txType2, TxNonce: "0", GasLimit: "100000", MaxFeePerGas: "2000000000", MaxPriorityFeePerGas: "1000000000"},
 		Provenance: Provenance{Labels: []string{}},
 	}
 }
@@ -92,6 +95,14 @@ func TestActionRequestValidate(t *testing.T) {
 		"leading zero":  {func(r *ActionRequest) { r.Action.ValueWei = "01" }, "value_wei"},
 		"wei > uint256": {func(r *ActionRequest) { r.Action.ValueWei = "1" + strings.Repeat("0", 78) }, "uint256"},
 		"odd data":      {func(r *ActionRequest) { r.Action.Data = "0xabc" }, "action.data"},
+		"no tx type":    {func(r *ActionRequest) { r.Action.TxType = nil }, "tx_type"},
+		"legacy tx":     {func(r *ActionRequest) { one := 1; r.Action.TxType = &one }, "tx_type"},
+		"no tx nonce":   {func(r *ActionRequest) { r.Action.TxNonce = "" }, "tx_nonce"},
+		"no gas limit":  {func(r *ActionRequest) { r.Action.GasLimit = "" }, "gas_limit"},
+		"gas < 21000":   {func(r *ActionRequest) { r.Action.GasLimit = "20999" }, "at least 21000"},
+		"gas > uint64":  {func(r *ActionRequest) { r.Action.GasLimit = "18446744073709551616" }, "uint64"},
+		"tip > max fee": {func(r *ActionRequest) { r.Action.MaxPriorityFeePerGas = "3000000000" }, "must not exceed"},
+		"no max fee":    {func(r *ActionRequest) { r.Action.MaxFeePerGas = "" }, "max_fee_per_gas"},
 		"no chain":      {func(r *ActionRequest) { r.Action.ChainID = nil }, "chain_id"},
 		"nil labels":    {func(r *ActionRequest) { r.Provenance.Labels = nil }, "provenance.labels"},
 		"bad kind":      {func(r *ActionRequest) { r.Action.Kind = "transfer" }, "action.kind"},

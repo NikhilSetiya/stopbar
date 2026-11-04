@@ -67,9 +67,10 @@ var (
 	ErrReservationExpired = errors.New("limiter: reservation expired")
 )
 
-// Signer issues the decision token for an allow (CS-161).
+// Signer issues the decision token for an allow (CS-161, decision.Signer).
+// It needs the request for the token's tenant and nonce claims.
 type Signer interface {
-	Sign(ctx context.Context, d model.Decision) (token string, err error)
+	Sign(ctx context.Context, req model.ActionRequest, d model.Decision) (token string, err error)
 }
 
 // AuditLog appends to the hash chain (CS-171).
@@ -260,7 +261,7 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 
 	// sign
 	var token string
-	if err := e.call(ctx, func(ctx context.Context) (err error) { token, err = e.cfg.Signer.Sign(ctx, d); return }); err != nil || token == "" {
+	if err := e.call(ctx, func(ctx context.Context) (err error) { token, err = e.cfg.Signer.Sign(ctx, req, d); return }); err != nil || token == "" {
 		if err == nil {
 			err = errors.New("signer returned an empty token")
 		}
@@ -418,13 +419,14 @@ func (e *Engine) Commit(ctx context.Context, requestID, txRef string) error {
 	return nil
 }
 
-// Release abandons an allowed action and frees its reservation.
-func (e *Engine) Release(ctx context.Context, requestID string) error {
+// Release abandons an allowed action and frees its reservation. The reason
+// (e.g. "client", or why a signer adapter refused) is audited.
+func (e *Engine) Release(ctx context.Context, requestID, reason string) error {
 	if err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Release(ctx, requestID) }); err != nil {
 		return failed(CodeLimiter, err)
 	}
 	if err := e.call(ctx, func(ctx context.Context) error {
-		return e.cfg.Audit.Append(ctx, model.AuditRelease, map[string]any{"request_id": requestID})
+		return e.cfg.Audit.Append(ctx, model.AuditRelease, map[string]any{"request_id": requestID, "reason": reason})
 	}); err != nil {
 		return failed(CodeAudit, err)
 	}

@@ -10,7 +10,7 @@ description: >
 setup:
   known_destinations: ["0x4444444444444444444444444444444444444444"]
   balances: {LOBSTAR: "52430000"}
-  prices_usd: {LOBSTAR: "0.00477"}
+  prices_usd: {ETH: "3500", LOBSTAR: "0.00477"}
   tokens: {"0x6666666666666666666666666666666666666666": {symbol: LOBSTAR, decimals: 18}}
   limits:
     - {scope: wallet, window: 1h, max_usd: "60000"}
@@ -24,11 +24,16 @@ requests:
     action:
       kind: evm_tx
       chain_id: 8453
-      from: "0x5555555555555555555555555555555555555555"
+      from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"   # Anvil test account 0 (public test key, never funded)
       to: "0x6666666666666666666666666666666666666666"
       value_wei: "0"
       # transfer(0x4444…4444, 5,243,000e18) = 10% of balance, ~$25,009
       data: "0xa9059cbb000000000000000000000000444444444444444444444444444444444444444400000000000000000000000000000000000000000004563f9979f37676e00000"
+      tx_type: 2
+      tx_nonce: "0"
+      gas_limit: "100000"
+      max_fee_per_gas: "2000000000"
+      max_priority_fee_per_gas: "1000000000"
     provenance: {labels: [trusted_user]}
   - id: req_fixture_0003_1
     tenant: test
@@ -39,11 +44,16 @@ requests:
     action:
       kind: evm_tx
       chain_id: 8453
-      from: "0x5555555555555555555555555555555555555555"
+      from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"   # Anvil test account 0 (public test key, never funded)
       to: "0x6666666666666666666666666666666666666666"
       value_wei: "0"
       # transfer(0x4444…4444, 5,243,000e18) = 10% of balance, ~$25,009
       data: "0xa9059cbb000000000000000000000000444444444444444444444444444444444444444400000000000000000000000000000000000000000004563f9979f37676e00000"
+      tx_type: 2
+      tx_nonce: "1"
+      gas_limit: "100000"
+      max_fee_per_gas: "2000000000"
+      max_priority_fee_per_gas: "1000000000"
     provenance: {labels: [trusted_user]}
   - id: req_fixture_0003_2
     tenant: test
@@ -54,11 +64,16 @@ requests:
     action:
       kind: evm_tx
       chain_id: 8453
-      from: "0x5555555555555555555555555555555555555555"
+      from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"   # Anvil test account 0 (public test key, never funded)
       to: "0x6666666666666666666666666666666666666666"
       value_wei: "0"
       # transfer(0x4444…4444, 5,243,000e18) = 10% of balance, ~$25,009
       data: "0xa9059cbb000000000000000000000000444444444444444444444444444444444444444400000000000000000000000000000000000000000004563f9979f37676e00000"
+      tx_type: 2
+      tx_nonce: "2"
+      gas_limit: "100000"
+      max_fee_per_gas: "2000000000"
+      max_priority_fee_per_gas: "1000000000"
     provenance: {labels: [trusted_user]}
 expected:
   outcome: deny

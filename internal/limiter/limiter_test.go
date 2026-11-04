@@ -53,9 +53,30 @@ func req(wallet, dest, usd, units string, known bool) model.EnrichedRequest {
 		Velocity:    map[string]model.Velocity{},
 	}
 	if usd != "" {
-		er.AmountUSD = &usd
+		zero := "0"
+		er.AmountUSD, er.MaxFeeUSD = &usd, &zero
 	}
 	return er
+}
+
+// Value + max fee is what a request can spend; both count against USD caps.
+func TestMaxFeeCountsTowardUSDCaps(t *testing.T) {
+	l := newLimiter(t, newClock(), Rule{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"})
+	er := req(walletA, dest, "10", "1", true)
+	fee := "90"
+	er.MaxFeeUSD = &fee
+	mustReserve(t, l, "r1", er) // 10 + 90 = 100: exactly at the cap
+	if got := usd(t, l, er, ScopeWallet); got != "100" {
+		t.Fatalf("usage %s, want value+fee 100", got)
+	}
+	drain := req(walletA, dest, "0", "0", true) // zero value...
+	big := "0.000001"
+	drain.MaxFeeUSD = &big // ...but any fee at all is over the cap
+	wantErr(t, l.Reserve(bg, "r2", drain, time.Minute), engine.ErrCapExceeded)
+
+	unpricedFee := req(walletA, dest, "1", "1", true)
+	unpricedFee.MaxFeeUSD = nil // value known, fee price unknown
+	wantErr(t, l.Reserve(bg, "r3", unpricedFee, time.Minute), ErrUnpriced)
 }
 
 func usd(t testing.TB, l *Limiter, er model.EnrichedRequest, s Scope) string {

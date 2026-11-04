@@ -1,22 +1,24 @@
 package decision
 
-// Reference token signer/verifier for spec/decision-token-v1.md, used to
-// generate and check spec/vectors/decision-token-v1.json. The payload
-// binding it relies on is production code (payload.go). CS-161 (signer) and
+// Conformance vectors for spec/decision-token-v1.md. The vectors are
+// generated here and checked against the PRODUCTION verifier (token.go), as
+// any other implementation would check them. CS-161 (signer) and
 // CS-162 (adapter verifier) implement against these vectors.
 //
 // Regenerate: go test ./internal/decision -run TestDecisionTokenVectors -update
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -30,38 +32,18 @@ var update = flag.Bool("update", false, "rewrite spec/vectors/decision-token-v1.
 
 const (
 	vectorsFile = "../../spec/vectors/decision-token-v1.json"
-	tokenType   = "stopbar-decision+jws"
-	maxTokenTTL = 300 // seconds, = model.MaxTTL
-	clockSkew   = 5   // seconds
+	clockSkew   = int64(ClockSkew / time.Second)
 )
 
-var b64 = base64.RawURLEncoding.Strict()
+// mapSpent is an in-memory spent store for the vector run.
+type mapSpent map[string]bool
 
-// ---- token (spec §3) ----
-
-type claims struct {
-	V                int           `json:"v"`
-	Iss              string        `json:"iss"`
-	Aud              string        `json:"aud"`
-	Tenant           string        `json:"tenant"`
-	RequestID        string        `json:"request_id"`
-	Nonce            string        `json:"nonce"`
-	Outcome          model.Outcome `json:"outcome"`
-	PayloadHash      string        `json:"payload_hash"`
-	PolicyBundleHash string        `json:"policy_bundle_hash"`
-	ReservationID    *string       `json:"reservation_id"`
-	Iat              int64         `json:"iat"`
-	Exp              int64         `json:"exp"`
-}
-
-var claimNames = []string{"aud", "exp", "iat", "iss", "nonce", "outcome", "payload_hash",
-	"policy_bundle_hash", "request_id", "reservation_id", "tenant", "v"}
-
-// kid is the RFC 7638 JWK thumbprint of an Ed25519 public key.
-func kid(pub ed25519.PublicKey) string {
-	jwk := `{"crv":"Ed25519","kty":"OKP","x":"` + b64.EncodeToString(pub) + `"}`
-	sum := sha256.Sum256([]byte(jwk))
-	return b64.EncodeToString(sum[:])
+func (m mapSpent) Consume(key string, _ time.Time) (bool, error) {
+	if m[key] {
+		return false, nil
+	}
+	m[key] = true
+	return true, nil
 }
 
 func mustCanon(t testing.TB, v any) []byte {
@@ -74,7 +56,7 @@ func mustCanon(t testing.TB, v any) []byte {
 }
 
 func header(k string) map[string]string {
-	return map[string]string{"alg": "EdDSA", "kid": k, "typ": tokenType}
+	return map[string]string{"alg": "EdDSA", "kid": k, "typ": TokenType}
 }
 
 // signRaw signs arbitrary header/payload bytes, so vectors can carry
@@ -82,110 +64,6 @@ func header(k string) map[string]string {
 func signRaw(priv ed25519.PrivateKey, hdr, payload []byte) string {
 	in := b64.EncodeToString(hdr) + "." + b64.EncodeToString(payload)
 	return in + "." + b64.EncodeToString(ed25519.Sign(priv, []byte(in)))
-}
-
-// ---- verification (spec §4), in the normative order ----
-
-type tokenError string
-
-func (e tokenError) Error() string { return string(e) }
-
-type verifier struct {
-	keys             map[string]ed25519.PublicKey
-	iss, aud, tenant string
-	seen             map[string]int64 // replay key -> exp
-}
-
-func (v *verifier) verify(tok string, action model.Action, now int64) error {
-	parts := strings.Split(tok, ".")
-	if len(parts) != 3 {
-		return tokenError("MALFORMED")
-	}
-	var raw [3][]byte
-	for i, p := range parts {
-		b, err := b64.DecodeString(p)
-		if err != nil {
-			return tokenError("MALFORMED")
-		}
-		raw[i] = b
-	}
-	hdr, payload, sig := raw[0], raw[1], raw[2]
-
-	// 1. Header: canonical, exactly {alg, kid, typ}, alg EdDSA.
-	var h map[string]string
-	if c, err := canon.Transform(hdr); err != nil || !bytes.Equal(c, hdr) ||
-		json.Unmarshal(hdr, &h) != nil || len(h) != 3 ||
-		h["alg"] != "EdDSA" || h["typ"] != tokenType || h["kid"] == "" {
-		return tokenError("BAD_HEADER")
-	}
-	// 2. Key from the pinned set only.
-	pub, ok := v.keys[h["kid"]]
-	if !ok {
-		return tokenError("UNKNOWN_KEY")
-	}
-	// 3. Signature, before any claim is read.
-	if len(sig) != ed25519.SignatureSize || !ed25519.Verify(pub, []byte(parts[0]+"."+parts[1]), sig) {
-		return tokenError("BAD_SIGNATURE")
-	}
-	// 4. Payload canonical (also rejects duplicate members).
-	if c, err := canon.Transform(payload); err != nil || !bytes.Equal(c, payload) {
-		return tokenError("NON_CANONICAL")
-	}
-	// 5. Exact claim set.
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &m); err != nil || len(m) != len(claimNames) {
-		return tokenError("BAD_CLAIMS")
-	}
-	for _, n := range claimNames {
-		if _, ok := m[n]; !ok {
-			return tokenError("BAD_CLAIMS")
-		}
-	}
-	var c claims
-	dec := json.NewDecoder(bytes.NewReader(payload))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&c); err != nil {
-		return tokenError("BAD_CLAIMS")
-	}
-	// 6. Version.
-	if c.V != 1 {
-		return tokenError("BAD_VERSION")
-	}
-	// 7. Who it is from and for.
-	switch {
-	case c.Iss != v.iss:
-		return tokenError("WRONG_ISSUER")
-	case c.Aud != v.aud:
-		return tokenError("WRONG_AUDIENCE")
-	case c.Tenant != v.tenant:
-		return tokenError("WRONG_TENANT")
-	}
-	// 8. Time.
-	if c.Exp <= c.Iat || c.Exp-c.Iat > maxTokenTTL {
-		return tokenError("TTL_INVALID")
-	}
-	if c.Iat > now+clockSkew {
-		return tokenError("NOT_YET_VALID")
-	}
-	if now >= c.Exp {
-		return tokenError("EXPIRED")
-	}
-	// 9. Only allow tokens authorise signing.
-	if c.Outcome != model.Allow {
-		return tokenError("NOT_ALLOWED")
-	}
-	// 10. Bound to exactly the action about to be signed.
-	ph, err := PayloadHash(action)
-	if err != nil || ph != c.PayloadHash {
-		return tokenError("PAYLOAD_MISMATCH")
-	}
-	// 11. Single use. Recorded only after every other check passed.
-	key := c.Iss + "\x00" + c.Tenant + "\x00" + c.Nonce
-	if _, dup := v.seen[key]; dup {
-		return tokenError("REPLAYED")
-	}
-	v.seen[key] = c.Exp
-	return nil
 }
 
 // ---- vectors ----
@@ -249,7 +127,7 @@ func buildVectors(t *testing.T) vectorFile {
 	seed := sha256.Sum256([]byte("stopbar decision-token-v1 test key"))
 	priv := ed25519.NewKeyFromSeed(seed[:])
 	pub := priv.Public().(ed25519.PublicKey)
-	k := kid(pub)
+	k := Kid(pub)
 	otherSeed := sha256.Sum256([]byte("stopbar decision-token-v1 unpinned key"))
 	other := ed25519.NewKeyFromSeed(otherSeed[:])
 
@@ -262,9 +140,16 @@ func buildVectors(t *testing.T) vectorFile {
 	evmOtherTo.To = "0x9f30000000000000000000000000000000000c21"
 	evmOtherValue := evm
 	evmOtherValue.ValueWei = "1"
+	evmOtherFee := evm // same tx, fee raised after the decision
+	evmOtherFee.MaxFeePerGas = "900000000000000"
+	evmOtherGas := evm
+	evmOtherGas.GasLimit = "30000000"
+	evmOtherTxNonce := evm
+	evmOtherTxNonce.TxNonce = "1"
 	actions := map[string]model.Action{
 		"evm": evm, "evm_noncanonical_input": evmMixed, "evm_other_to": evmOtherTo,
-		"evm_other_value": evmOtherValue, "tool_call": tool,
+		"evm_other_value": evmOtherValue, "evm_other_fee": evmOtherFee, "evm_other_gas": evmOtherGas,
+		"evm_other_tx_nonce": evmOtherTxNonce, "tool_call": tool,
 	}
 
 	vf := vectorFile{
@@ -289,12 +174,12 @@ func buildVectors(t *testing.T) vectorFile {
 
 	iat := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC).Unix()
 	now := iat + 10
-	base := func(a model.Action) claims {
+	base := func(a model.Action) Claims {
 		ph, err := PayloadHash(a)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return claims{
+		return Claims{
 			V: 1, Iss: "stopbar:test", Aud: "signer:local-1", Tenant: "acme",
 			RequestID: "req_01JD0000000000000000000001", Nonce: "Zml4dHVyZS1ub25jZS0wMDAx",
 			Outcome: model.Allow, PayloadHash: ph,
@@ -303,8 +188,8 @@ func buildVectors(t *testing.T) vectorFile {
 			Iat:              iat, Exp: iat + 60,
 		}
 	}
-	sign := func(c claims) string { return signRaw(priv, mustCanon(t, header(k)), mustCanon(t, c)) }
-	with := func(f func(*claims)) string { c := base(evm); f(&c); return sign(c) }
+	sign := func(c Claims) string { return signRaw(priv, mustCanon(t, header(k)), mustCanon(t, c)) }
+	with := func(f func(*Claims)) string { c := base(evm); f(&c); return sign(c) }
 	once := func(action string, want string) []presentation {
 		return []presentation{{Action: action, Now: now, Want: want}}
 	}
@@ -323,20 +208,23 @@ func buildVectors(t *testing.T) vectorFile {
 	add("payload_mismatch_to", good, once("evm_other_to", "PAYLOAD_MISMATCH"))
 	add("payload_mismatch_value", good, once("evm_other_value", "PAYLOAD_MISMATCH"))
 	add("payload_mismatch_kind", good, once("tool_call", "PAYLOAD_MISMATCH"))
-	add("outcome_deny", with(func(c *claims) { c.Outcome = model.Deny }), once("evm", "NOT_ALLOWED"))
-	add("outcome_escalate", with(func(c *claims) { c.Outcome = model.Escalate }), once("evm", "NOT_ALLOWED"))
+	add("payload_mismatch_fee", good, once("evm_other_fee", "PAYLOAD_MISMATCH"))
+	add("payload_mismatch_gas", good, once("evm_other_gas", "PAYLOAD_MISMATCH"))
+	add("payload_mismatch_tx_nonce", good, once("evm_other_tx_nonce", "PAYLOAD_MISMATCH"))
+	add("outcome_deny", with(func(c *Claims) { c.Outcome = model.Deny }), once("evm", "NOT_ALLOWED"))
+	add("outcome_escalate", with(func(c *Claims) { c.Outcome = model.Escalate }), once("evm", "NOT_ALLOWED"))
 	add("expired_at_exp", good, []presentation{{"evm", iat + 60, "EXPIRED"}})
 	add("valid_just_before_exp", good, []presentation{{"evm", iat + 59, "OK"}})
 	add("not_yet_valid", good, []presentation{{"evm", iat - clockSkew - 1, "NOT_YET_VALID"}})
 	add("within_clock_skew", good, []presentation{{"evm", iat - clockSkew, "OK"}})
-	add("ttl_too_long", with(func(c *claims) { c.Exp = c.Iat + maxTokenTTL + 1 }), once("evm", "TTL_INVALID"))
-	add("exp_before_iat", with(func(c *claims) { c.Exp = c.Iat }), once("evm", "TTL_INVALID"))
-	add("wrong_issuer", with(func(c *claims) { c.Iss = "stopbar:other" }), once("evm", "WRONG_ISSUER"))
-	add("wrong_audience", with(func(c *claims) { c.Aud = "signer:other" }), once("evm", "WRONG_AUDIENCE"))
-	add("wrong_tenant", with(func(c *claims) { c.Tenant = "other" }), once("evm", "WRONG_TENANT"))
-	add("bad_version", with(func(c *claims) { c.V = 2 }), once("evm", "BAD_VERSION"))
+	add("ttl_too_long", with(func(c *Claims) { c.Exp = c.Iat + MaxTTL + 1 }), once("evm", "TTL_INVALID"))
+	add("exp_before_iat", with(func(c *Claims) { c.Exp = c.Iat }), once("evm", "TTL_INVALID"))
+	add("wrong_issuer", with(func(c *Claims) { c.Iss = "stopbar:other" }), once("evm", "WRONG_ISSUER"))
+	add("wrong_audience", with(func(c *Claims) { c.Aud = "signer:other" }), once("evm", "WRONG_AUDIENCE"))
+	add("wrong_tenant", with(func(c *Claims) { c.Tenant = "other" }), once("evm", "WRONG_TENANT"))
+	add("bad_version", with(func(c *Claims) { c.V = 2 }), once("evm", "BAD_VERSION"))
 
-	add("unknown_kid", signRaw(other, mustCanon(t, header(kid(other.Public().(ed25519.PublicKey)))), mustCanon(t, base(evm))), once("evm", "UNKNOWN_KEY"))
+	add("unknown_kid", signRaw(other, mustCanon(t, header(Kid(other.Public().(ed25519.PublicKey)))), mustCanon(t, base(evm))), once("evm", "UNKNOWN_KEY"))
 	add("pinned_kid_wrong_key", signRaw(other, mustCanon(t, header(k)), mustCanon(t, base(evm))), once("evm", "BAD_SIGNATURE"))
 	denied := base(evm)
 	denied.Outcome = model.Deny
@@ -345,18 +233,20 @@ func buildVectors(t *testing.T) vectorFile {
 	add("payload_swapped_under_signature", dp[0]+"."+gp[1]+"."+dp[2], once("evm", "BAD_SIGNATURE"))
 
 	payload := mustCanon(t, base(evm))
-	noneHdr := mustCanon(t, map[string]string{"alg": "none", "kid": k, "typ": tokenType})
+	noneHdr := mustCanon(t, map[string]string{"alg": "none", "kid": k, "typ": TokenType})
 	add("alg_none", b64.EncodeToString(noneHdr)+"."+b64.EncodeToString(payload)+".", once("evm", "BAD_HEADER"))
 	add("alg_none_signed", signRaw(priv, noneHdr, payload), once("evm", "BAD_HEADER"))
-	hsHdr := mustCanon(t, map[string]string{"alg": "HS256", "kid": k, "typ": tokenType})
+	hsHdr := mustCanon(t, map[string]string{"alg": "HS256", "kid": k, "typ": TokenType})
 	hsIn := b64.EncodeToString(hsHdr) + "." + b64.EncodeToString(payload)
 	mac := hmac.New(sha256.New, pub) // classic alg confusion: public key as HMAC secret
 	mac.Write([]byte(hsIn))
 	add("alg_hs256_confusion", hsIn+"."+b64.EncodeToString(mac.Sum(nil)), once("evm", "BAD_HEADER"))
-	jku := mustCanon(t, map[string]string{"alg": "EdDSA", "jku": "https://attacker.example/jwks", "kid": k, "typ": tokenType})
+	jku := mustCanon(t, map[string]string{"alg": "EdDSA", "jku": "https://attacker.example/jwks", "kid": k, "typ": TokenType})
 	add("header_extra_member", signRaw(priv, jku, payload), once("evm", "BAD_HEADER"))
+	crit := mustCanon(t, map[string]any{"alg": "EdDSA", "crit": []string{"exp"}, "kid": k, "typ": TokenType})
+	add("header_crit", signRaw(priv, crit, payload), once("evm", "BAD_HEADER"))
 	add("header_wrong_typ", signRaw(priv, mustCanon(t, map[string]string{"alg": "EdDSA", "kid": k, "typ": "JWT"}), payload), once("evm", "BAD_HEADER"))
-	add("header_non_canonical", signRaw(priv, []byte(`{"typ":"`+tokenType+`","alg":"EdDSA","kid":"`+k+`"}`), payload), once("evm", "BAD_HEADER"))
+	add("header_non_canonical", signRaw(priv, []byte(`{"typ":"`+TokenType+`","alg":"EdDSA","kid":"`+k+`"}`), payload), once("evm", "BAD_HEADER"))
 
 	add("payload_whitespace", signRaw(priv, mustCanon(t, header(k)), append([]byte(" "), payload...)), once("evm", "NON_CANONICAL"))
 	dup := bytes.Replace(payload, []byte(`{"aud"`), []byte(`{"aud":"x","aud"`), 1)
@@ -408,19 +298,25 @@ func TestDecisionTokenVectors(t *testing.T) {
 		}
 	}
 	pub, err := b64.DecodeString(file.Key.PublicB64)
-	if err != nil || kid(pub) != file.Key.Kid {
+	if err != nil || Kid(pub) != file.Key.Kid {
 		t.Fatalf("key/kid mismatch")
 	}
 	for _, tv := range file.Tokens {
-		v := &verifier{
-			keys: map[string]ed25519.PublicKey{file.Key.Kid: pub},
-			iss:  file.Verifier.Iss, aud: file.Verifier.Aud, tenant: file.Verifier.Tenant,
-			seen: map[string]int64{},
+		var now int64
+		v := &Verifier{
+			Keys: func() map[string]ed25519.PublicKey { return map[string]ed25519.PublicKey{file.Key.Kid: pub} },
+			Iss:  file.Verifier.Iss, Aud: file.Verifier.Aud, Tenant: file.Verifier.Tenant,
+			Spent: mapSpent{}, Clock: func() time.Time { return time.Unix(now, 0) },
 		}
 		for i, p := range tv.Presentations {
+			now = p.Now
 			res := "OK"
-			if err := v.verify(tv.Token, file.Actions[p.Action], p.Now); err != nil {
-				res = err.Error()
+			if _, err := v.Verify(tv.Token, file.Actions[p.Action]); err != nil {
+				var ve *VerifyError
+				if !errors.As(err, &ve) {
+					t.Fatalf("%s[%d]: untyped error %v", tv.Name, i, err)
+				}
+				res = ve.Code
 			}
 			if res != p.Want {
 				t.Errorf("%s[%d]: got %s, want %s", tv.Name, i, res, p.Want)
@@ -443,5 +339,95 @@ func TestPayloadHashRejectsUnbindable(t *testing.T) {
 		if _, err := PayloadHash(a); err == nil {
 			t.Errorf("%s: expected error", name)
 		}
+	}
+}
+
+// ---- production signer, rotation, key files ----
+
+func evmFixtureRequest(t *testing.T) model.ActionRequest {
+	t.Helper()
+	b, err := os.ReadFile("../../spec/fixtures/action_request.evm_tx.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r model.ActionRequest
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func allowFor(t *testing.T, r model.ActionRequest, at time.Time) model.Decision {
+	t.Helper()
+	ph, err := PayloadHash(r.Action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return model.Decision{RequestID: r.ID, Outcome: model.Allow, PayloadHash: ph,
+		PolicyBundleHash: "sha256:" + strings.Repeat("a", 64), IssuedAt: at, ExpiresAt: at.Add(time.Minute)}
+}
+
+func TestSignerRoundTripAndRotation(t *testing.T) {
+	_, k1, _ := ed25519.GenerateKey(nil)
+	_, k2, _ := ed25519.GenerateKey(nil)
+	ring := NewKeyRing(k1)
+	s := &Signer{Keys: ring, Iss: "stopbar:test", Aud: "signer:local-1"}
+	r := evmFixtureRequest(t)
+	now := time.Now()
+	v := &Verifier{Keys: ring.PublicKeys, Iss: "stopbar:test", Aud: "signer:local-1", Tenant: r.Tenant, Spent: mapSpent{}}
+
+	old, err := s.Sign(context.Background(), r, allowFor(t, r, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ring.Rotate(k2)
+	r2 := r
+	r2.Nonce = "another-nonce-0001"
+	fresh, err := s.Sign(context.Background(), r2, allowFor(t, r2, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Old keys verify; only the new key signs.
+	if _, err := v.Verify(old, r.Action); err != nil {
+		t.Fatalf("token from retired key: %v", err)
+	}
+	if _, err := v.Verify(fresh, r2.Action); err != nil {
+		t.Fatalf("token from active key: %v", err)
+	}
+	if ring.ActiveKid() != Kid(k2.Public().(ed25519.PublicKey)) {
+		t.Fatal("rotation did not switch the signing key")
+	}
+	jwks := ring.JWKS()
+	if len(jwks) != 2 || jwks[0].Status != "active" || jwks[1].Status != "retired" || jwks[1].Kid != Kid(k1.Public().(ed25519.PublicKey)) {
+		t.Fatalf("jwks %+v", jwks)
+	}
+	// Single use: the same token never verifies twice.
+	if _, err := v.Verify(old, r.Action); err == nil || err.(*VerifyError).Code != "REPLAYED" {
+		t.Fatalf("replay: %v", err)
+	}
+}
+
+func TestKeyFileGuards(t *testing.T) {
+	dir := t.TempDir()
+	_, priv, _ := ed25519.GenerateKey(nil)
+	good := filepath.Join(dir, "decision.key")
+	if err := WriteKeyFile(good, priv); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := LoadKeyFile(good); err != nil || !got.Equal(priv) {
+		t.Fatalf("round trip: %v", err)
+	}
+	if err := os.Chmod(good, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadKeyFile(good); err == nil || !strings.Contains(err.Error(), "0600") {
+		t.Fatalf("world-readable key accepted: %v", err)
+	}
+	wallet := filepath.Join(dir, "wallet.key") // e.g. a hex secp256k1 key
+	if err := os.WriteFile(wallet, []byte("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadKeyFile(wallet); err == nil {
+		t.Fatal("a wallet key file loaded as a decision key")
 	}
 }
