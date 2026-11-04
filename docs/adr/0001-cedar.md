@@ -16,8 +16,13 @@ it fails safely.
 
 ## Decision
 
-Use Cedar through `github.com/cedar-policy/cedar-go`, **pinned at v1.8.0**.
-v1.9.0 requires Go 1.26, and the module targets Go 1.24.
+Use Cedar through `github.com/cedar-policy/cedar-go`, **pinned at v1.9.0**,
+with the module on Go 1.26. The spike was run on v1.8.0 under Go 1.24. The
+toolchain upgrade moved both, and every spike test passes unchanged on v1.9.0,
+including finding 1: errors still fail open. v1.9.0 adds an indirect
+dependency, `github.com/go-json-experiment/json`, at an unreleased
+pseudo-version. It is outside the trusted core, but it is part of what gets
+reviewed on each cedar-go upgrade.
 
 The combiner is the one from LLD §5.2. Forbid policies with
 `@outcome("escalate")` go into a separate policy set. Everything else goes
