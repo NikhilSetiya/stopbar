@@ -69,6 +69,28 @@ PID=
 step "tool calls through live stopbard: session taint from the frozen trust map (CS-502)"
 python3 scripts/e2e_toolcall.py "$BIN/stopbard" research/agentdojo/policies/banking
 
+step "research harness: unit tests + free dry run vs live stopbard on the frozen bundle (CS-503)"
+H=research/agentdojo
+[[ -x "$H/.venv/bin/python" ]] || { python3 -m venv "$H/.venv" && "$H/.venv/bin/pip" -q install -r "$H/requirements.lock"; }
+(cd "$H" && .venv/bin/python -m unittest discover -s tests -q)
+echo '{"limits_disabled": true}' > "$BIN/pilot-world.json"
+"$BIN/stopbard" -listen 127.0.0.1:0 -dev-world "$BIN/pilot-world.json" -policies "$H/policies/banking" -state-dir "$BIN/pilot-state" >"$BIN/pilot-out" 2>"$BIN/pilot-log" &
+PID=$!
+for _ in $(seq 50); do grep -q 'listening on' "$BIN/pilot-out" 2>/dev/null && break; sleep 0.1; done
+PADDR="$(sed -n 's/.*listening on //p' "$BIN/pilot-out")"
+(cd "$H" && .venv/bin/python -m harness.run --arm A2 --dry-run --limit 3 --stopbard "http://$PADDR" --out "$BIN/pilot-results" >/dev/null)
+python3 - "$BIN/pilot-results" <<'PY'
+import glob, json, sys
+d = glob.glob(sys.argv[1] + "/*_A2")[0]
+run = json.load(open(d + "/run.json"))
+calls = [json.loads(l) for l in open(d + "/calls.jsonl")]
+assert run["enforced_bundle_hash"] == run["frozen_bundle_hash"], "A2 not on the frozen bundle"
+assert calls and not any(c["infra_error"] for c in calls), "gate infra errors"
+print(f"ok   dry run: {len(calls)} gated calls on frozen bundle {run['frozen_bundle_hash'][:19]}…, 0 infra errors")
+PY
+kill -TERM "$PID"; wait "$PID" || true
+PID=
+
 step "corpus attacks through live stopbard: real engine + policy, dev stubs (CS-111/112)"
 python3 scripts/e2e_corpus.py "$BIN/stopbard" "$BIN/stopbar"
 
