@@ -1,7 +1,8 @@
-.PHONY: build test fuzz vet fmt check
+.PHONY: build test fuzz vet fmt check e2e
 build: ; go build ./...
 test: ; go test -race -count=1 ./...
 fuzz: ; go test -run='^$$' -fuzz=FuzzTransformIdempotent -fuzztime=60s ./internal/canon/
 vet: ; go vet ./...
 fmt: ; gofmt -w .
 check: vet test
+e2e: ; ./scripts/e2e.sh
