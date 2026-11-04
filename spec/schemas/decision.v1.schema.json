@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/setiyanikhil/stopbar/spec/schemas/decision.v1.schema.json",
+  "$id": "https://github.com/NikhilSetiya/stopbar/spec/schemas/decision.v1.schema.json",
   "title": "Stopbar Decision v1",
   "description": "LLD \u00a73.4. Mirrors internal/model.Decision.",
   "type": "object",

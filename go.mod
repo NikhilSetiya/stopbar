@@ -1,3 +1,3 @@
-module github.com/setiyanikhil/stopbar
+module github.com/NikhilSetiya/stopbar
 
 go 1.24

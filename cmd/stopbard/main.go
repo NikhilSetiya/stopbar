@@ -5,7 +5,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/setiyanikhil/stopbar/internal/version"
+	"github.com/NikhilSetiya/stopbar/internal/version"
 )
 
 func main() { fmt.Println("stopbard", version.Version, "- gateway not implemented yet (CS-101)") }
