@@ -198,7 +198,7 @@ Canonicalisation: RFC 8785 (JCS).
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/v1/evaluate` | Evaluate an ActionRequest. Returns Decision (+ signed tx in gatekeeper mode). `202` with `escalation_id` when escalated. |
+| POST | `/v1/evaluate` | Evaluate an ActionRequest. Returns the Decision for every outcome: `200` allow (+ signed tx in gatekeeper mode), `202` escalate (with `escalation_id`), `403` deny. |
 | GET | `/v1/decisions/{request_id}` | Poll decision (for escalations) |
 | POST | `/v1/actions/{request_id}/commit` | Report broadcast tx hash → commit reservation |
 | POST | `/v1/actions/{request_id}/release` | Abandon → release reservation |
@@ -226,7 +226,15 @@ Error body: `{"code": "NONCE_REPLAYED", "message": "…", "request_id": "…", "
 | `ENGINE_UNAVAILABLE` | 503 | No engine configured |
 | `INTERNAL` | 500 | Engine error or panic, or the engine returned an invalid decision or one for a different request |
 
-Only 200 (allow/deny) and 202 (escalate) carry a decision. Clients treat any other response as *not allowed*.
+**The status code alone is safe to act on.** A client that only checks whether the status is 200 can never read a deny as an allow:
+
+| Outcome | Status | Body |
+|---|---|---|
+| allow | **200** | Decision |
+| escalate | 202 | Decision |
+| deny | **403** | Decision |
+
+200 means allow and nothing else. Every other status, including 202, 403 and every error above, means *do not sign*. SDKs still read `outcome` from the body.
 
 ## 5. Policy engine
 
