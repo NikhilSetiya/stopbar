@@ -47,7 +47,10 @@
         "hidden_call",
         "compromised_service",
         "code_mode.exfiltration",
-        "code_mode.loop_abuse"
+        "code_mode.loop_abuse",
+        "freshness.expired",
+        "freshness.replay",
+        "freshness.future"
       ]
     },
     "target": {
@@ -163,6 +166,11 @@
               }
             }
           }
+        },
+        "issued_at_offset": {
+          "type": "string",
+          "pattern": "^[+-]?[0-9]+s$",
+          "description": "The replay treats requests as templates: each run sets issued_at to now plus this offset (default 0s) and gives every distinct nonce a fresh value. Requests that share a nonce in the entry still share one, which is how replay attacks are written."
         }
       }
     },
@@ -187,8 +195,10 @@
           "type": "string",
           "enum": [
             "deny",
-            "escalate"
-          ]
+            "escalate",
+            "reject"
+          ],
+          "description": "reject: refused by the gateway before evaluation (HTTP 400). Give the error code in expected.code."
         },
         "policy_ids": {
           "type": "array",

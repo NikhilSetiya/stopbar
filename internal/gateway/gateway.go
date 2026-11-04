@@ -7,8 +7,10 @@
 // Checks run in this order, cheapest and most hostile-input-first:
 // method → content type → body size → JSON well-formedness (via RFC 8785,
 // which also rejects duplicate members) → integer precision → exact-case keys
-// → strict decode (unknown fields rejected) → model validation. Nonce/TTL (CS-102) and
-// authentication (CS-103) slot in before evaluation.
+// → strict decode (unknown fields rejected) → model validation → freshness
+// (issued_at within skew, not expired) → nonce consumed. The nonce is spent
+// before evaluation, so even a denied request cannot be retried with it.
+// Authentication (CS-103) slots in before the body is read.
 package gateway
 
 import (
@@ -24,9 +26,11 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"github.com/NikhilSetiya/stopbar/internal/canon"
 	"github.com/NikhilSetiya/stopbar/internal/model"
+	"github.com/NikhilSetiya/stopbar/internal/nonce"
 )
 
 // MaxBodyBytes bounds a request body (LLD §4).
@@ -56,7 +60,22 @@ const (
 	CodeInvalidRequest    Code = "INVALID_REQUEST"
 	CodeEngineUnavailable Code = "ENGINE_UNAVAILABLE"
 	CodeInternal          Code = "INTERNAL"
+	CodeExpired           Code = "EXPIRED"
+	CodeIssuedInFuture    Code = "ISSUED_IN_FUTURE"
+	CodeNonceReplayed     Code = "NONCE_REPLAYED"
 )
+
+// ClockSkew is how far issued_at may lead or trail the gateway clock (LLD §4).
+const ClockSkew = 30 * time.Second
+
+// NonceRetention is how long a consumed nonce is remembered: longer than any
+// request carrying it could still pass the freshness check.
+const NonceRetention = model.MaxTTL + 2*ClockSkew
+
+// NonceStore is an atomic check-and-set of single-use nonces (internal/nonce).
+type NonceStore interface {
+	Consume(key string, until time.Time) (fresh bool, err error)
+}
 
 var codeStatus = map[Code]int{
 	CodeNotFound:          http.StatusNotFound,
@@ -70,6 +89,9 @@ var codeStatus = map[Code]int{
 	CodeInvalidRequest:    http.StatusBadRequest,
 	CodeEngineUnavailable: http.StatusServiceUnavailable,
 	CodeInternal:          http.StatusInternalServerError,
+	CodeExpired:           http.StatusBadRequest,
+	CodeIssuedInFuture:    http.StatusBadRequest,
+	CodeNonceReplayed:     http.StatusBadRequest,
 }
 
 // ErrorBody is the wire shape of every non-2xx response (LLD §4.1).
@@ -92,13 +114,19 @@ func fail(c Code, format string, a ...any) *apiError {
 
 // Config wires a Gateway.
 type Config struct {
-	Evaluator Evaluator // nil: /v1/evaluate answers ENGINE_UNAVAILABLE
+	Evaluator Evaluator  // nil: /v1/evaluate answers ENGINE_UNAVAILABLE
+	Nonces    NonceStore // nil: an in-memory store (replays reopen on restart)
 	Logger    *slog.Logger
+	// Clock is for tests. stopbard never sets it: a configurable clock would
+	// be a switch that turns freshness checks off.
+	Clock func() time.Time
 }
 
 // Gateway is an http.Handler serving the Stopbar API.
 type Gateway struct {
 	eval    Evaluator
+	nonces  NonceStore
+	clock   func() time.Time
 	log     *slog.Logger
 	metrics *metrics
 	mux     *http.ServeMux
@@ -106,9 +134,15 @@ type Gateway struct {
 
 // New returns a Gateway.
 func New(cfg Config) *Gateway {
-	g := &Gateway{eval: cfg.Evaluator, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux()}
+	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux()}
 	if g.log == nil {
 		g.log = slog.New(slog.DiscardHandler)
+	}
+	if g.clock == nil {
+		g.clock = time.Now
+	}
+	if g.nonces == nil {
+		g.nonces = nonce.NewMemory(g.clock)
 	}
 	g.route("/v1/evaluate", http.MethodPost, g.evaluate)
 	g.route("/healthz", http.MethodGet, g.healthz)
@@ -152,6 +186,9 @@ func (g *Gateway) evaluate(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	if err := g.checkFresh(req); err != nil {
+		return err
+	}
 	if g.eval == nil {
 		return withID(fail(CodeEngineUnavailable, "no policy engine configured"), req.ID)
 	}
@@ -179,6 +216,28 @@ var outcomeStatus = map[model.Outcome]int{
 }
 
 func withID(e *apiError, id string) *apiError { e.RequestID = id; return e }
+
+// checkFresh enforces the time window (both directions) and spends the
+// nonce. It runs before evaluation, so the nonce is consumed whatever the
+// engine decides.
+func (g *Gateway) checkFresh(req model.ActionRequest) error {
+	now := g.clock()
+	switch {
+	case req.IssuedAt.After(now.Add(ClockSkew)):
+		return withID(fail(CodeIssuedInFuture, "issued_at is more than %s ahead of the gateway clock", ClockSkew), req.ID)
+	case !now.Before(req.IssuedAt.Add(time.Duration(req.TTLSeconds)*time.Second + ClockSkew)):
+		return withID(fail(CodeExpired, "request expired (issued_at + ttl_seconds + %s skew has passed)", ClockSkew), req.ID)
+	}
+	fresh, err := g.nonces.Consume(nonce.Key(req.Tenant, req.Actor.AgentID, req.Nonce), now.Add(NonceRetention))
+	if err != nil {
+		g.log.Error("nonce store failed; failing closed", "request_id", req.ID, "err", err)
+		return withID(fail(CodeInternal, "replay protection unavailable"), req.ID)
+	}
+	if !fresh {
+		return withID(fail(CodeNonceReplayed, "nonce already used by this tenant and agent"), req.ID)
+	}
+	return nil
+}
 
 // decodeActionRequest applies every structural check, in order.
 func decodeActionRequest(w http.ResponseWriter, r *http.Request) (model.ActionRequest, error) {

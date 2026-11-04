@@ -7,6 +7,7 @@ Hostile inputs must get their typed 4xx code. Needs: pyyaml.
 """
 import glob, json, sys, urllib.error, urllib.request
 import yaml
+from corpus_template import Templater
 
 base = sys.argv[1]
 failures = 0
@@ -41,15 +42,18 @@ def check(name, method, path, body, want_status, want_code=None, ctype="applicat
 check("healthz", "GET", "/healthz", None, 200, ctype=None)
 check("metrics", "GET", "/metrics", None, 200, ctype=None)
 
-requests = {f: open(f, "rb").read() for f in sorted(glob.glob("spec/fixtures/action_request.*.json"))}
+# Structural checks only: every request gets a fresh issued_at and nonce, so
+# freshness entries (expired, replayed) are exercised by e2e_corpus.py instead.
+fresh = lambda r: json.dumps(Templater().render(r)).encode()
+requests = {f: fresh(json.load(open(f))) for f in sorted(glob.glob("spec/fixtures/action_request.*.json"))}
 for f in sorted(glob.glob("corpus/attacks/*.yaml")):
     entry = yaml.safe_load(open(f))
     for i, r in enumerate(entry.get("requests") or [entry["request"]]):
-        requests[f if "request" in entry else f"{f}#{i}"] = json.dumps(r).encode()
+        requests[f if "request" in entry else f"{f}#{i}"] = fresh(r)
 for name, body in requests.items():
     check(f"valid request passes gateway: {name}", "POST", "/v1/evaluate", body, 503, "ENGINE_UNAVAILABLE")
 
-evm = requests["spec/fixtures/action_request.evm_tx.json"]
+evm = json.dumps(json.load(open("spec/fixtures/action_request.evm_tx.json"))).encode()  # structure only: fails before freshness
 check("wrong method", "GET", "/v1/evaluate", None, 405, "METHOD_NOT_ALLOWED", ctype=None)
 check("unknown route", "GET", "/v1/nope", None, 404, "NOT_FOUND", ctype=None)
 check("wrong content type", "POST", "/v1/evaluate", evm, 415, "UNSUPPORTED_MEDIA_TYPE", ctype="text/plain")

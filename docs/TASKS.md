@@ -47,8 +47,8 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 | ID | Task | Detail | Acceptance criteria | Est | Depends | Refs |
 |---|---|---|---|---|---|---|
 | CS-101 | HTTP gateway skeleton | /v1/evaluate, /healthz, /metrics; JSON schema validation; size limits. | Invalid requests 400 with typed code; tests. | 2d | CS-005 | FR-INT-1 |
-| CS-102 | Nonce + TTL checks | Nonce store (bbolt) with TTL; clock-skew window. | Replayed nonce -> NONCE_REPLAYED; expired -> EXPIRED. | 1d | CS-101 | FR-INT-4 |
-| CS-103 | API key auth (dev) + mTLS option | API key for sidecar; mTLS with client cert identity for service mode. | Unauthenticated -> 401; identity propagated to actor. | 1.5d | CS-101 |  |
+| CS-102 | Nonce + TTL checks | Nonce store (bbolt) with TTL; clock-skew window (both directions). Atomic check-and-set keyed by (tenant, agent, nonce), consumed before evaluation. No clock override in stopbard; the corpus replay rewrites issued_at/nonce per run. | Replayed nonce -> NONCE_REPLAYED; expired -> EXPIRED; future -> ISSUED_IN_FUTURE; N concurrent identical requests -> exactly one evaluated; restart keeps nonces; corpus freshness entries rejected in the CI replay. | 1d | CS-101 | FR-INT-4 |
+| CS-103 | API key auth (dev) + mTLS option | API key for sidecar; mTLS with client cert identity for service mode. HARD GATE: stopbard must not listen on a non-loopback address until this lands (agent/tenant caps are spoofable without it); lifts the loopback-only guard. | Unauthenticated -> 401; identity propagated to actor; actor.agent_id/tenant taken from the authenticated identity, not the body. | 1.5d | CS-101 |  |
 | CS-104 | Engine orchestration | Pipeline normalize->decode->enrich->policy->limiter->sign->audit with fail-closed mapping. | Any component error -> deny with FAIL_CLOSED_*; panic recovered. | 3d | CS-101 | LLD §2, §12 |
 | CS-105 | Commit/release endpoints | /v1/actions/{id}/commit and /release wired to limiter. | Reservation lifecycle e2e test passes. | 1d | CS-104,CS-122 |  |
 

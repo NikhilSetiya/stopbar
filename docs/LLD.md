@@ -196,7 +196,9 @@ Canonicalisation: RFC 8785 (JCS).
   4. no integer beyond ±2^53 (decision-token-v1 §2.2)
   5. **exact-case keys**. `encoding/json` matches keys case-insensitively, so `"To"` next to `"to"` would otherwise be a parser differential.
   6. strict decode with unknown fields rejected → `ActionRequest.Validate()`
-  7. `issued_at` within ±30 s clock skew → TTL ≤ 300 s → nonce unseen, with nonce store TTL = max TTL (CS-102)
+  7. **freshness** (CS-102), two-sided. Accepted only while `issued_at − 30 s ≤ now < issued_at + ttl_seconds + 30 s`. Too far ahead is `ISSUED_IN_FUTURE`, past the end is `EXPIRED`.
+  8. **nonce consumed**: an atomic check-and-set on `(tenant, agent, nonce)`, with components quoted so no tenant can burn another's nonces. This happens **before evaluation**, so a denied request can't be retried with its nonce, and neither can one answered 503. Nonces are written to bbolt (`-state-dir`) before they take effect and kept for max TTL + 2× skew, so a restart can't reopen a replay. If the store fails, the request fails closed (500).
+- **No clock override, ever.** `gateway.Config.Clock` exists for unit tests only, and `stopbard` has no flag for it: a settable clock would be a switch that turns freshness off. Old fixtures stay valid because the corpus replay treats requests as templates (fresh `issued_at` and nonce per run, rewritten bytes logged).
 - There is no JSON-schema library in the request path. `spec/schemas/*.json` are for non-Go clients and CI, and `internal/model` is authoritative.
 - Per-requester API rate limit (token bucket) protects availability, separate from value limiter.
 
@@ -228,9 +230,11 @@ Error body: `{"code": "NONCE_REPLAYED", "message": "…", "request_id": "…", "
 | `NUMBER_PRECISION` | 400 | Integer beyond ±2^53 (send it as a decimal string) |
 | `UNKNOWN_FIELD` | 400 | Unknown member, or a known one with different case |
 | `INVALID_REQUEST` | 400 | Wrong type, or fails `ActionRequest.Validate()` |
-| `NONCE_REPLAYED` / `EXPIRED` | 400 | CS-102 |
+| `EXPIRED` | 400 | `now ≥ issued_at + ttl_seconds + 30 s` |
+| `ISSUED_IN_FUTURE` | 400 | `issued_at > now + 30 s` |
+| `NONCE_REPLAYED` | 400 | Nonce already used by this tenant and agent within retention |
 | `ENGINE_UNAVAILABLE` | 503 | No engine configured |
-| `INTERNAL` | 500 | Engine error or panic, or the engine returned an invalid decision or one for a different request |
+| `INTERNAL` | 500 | Engine error or panic, the engine returned an invalid decision or one for a different request, or the nonce store failed |
 
 **The status code alone is safe to act on.** A client that only checks whether the status is 200 can never read a deny as an allow:
 

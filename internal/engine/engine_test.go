@@ -432,7 +432,8 @@ func TestThroughGateway(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(r)
 			}
-			srv := httptest.NewServer(gateway.New(gateway.Config{Evaluator: r.engine(t)}))
+			fixtureNow := func() time.Time { return time.Date(2026, 11, 2, 10, 0, 10, 0, time.UTC) }
+			srv := httptest.NewServer(gateway.New(gateway.Config{Evaluator: r.engine(t), Clock: fixtureNow}))
 			defer srv.Close()
 			res, err := http.Post(srv.URL+"/v1/evaluate", "application/json", bytes.NewReader(body))
 			if err != nil {

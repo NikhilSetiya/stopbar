@@ -205,7 +205,7 @@ IDs are referenced from the [task backlog](TASKS.md).
 | Phase | Window | Scope | Exit criteria |
 |---|---|---|---|
 | 0 Foundations | Wk 0–2 | Repo, CI, specs, data model, decision token | Specs merged; CI green |
-| 1 Agent-wallet MVP | Wk 2–8 | Gatekeeper mode, Cedar policies, limiter, context taint, EVM decoder, CLI approvals, audit log, replay harness, 10 seed attacks, TS + Python SDKs | All seed attacks blocked; quickstart < 30 min; p99 target met |
+| 1 Agent-wallet MVP | Wk 2–8 | Gatekeeper mode, Cedar policies, limiter, context taint, EVM decoder, CLI approvals, audit log, replay harness, 10 seed attacks, TS + Python SDKs | All seed attacks blocked; quickstart < 30 min; p99 target met; **authentication (CS-103) enforced before stopbard listens on any non-loopback address**, since agent and tenant caps can be spoofed without it |
 | 1R Research track | Wk 4–10 (parallel; starts once the engine evaluates tool calls) | AgentDojo harness, four arms, shadow monitor, adaptive attacker, T4 setting, write-up | Reproducible results report published |
 | 2 Corpus & community | Wk 8–12 | Public corpus, contribution flow, docs site, launch | Launch done; first external contributions |
 | 3 Code-mode agents | M3–9 | Binding-level enforcement in sandboxes, field-level taint, MCP gateway adapter | Design partner running in staging |

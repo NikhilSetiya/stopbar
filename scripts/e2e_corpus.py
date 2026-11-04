@@ -3,22 +3,28 @@
 Usage: e2e_corpus.py PATH/TO/stopbard
 For each corpus/attacks/*.yaml: start stopbard on the entry's `setup` (dev
 stubs + the real engine, limiter and starter policy bundle) and POST its
-request, or each request of its `requests` sequence in order. Every step
+request, or each request of its `requests` sequence in order. Requests are
+templates (scripts/corpus_template.py): fresh issued_at and nonces each run,
+with the rewritten bytes printed. Every step
 before expected.at_step must be allowed (200). The stopping step must have
-the expected outcome as its HTTP status (allow 200 / escalate 202 / deny 403),
+the expected outcome as its HTTP status (allow 200 / escalate 202 / deny 403 /
+reject 400, refused by the gateway and never evaluated),
 exactly the expected policy IDs, the expected reason code if one is given,
 and an audit record. Needs: pyyaml.
 """
 import glob, json, os, subprocess, sys, tempfile, urllib.error, urllib.request
 import yaml
+from corpus_template import Templater
 
-STATUS = {"allow": 200, "escalate": 202, "deny": 403}
+STATUS = {"allow": 200, "escalate": 202, "deny": 403, "reject": 400}
 stopbard = sys.argv[1]
 failures = 0
 
 
 def post(addr, body):
-    req = urllib.request.Request(f"http://{addr}/v1/evaluate", data=json.dumps(body).encode(),
+    raw = json.dumps(body, separators=(",", ":")).encode()
+    print("     sent:", raw.decode())  # the rewritten bytes, so every run is reproducible from its log
+    req = urllib.request.Request(f"http://{addr}/v1/evaluate", data=raw,
                                  method="POST", headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
@@ -33,9 +39,11 @@ for path in sorted(glob.glob("corpus/attacks/*.yaml")):
     steps = entry.get("requests") or [entry["request"]]
     stop_at = want.get("at_step", len(steps) - 1)
     problems = []
+    setup = dict(entry.get("setup", {}))
+    tpl = Templater(setup.pop("issued_at_offset", "0s"))
     with tempfile.TemporaryDirectory() as tmp:
         world, audit = os.path.join(tmp, "world.json"), os.path.join(tmp, "audit.jsonl")
-        json.dump(entry.get("setup", {}), open(world, "w"))
+        json.dump(setup, open(world, "w"))
         proc = subprocess.Popen([stopbard, "-listen", "127.0.0.1:0", "-dev-world", world, "-dev-audit", audit],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
@@ -44,10 +52,14 @@ for path in sorted(glob.glob("corpus/attacks/*.yaml")):
                 raise RuntimeError(f"stopbard did not start: {line!r} {proc.stderr.read()}")
             addr = line.rsplit(" ", 1)[1].strip()
             for i, body in enumerate(steps[:stop_at]):
-                status, d = post(addr, body)
+                status, d = post(addr, tpl.render(body))
                 if status != 200:
                     problems.append(f"step {i} should be allowed, got {status} {d.get('reasons')}")
-            status, d = post(addr, steps[stop_at])
+            audit_lines = lambda: [json.loads(l) for l in open(audit)] if os.path.exists(audit) else []
+            before = len(audit_lines())
+            status, d = post(addr, tpl.render(steps[stop_at]))
+            if status == 400:  # gateway error body: normalise to a rejection
+                d = {"outcome": "reject", "reasons": [{"code": d.get("code")}], "request_id": d.get("request_id")}
             got_ids = sorted(r["policy_id"] for r in d.get("reasons", []) if r.get("policy_id"))
             codes = [r.get("code") for r in d.get("reasons", [])]
             if status != STATUS[want["outcome"]] or d.get("outcome") != want["outcome"]:
@@ -56,9 +68,12 @@ for path in sorted(glob.glob("corpus/attacks/*.yaml")):
                 problems.append(f"policy_ids {got_ids}, want {want.get('policy_ids', [])}")
             if want.get("code") and want["code"] not in codes:
                 problems.append(f"reason codes {codes}, want {want['code']}")
-            records = [json.loads(l) for l in open(audit)]
-            if not any(r["type"] == "decision" and r["body"]["decision"]["request_id"] == steps[stop_at]["id"] for r in records):
+            new = audit_lines()[before:]  # records written by the stopping step only
+            audited = any(r["type"] == "decision" and r["body"]["decision"]["request_id"] == steps[stop_at]["id"] for r in new)
+            if want["outcome"] != "reject" and not audited:
                 problems.append("stopping decision not audited")
+            if want["outcome"] == "reject" and audited:
+                problems.append("a rejected request reached the engine")
         finally:
             proc.terminate()
             proc.wait(timeout=10)

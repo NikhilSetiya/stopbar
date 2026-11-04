@@ -1,0 +1,48 @@
+id: CS-2026-0005
+title: Allowed transfer replayed with the same nonce (double spend)
+category: freshness.replay
+target: agent_wallet.evm
+description: >
+  A small transfer that policy allows is sent, then the identical request (same nonce) is sent again,
+  as a captured-and-replayed request or a buggy retry would. The first is allowed. The second must be
+  rejected as a replay before evaluation, or one approval would sign twice.
+setup:
+  known_destinations: ["0x4444444444444444444444444444444444444444"]
+  balances: {LOBSTAR: "52430000"}
+  prices_usd: {LOBSTAR: "0.00477"}
+  tokens: {"0x6666666666666666666666666666666666666666": {symbol: LOBSTAR, decimals: 18}}
+requests:
+  - id: req_fixture_0005
+    tenant: test
+    nonce: cmVwbGF5LW5vbmNlLTAwMDU
+    issued_at: "2026-02-10T09:00:00Z"   # template: the replay sets it to now + issued_at_offset
+    ttl_seconds: 60
+    actor: {agent_id: defi-agent}
+    action:
+      kind: evm_tx
+      chain_id: 8453
+      from: "0x5555555555555555555555555555555555555555"
+      to: "0x6666666666666666666666666666666666666666"
+      value_wei: "0"
+      # transfer(0x4444…4444, 524,300e18) = 1% of balance, ~$2,501: allowed on its own
+      data: "0xa9059cbb0000000000000000000000004444444444444444444444444444444444444444000000000000000000000000000000000000000000006f065c25cb8bd8b00000"
+    provenance: {labels: [trusted_user]}
+  - id: req_fixture_0005
+    tenant: test
+    nonce: cmVwbGF5LW5vbmNlLTAwMDU
+    issued_at: "2026-02-10T09:00:00Z"   # template: the replay sets it to now + issued_at_offset
+    ttl_seconds: 60
+    actor: {agent_id: defi-agent}
+    action:
+      kind: evm_tx
+      chain_id: 8453
+      from: "0x5555555555555555555555555555555555555555"
+      to: "0x6666666666666666666666666666666666666666"
+      value_wei: "0"
+      # transfer(0x4444…4444, 524,300e18) = 1% of balance, ~$2,501: allowed on its own
+      data: "0xa9059cbb0000000000000000000000004444444444444444444444444444444444444444000000000000000000000000000000000000000000006f065c25cb8bd8b00000"
+    provenance: {labels: [trusted_user]}
+expected:
+  outcome: reject
+  at_step: 1
+  code: NONCE_REPLAYED

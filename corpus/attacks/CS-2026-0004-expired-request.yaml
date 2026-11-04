@@ -1,0 +1,33 @@
+id: CS-2026-0004
+title: Stale request presented after its TTL (delayed or captured request)
+category: freshness.expired
+target: agent_wallet.evm
+description: >
+  A request that would be allowed on its merits arrives 400 seconds after it was issued, past its
+  60-second TTL plus clock skew: held back by a compromised relay, or captured and presented later.
+  The gateway must refuse it before evaluation, whatever the policy would say.
+setup:
+  known_destinations: ["0x4444444444444444444444444444444444444444"]
+  balances: {LOBSTAR: "52430000"}
+  prices_usd: {LOBSTAR: "0.00477"}
+  tokens: {"0x6666666666666666666666666666666666666666": {symbol: LOBSTAR, decimals: 18}}
+  issued_at_offset: "-400s"
+request:
+  id: req_fixture_0004
+  tenant: test
+  nonce: ZXhwaXJlZC1ub25jZS0wMDA0
+  issued_at: "2026-02-10T09:00:00Z"   # template: the replay sets it to now + issued_at_offset
+  ttl_seconds: 60
+  actor: {agent_id: defi-agent}
+  action:
+    kind: evm_tx
+    chain_id: 8453
+    from: "0x5555555555555555555555555555555555555555"
+    to: "0x6666666666666666666666666666666666666666"
+    value_wei: "0"
+    # transfer(0x4444…4444, 524,300e18) = 1% of balance, ~$2,501: allowed on its own
+    data: "0xa9059cbb0000000000000000000000004444444444444444444444444444444444444444000000000000000000000000000000000000000000006f065c25cb8bd8b00000"
+  provenance: {labels: [trusted_user]}
+expected:
+  outcome: reject
+  code: EXPIRED
