@@ -62,7 +62,7 @@ func loadSpikeBundle(t testing.TB) spikeBundle {
 // evaluate implements deny > escalate > allow with default deny, failing
 // closed on any evaluation error in either set.
 func (b spikeBundle) evaluate(req cedar.Request) (spikeOutcome, []cedar.PolicyID) {
-	d, diag := b.main.IsAuthorized(nil, req)
+	d, diag := cedar.Authorize(b.main, nil, req)
 	if len(diag.Errors) > 0 {
 		return "deny:FAIL_CLOSED_POLICY", nil
 	}
@@ -70,7 +70,7 @@ func (b spikeBundle) evaluate(req cedar.Request) (spikeOutcome, []cedar.PolicyID
 		return "deny", reasons(diag)
 	}
 	// Escalate set has no permits, so "matched" means a forbid fired.
-	_, ediag := b.escalate.IsAuthorized(nil, req)
+	_, ediag := cedar.Authorize(b.escalate, nil, req)
 	if len(ediag.Errors) > 0 {
 		return "deny:FAIL_CLOSED_POLICY", nil
 	}
@@ -211,7 +211,7 @@ func TestSpikeEvalErrorsAreSkipped(t *testing.T) {
 	}
 	// pct_of_balance missing entirely (e.g. balance enricher returned nothing).
 	req := request("transfer", cedar.RecordMap{})
-	d, diag := ps.IsAuthorized(nil, req)
+	d, diag := cedar.Authorize(ps, nil, req)
 	if d != cedar.Allow || len(diag.Errors) == 0 {
 		t.Fatalf("expected raw Cedar to Allow with errors (fail-open); got %v, %d errors", d, len(diag.Errors))
 	}

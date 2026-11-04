@@ -31,11 +31,14 @@ step "binaries start"
 go run ./cmd/stopbard
 go run ./cmd/stopbar
 
-if command -v golangci-lint >/dev/null; then
-  step golangci-lint; golangci-lint run
-else
-  echo "skip golangci-lint (not installed; CI runs v1.64.8)"
-fi
+# Lint is required: a skipped lint let a CI failure through once.
+PATH="$(go env GOPATH)/bin:$PATH"
+command -v golangci-lint >/dev/null || {
+  echo "golangci-lint missing. Install the CI version:"
+  echo "  GOTOOLCHAIN=local go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8"
+  exit 1
+}
+step golangci-lint; golangci-lint run
 if [[ "${OFFLINE:-0}" != 1 ]]; then
   step govulncheck; GOTOOLCHAIN=local go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 fi
