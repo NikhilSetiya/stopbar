@@ -46,6 +46,7 @@ Sits between the requester (agent, service, UI) and the signer, in a **separate 
 
 - Not a wallet or a key custodian (v1 wraps existing signers).
 - Not a prompt-injection classifier. Deterministic controls first; ML signals are inputs, never the last line.
+- Not unproven by design: every control is rated against a threat tier (injected model, agent error, compromised requester, scheming agent), and the research track measures it on an external benchmark.
 - Not a blockchain. Borrows the wallet pattern (keys, policy, signed logs) without a chain.
 
 ## Docs
@@ -65,6 +66,7 @@ Sits between the requester (agent, service, UI) and the signer, in a **separate 
 |---|---|---|
 | 0 Foundations | Weeks 0–2 | Repo, CI, core data model, decision contract |
 | 1 Agent-wallet MVP | Weeks 2–8 | Gatekeeper proxy for EVM agent wallets; replay suite blocks seed attacks |
+| 1R Research track | Weeks 4–10 (parallel) | AgentDojo eval: no defence vs LLM monitor vs Countersign vs both; adaptive attacker; scheming-agent setting; public write-up |
 | 2 Corpus & community | Weeks 8–12 | Open corpus, contribution flow, public launch |
 | 3 Code-mode agents | Months 3–9 | Policy on every binding call inside agent sandboxes |
 | 4 Custody grade | Year 2 | Co-signer mode (Safe guard / MPC share), HSM/TEE, deploy correlation |

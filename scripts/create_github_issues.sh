@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 python3 - "$REPO" <<'PY'
 import csv, json, subprocess, sys, time
 repo = sys.argv[1]
-PH = {"P0":"Phase 0 - Foundations","P1":"Phase 1 - Agent-wallet MVP","P2":"Phase 2 - Corpus & community",
+PH = {"P0":"Phase 0 - Foundations","P1":"Phase 1 - Agent-wallet MVP","P1R":"Phase 1R - Research track","P2":"Phase 2 - Corpus & community",
       "P3":"Phase 3 - Code-mode agents","P4":"Phase 4 - Custody grade"}
 THIN = set()
 for line in open("docs/TASKS.md"):

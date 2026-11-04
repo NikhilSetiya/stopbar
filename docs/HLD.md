@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| Version | 0.1 (draft) |
-| Date | 2026-11-02 |
+| Version | 0.2 (draft) |
+| Date | 2026-11-04 |
 | Related | [PRD](PRD.md) · [LLD](LLD.md) |
 
 ---
@@ -89,6 +89,12 @@ flowchart TB
 | **Provenance SDK** | In-agent library labelling inputs and attaching taint to requests | Runs in untrusted requester; its labels are *claims* |
 | **Corpus + replay harness** | Attack library; replays against policy bundles in CI | Offline |
 | **CLI / Admin** | init, policy test/apply, approvals, audit verify | Operator |
+| **Shadow LLM monitor** (Phase 1R) | Scores each request from the agent transcript + proposed action; records a verdict, never blocks in production | Untrusted signal; research only until Phase 1R shows complementarity, then escalate-only |
+| **Eval harness** (Phase 1R) | Python; AgentDojo adapter, four arms, adaptive attacker, T4 setting | Offline |
+
+### Trust boundary: harness vs. model
+
+v1 assumes the **harness** (agent framework + Provenance SDK) is trusted and the **model** is not. That covers T1 and T2 (PRD §2.4). It does not cover T3 or T4: a compromised requester or a scheming agent that controls code can forge, strip or launder labels. Against T3/T4 only controls that live inside Countersign hold: caps, allowlists, circuit breaker, gatekeeper mode.
 
 ### Note on provenance trust
 
@@ -170,6 +176,8 @@ sequenceDiagram
 
 ## 8. Threat model (summary)
 
+Controls are rated by tier (PRD §2.4): T1 injected model, T2 agent error, T3 compromised requester, T4 scheming agent.
+
 | Adversary capability | Example | Primary controls |
 |---|---|---|
 | Controls agent context | Prompt injection, encoded payloads | Provenance taint, allowlists, caps |
@@ -182,8 +190,30 @@ sequenceDiagram
 | Stale/manipulated prices | Oracle attack to under-value transfer | Multiple sources, staleness bound → escalate, caps also on token count |
 | DoS on Countersign | Flood requests | Fail closed (safety over liveness); per-requester API limits; HA in Phase 4 |
 | Address poisoning | Look-alike destination | Similarity detection vs. known destinations → escalate |
+| Scheming agent (T4) | Hidden side task; launders taint; stays under thresholds | Caps, allowlists, circuit breaker only in v1; field-level taint in sandbox bindings (Phase 3); evaluated in Phase 1R |
+| Salami draining | Many sub-threshold transfers | Velocity caps + per-destination count caps |
+| Allowed-but-destructive action | Swap via allowlisted DEX with `amountOutMin = 0` | `min_out_zero` / `excessive_slippage` flags → deny/escalate |
+| Approval fatigue | Approver rubber-stamps | Escalation-rate budget; rendering bound to payload hash |
 
 Full STRIDE table maintained in LLD §14.
+
+## 8a. Research evaluation architecture (Phase 1R)
+
+```mermaid
+flowchart LR
+    AD[AgentDojo suite<br/>user tasks + injection tasks] --> AG[Agent under test]
+    AG -->|tool call| AD2[Defence adapter]
+    AD2 -->|ActionRequest tool_call + taint| CS[countersignd]
+    AD2 -->|transcript + call| MON[LLM monitor]
+    CS -->|verdict| ARB{Arm}
+    MON -->|verdict| ARB
+    ARB -->|allow| TOOL[AgentDojo tool]
+    ARB -->|block → tool error| AG
+    CS & MON --> LOG[(Shadow log JSONL)]
+    LOG --> AN[Analysis: ASR, utility, disagreement matrix]
+```
+
+Arms decide who enforces; shadow logging means both verdicts are recorded in every arm. The same `countersignd` binary serves product and research, so results apply to the shipped engine.
 
 ## 9. Failure behaviour
 
@@ -200,6 +230,7 @@ Full STRIDE table maintained in LLD §14.
 | State | bbolt (sidecar), Postgres + Redis (service) | Embedded for dev; durable + atomic counters for prod |
 | EVM | go-ethereum ABI + 4byte selector DB | Mature decoding |
 | SDKs | TypeScript, Python | Where agent builders are |
+| Research harness | Python + AgentDojo | Benchmark CaMeL was scored on; comparable results |
 | Audit anchoring | Sigstore Rekor (optional) | Public transparency log without a blockchain |
 | Keys | Local (dev), AWS KMS, Turnkey; HSM/Nitro Enclave Phase 4 | Progressive hardening |
 | Observability | OpenTelemetry, Prometheus | Standard |

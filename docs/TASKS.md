@@ -9,7 +9,8 @@ Estimates are focused build days for one engineer. IDs are stable; reference the
 | Phase | Tasks | Est. days |
 |---|---|---|
 | Phase 0 - Foundations (weeks 0-2) | 9 | 9 |
-| Phase 1 - Agent-wallet MVP (weeks 2-8) | 40 | 69.5 |
+| Phase 1 - Agent-wallet MVP (weeks 2-8) | 41 | 71 |
+| Phase 1R - Research track (parallel, weeks 4-10) | 11 | 21.5 |
 | Phase 2 - Corpus & community (weeks 8-12) | 6 | 12.5 |
 | Phase 3 - Code-mode agents (months 3-9) | 7 | 35 |
 | Phase 4 - Custody grade (year 2) | 8 | 65 |
@@ -85,6 +86,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 | CS-141 | EVM decoder core | Native, ERC-20/721/1155, Permit2, multicall, Safe execTransaction; recursion depth 4. | Golden tests for each type. | 3d | CS-005 | FR-IR-1 |
 | CS-142 | Risk flags | unlimited_approval, delegatecall, proxy_upgrade, new/similar destination, first_time_contract, opaque, unknown_call. | Each flag has positive + negative test. | 2d | CS-141,CS-133 | FR-IR-2 |
 | CS-143 | Human renderer + checksum phrase | Plain-language template + 6-word address checksum. | Snapshot tests; look-alike addresses yield different phrases. | 1.5d | CS-142 | FR-IR-3 |
+| CS-145 | Destructive-action flags + salami caps | min_out_zero and excessive_slippage flags for known swap routers; default per-destination count cap for non-allowlisted destinations. | Zero-min-out swap fixture denied; 6 sub-cap transfers to new destination escalate. | 1.5d | CS-142,CS-121 | FR-IR-2, FR-LIM-2a |
 | CS-144 | Decoder fuzzing | Go native fuzz targets on calldata. | 24h fuzz run with no panics. | 1d | CS-141 |  |
 
 ### E6 Escalation
@@ -135,6 +137,24 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 | CS-196 | Docker image + binaries | goreleaser; signed releases (cosign); SBOM. | Release artifacts signed and verifiable. | 1d | CS-003 | FR-DX-2, NFR-7 |
 | CS-197 | Benchmarks | Latency/throughput benchmarks vs. NFR-1/2. | p99 < 25ms sidecar at 1k rps published in docs. | 1.5d | CS-104 |  |
 | CS-198 | Quickstart + E2E demo | Anvil + sample agent + attack replay video/GIF. | Demo reproducible from README. | 1.5d | CS-195,CS-193 |  |
+
+## Phase 1R - Research track (parallel, weeks 4-10)
+
+### E15 Research eval
+
+| ID | Task | Detail | Acceptance criteria | Est | Depends | Refs |
+|---|---|---|---|---|---|---|
+| CS-501 | Threat-tier ADR | docs/adr/0005-threat-tiers.md: T1-T4 definitions, harness-vs-model trust boundary, which controls hold per tier. | ADR merged; PRD §2.4 and HLD §8 reference it. | 0.5d | CS-009 | PRD §2.4 |
+| CS-502 | Tool-call policy schema + AgentDojo pack | Cedar context for tool_call (tool, recipient_external, amount, taint); examples/policies/agentdojo.cedar written before viewing injection tasks. | Bundle validates; hash frozen and recorded. | 2d | CS-112 | LLD §18.4 |
+| CS-503 | AgentDojo defence adapter | Python adapter: tool call -> ActionRequest -> /v1/evaluate; block returns tool error with reason codes. | Benign banking suite runs end-to-end through countersignd. | 3d | CS-101,CS-104,CS-502 | FR-EVAL-1, LLD §18.1 |
+| CS-504 | Harness provenance labelling | Label user prompt, tool outputs and AgentDojo injectable fields; session-level taint. | Injected-field outputs carry untrusted_* labels in the shadow log. | 1.5d | CS-503 | LLD §18.1 |
+| CS-505 | LLM monitor | Versioned monitor prompt; frontier + open-weight model; threshold set on held-out calibration split. | Monitor verdicts reproducible at temperature 0 on a fixed sample. | 1.5d | CS-503 | LLD §18.3 |
+| CS-506 | Shadow logging | Record policy and monitor verdicts on every call in every arm (JSONL schema §18.5). | Schema-validated log; both verdicts present for 100% of calls. | 1d | CS-505 | FR-EVAL-3 |
+| CS-507 | Four-arm runner | A0-A3 across suites, attacks, seeds; pinned run config; `make eval`. | Full matrix runs from one command; results folder reproducible. | 2d | CS-504,CS-506 | FR-EVAL-2,6 |
+| CS-508 | Metrics + analysis | Benign utility, utility under attack, ASR, disagreement matrix, bootstrap CIs, latency per arm. | Notebook regenerates all tables/figures from raw JSONL. | 2d | CS-507 | PRD §9, LLD §18.6 |
+| CS-509 | Adaptive attacker | Attacker LLM with policy text + denial reasons, N=10 attempts; tries allowlist routing, amount splitting, ungated tools. | Adaptive ASR reported per arm with examples of successful bypasses. | 3d | CS-507 | FR-EVAL-4 |
+| CS-510 | Scheming-agent (T4) setting | Covert side task in agent system prompt with user task as cover; no injection. | T4 containment reported for A0 vs A2. | 3d | CS-507 | FR-EVAL-5 |
+| CS-511 | Results write-up | Preliminary report: method, results, failure cases, limitations; reproducibility package. | Published (repo + LessWrong/arXiv); every number traceable to a run folder. | 2d | CS-508,CS-509,CS-510 | G6 |
 
 ## Phase 2 - Corpus & community (weeks 8-12)
 

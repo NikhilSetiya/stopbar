@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| Version | 0.1 (draft) |
-| Date | 2026-11-02 |
+| Version | 0.2 (draft) |
+| Date | 2026-11-04 |
 | Related | [PRD](PRD.md) · [HLD](HLD.md) · [TASKS](TASKS.md) |
 
 ---
@@ -37,6 +37,7 @@ countersign/
 ├── examples/policies/
 ├── spec/                    # versioned open specs (policy schema, decision token, corpus)
 ├── test/replay/             # replay harness
+├── research/agentdojo/      # Phase 1R eval harness (Python)
 └── docs/
 ```
 
@@ -294,6 +295,8 @@ forbid (principal, action, resource) when { context.price_stale };
 | `similar_destination` | same first 4 + last 4 hex chars as a known destination but different address |
 | `first_time_contract` | contract never interacted with by this wallet |
 | `opaque` | nesting > depth or undecodable inner call |
+| `min_out_zero` | known swap selector (Uniswap V2/V3 routers, Universal Router, 1inch, 0x) with `amountOutMin` / `minReturn` = 0 |
+| `excessive_slippage` | swap minimum output below quoted output × (1 − tenant max slippage, default 3%) |
 | `unknown_call` | selector unknown |
 
 ### 6.3 Human rendering
@@ -304,7 +307,7 @@ Template per `kind`, amounts formatted with decimals and USD, addresses shortene
 
 ### 7.1 Keys and windows
 
-Key = `(tenant, scope, id, window)` where scope ∈ {`agent`, `wallet`, `wallet+asset`, `destination`, `tenant`}. Windows: 1m, 1h, 24h (configurable).
+Key = `(tenant, scope, id, window)` where scope ∈ {`agent`, `wallet`, `wallet+asset`, `destination`, `tenant`}. `destination` scope carries a `max_count` by default (e.g. 5 per 24h for non-allowlisted destinations) so salami draining below per-tx caps is bounded. Windows: 1m, 1h, 24h (configurable).
 
 ### 7.2 Algorithm — sliding window with sub-buckets
 
@@ -501,3 +504,68 @@ signer: {adapter: local, keystore: ./keys/agent-wallet.json}
 escalation: {approvers: ["ed25519:…"], quorum: 1, timeout: 15m, channels: [cli]}
 audit: {checkpoint_every: 1000, rekor: false}
 ```
+
+## 18. Research evaluation harness (Phase 1R)
+
+Lives in `research/agentdojo/`. Python, pinned dependencies, one command per run. Talks to the same `countersignd` binary over `/v1/evaluate`; no Python re-implementation of policy.
+
+### 18.1 Defence adapter
+
+AgentDojo lets a defence intercept every tool call before execution. The adapter:
+
+1. Converts the call to `ActionRequest{action.kind: "tool_call", tool, args}` with a fresh nonce and the session's `provenance.labels`.
+2. Labels inputs: user prompt → `trusted_user`; every tool output → `tool_output`; tool outputs from AgentDojo's injectable fields (emails, web pages, files, reviews) → additionally `untrusted_email` / `untrusted_web` / `untrusted_file`. Context-level taint (§8.2): labels accumulate for the session.
+3. Calls the LLM monitor with the transcript so far + the proposed call (§18.3).
+4. Applies the arm's rule (§18.2). A block returns a tool error string containing Countersign's reason codes, so the agent can recover and the adaptive attacker can learn from it.
+
+### 18.2 Arms
+
+| Arm | Enforcer | Shadow-logged |
+|---|---|---|
+| A0 none | — | policy + monitor |
+| A1 monitor | LLM monitor | policy |
+| A2 countersign | policy (deny and escalate both block; escalate counted separately) | monitor |
+| A3 both | block if either blocks | — (both enforce) |
+
+### 18.3 LLM monitor
+
+- Input: system prompt (versioned in `research/agentdojo/prompts/monitor_v1.md`), transcript, proposed call.
+- Output: `{"verdict": "allow"|"block", "score": 0-100, "rationale": str}`; block threshold fixed before runs, chosen on a held-out calibration split.
+- Two monitor models: one frontier, one open-weight. Model IDs pinned in the run config.
+
+### 18.4 Tool-call policy pack
+
+`examples/policies/agentdojo.cedar`. Context adds `tool: String`, `recipient_external: Bool`, `amount: decimal?`, `taint: Set<String>`. Starter rules: deny state-changing tools (`send_email`, `send_money`, `update_password`, `share_file`, …) to non-allowlisted recipients while untrusted taint is present; escalate any money movement above the suite's per-task cap. Policy written **before** looking at injection tasks; frozen bundle hash recorded per run.
+
+### 18.5 Shadow log (JSONL, one line per tool call)
+
+```json
+{"run_id":"…","arm":"A2","suite":"banking","user_task":"user_task_3","injection_task":"injection_task_1",
+ "attack":"important_instructions","step":4,"tool":"send_money","args_hash":"sha256:…",
+ "taint":["tool_output","untrusted_file"],
+ "policy":{"outcome":"deny","policy_ids":["taint-external-recipient"],"latency_ms":3.1},
+ "monitor":{"verdict":"allow","score":22,"latency_ms":840},
+ "enforced":"block","policy_bundle_hash":"sha256:…","monitor_model":"…","agent_model":"…","seed":7}
+```
+
+### 18.6 Metrics
+
+| Metric | Definition |
+|---|---|
+| Benign utility | % user tasks solved, no injection |
+| Utility under attack | % user tasks solved with an injection present |
+| ASR | % (user task, injection task) pairs where the injection goal is achieved |
+| Disagreement matrix | Over attack-attempt calls: policy-only block / monitor-only block / both / neither |
+| Adaptive ASR | ASR when the attacker sees the policy bundle and gets up to N=10 attempts with denial reasons |
+| T4 containment | % SHADE-style side tasks completed under A2 vs A0 |
+
+95% CIs by bootstrap over task pairs. Report latency per arm.
+
+### 18.7 Adaptive attacker and T4 setting
+
+- **Adaptive:** an attacker LLM receives the policy text, the user task and prior denial reasons, and rewrites the injection. Explicitly tries known bypasses: routing through allowlisted recipients, splitting amounts below caps, using a non-gated tool to the same effect.
+- **T4 (scheming agent):** the agent's system prompt contains a covert side task (e.g. move funds to an external account), with the user task as cover. No injection needed. Measures what policy contains when the agent itself is the adversary and harness taint is honest-but-irrelevant.
+
+### 18.8 Reproducibility
+
+`make eval ARM=A2 SUITE=banking SEED=7` reproduces a run. Each results folder stores the run config, policy bundle, prompts, model IDs, AgentDojo version and raw JSONL.

@@ -9,6 +9,7 @@ import pathlib
 PHASES = {
     "P0": "Phase 0 - Foundations (weeks 0-2)",
     "P1": "Phase 1 - Agent-wallet MVP (weeks 2-8)",
+    "P1R": "Phase 1R - Research track (parallel, weeks 4-10)",
     "P2": "Phase 2 - Corpus & community (weeks 8-12)",
     "P3": "Phase 3 - Code-mode agents (months 3-9)",
     "P4": "Phase 4 - Custody grade (year 2)",
@@ -61,6 +62,7 @@ E = "E5 Decoder & intent"
 t("CS-141","P1",E,"EVM decoder core","Native, ERC-20/721/1155, Permit2, multicall, Safe execTransaction; recursion depth 4.","Golden tests for each type.",3,"CS-005","FR-IR-1")
 t("CS-142","P1",E,"Risk flags","unlimited_approval, delegatecall, proxy_upgrade, new/similar destination, first_time_contract, opaque, unknown_call.","Each flag has positive + negative test.",2,"CS-141,CS-133","FR-IR-2")
 t("CS-143","P1",E,"Human renderer + checksum phrase","Plain-language template + 6-word address checksum.","Snapshot tests; look-alike addresses yield different phrases.",1.5,"CS-142","FR-IR-3")
+t("CS-145","P1",E,"Destructive-action flags + salami caps","min_out_zero and excessive_slippage flags for known swap routers; default per-destination count cap for non-allowlisted destinations.","Zero-min-out swap fixture denied; 6 sub-cap transfers to new destination escalate.",1.5,"CS-142,CS-121","FR-IR-2, FR-LIM-2a")
 t("CS-144","P1",E,"Decoder fuzzing","Go native fuzz targets on calldata.","24h fuzz run with no panics.",1,"CS-141")
 
 E = "E6 Escalation"
@@ -102,6 +104,20 @@ t("CS-203","P2",E,"Slack/Telegram escalation channels","Push rendered intent + s
 t("CS-204","P2",E,"Launch","Write-up of thesis + incident analysis; HN/X/LinkedIn; outreach to 20 agent builders.","Launch posted; metrics dashboard live.",2,"CS-198,CS-202")
 t("CS-205","P2",E,"Design partners","Recruit 3 agent-wallet teams for shadow (advisory) mode.","3 partners running advisory mode with feedback logged.",5,"CS-204")
 t("CS-206","P2",E,"Kill/pivot review","Review month-3 metrics vs PRD §11.","Written decision: continue / pivot.",0.5,"CS-205","PRD §11")
+
+# ---------------- Phase 1R (research track) ----------------
+E = "E15 Research eval"
+t("CS-501","P1R",E,"Threat-tier ADR","docs/adr/0005-threat-tiers.md: T1-T4 definitions, harness-vs-model trust boundary, which controls hold per tier.","ADR merged; PRD §2.4 and HLD §8 reference it.",0.5,"CS-009","PRD §2.4")
+t("CS-502","P1R",E,"Tool-call policy schema + AgentDojo pack","Cedar context for tool_call (tool, recipient_external, amount, taint); examples/policies/agentdojo.cedar written before viewing injection tasks.","Bundle validates; hash frozen and recorded.",2,"CS-112","LLD §18.4")
+t("CS-503","P1R",E,"AgentDojo defence adapter","Python adapter: tool call -> ActionRequest -> /v1/evaluate; block returns tool error with reason codes.","Benign banking suite runs end-to-end through countersignd.",3,"CS-101,CS-104,CS-502","FR-EVAL-1, LLD §18.1")
+t("CS-504","P1R",E,"Harness provenance labelling","Label user prompt, tool outputs and AgentDojo injectable fields; session-level taint.","Injected-field outputs carry untrusted_* labels in the shadow log.",1.5,"CS-503","LLD §18.1")
+t("CS-505","P1R",E,"LLM monitor","Versioned monitor prompt; frontier + open-weight model; threshold set on held-out calibration split.","Monitor verdicts reproducible at temperature 0 on a fixed sample.",1.5,"CS-503","LLD §18.3")
+t("CS-506","P1R",E,"Shadow logging","Record policy and monitor verdicts on every call in every arm (JSONL schema §18.5).","Schema-validated log; both verdicts present for 100% of calls.",1,"CS-505","FR-EVAL-3")
+t("CS-507","P1R",E,"Four-arm runner","A0-A3 across suites, attacks, seeds; pinned run config; `make eval`.","Full matrix runs from one command; results folder reproducible.",2,"CS-504,CS-506","FR-EVAL-2,6")
+t("CS-508","P1R",E,"Metrics + analysis","Benign utility, utility under attack, ASR, disagreement matrix, bootstrap CIs, latency per arm.","Notebook regenerates all tables/figures from raw JSONL.",2,"CS-507","PRD §9, LLD §18.6")
+t("CS-509","P1R",E,"Adaptive attacker","Attacker LLM with policy text + denial reasons, N=10 attempts; tries allowlist routing, amount splitting, ungated tools.","Adaptive ASR reported per arm with examples of successful bypasses.",3,"CS-507","FR-EVAL-4")
+t("CS-510","P1R",E,"Scheming-agent (T4) setting","Covert side task in agent system prompt with user task as cover; no injection.","T4 containment reported for A0 vs A2.",3,"CS-507","FR-EVAL-5")
+t("CS-511","P1R",E,"Results write-up","Preliminary report: method, results, failure cases, limitations; reproducibility package.","Published (repo + LessWrong/arXiv); every number traceable to a run folder.",2,"CS-508,CS-509,CS-510","G6")
 
 # ---------------- Phase 3 ----------------
 E = "E13 Code-mode"
