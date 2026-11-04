@@ -54,11 +54,12 @@ func TestTrustMapIsPartOfTheBundleHash(t *testing.T) {
 
 func TestTrustMapValidation(t *testing.T) {
 	for name, bad := range map[string]string{
-		"unknown field":                    `{"read_only_tools":["a"],"state_changing_tools":[],"untrusted_output_tools":[],"account_identity_tools":[],"rationale":{"a":"x"},"extra":1}`,
-		"tool in both lists":               `{"read_only_tools":["a"],"state_changing_tools":["a"],"untrusted_output_tools":[],"account_identity_tools":[],"rationale":{"a":"x"}}`,
-		"untrusted tool not declared":      `{"read_only_tools":["a"],"state_changing_tools":[],"untrusted_output_tools":["b"],"account_identity_tools":[],"rationale":{"a":"x"}}`,
-		"identity tool not state-changing": `{"read_only_tools":["a"],"state_changing_tools":[],"untrusted_output_tools":[],"account_identity_tools":["a"],"rationale":{"a":"x"}}`,
-		"missing rationale":                `{"read_only_tools":["a"],"state_changing_tools":[],"untrusted_output_tools":[],"account_identity_tools":[],"rationale":{}}`,
+		"unknown field":                    `{"principle":"p","read_only_tools":["a"],"state_changing_tools":[],"untrusted_output_tools":[],"account_identity_tools":[],"rationale":{"a":"x"},"extra":1}`,
+		"tool in both lists":               `{"principle":"p","read_only_tools":["a"],"state_changing_tools":["a"],"untrusted_output_tools":[],"account_identity_tools":[],"rationale":{"a":"x"}}`,
+		"untrusted tool not declared":      `{"principle":"p","read_only_tools":["a"],"state_changing_tools":[],"untrusted_output_tools":["b"],"account_identity_tools":[],"rationale":{"a":"x"}}`,
+		"identity tool not state-changing": `{"principle":"p","read_only_tools":["a"],"state_changing_tools":[],"untrusted_output_tools":[],"account_identity_tools":["a"],"rationale":{"a":"x"}}`,
+		"missing principle":                `{"read_only_tools":["a"],"state_changing_tools":[],"untrusted_output_tools":[],"account_identity_tools":[],"rationale":{"a":"x"}}`,
+		"missing rationale":                `{"principle":"p","read_only_tools":["a"],"state_changing_tools":[],"untrusted_output_tools":[],"account_identity_tools":[],"rationale":{}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := copyBundle(t, func(n string, b []byte) []byte {
@@ -103,14 +104,15 @@ func TestBankingPackSessionTaint(t *testing.T) {
 		}
 		return pr.Outcome, ids
 	}
-	// Clean session: reads and money movement allowed; identity changes escalate.
+	// Clean session: every declared tool is allowed.
 	for _, tc := range []struct {
 		tool string
 		want model.Outcome
 	}{
 		{"get_balance", model.Allow}, {"get_iban", model.Allow}, {"get_user_info", model.Allow},
 		{"send_money", model.Allow}, {"schedule_transaction", model.Allow}, {"update_scheduled_transaction", model.Allow},
-		{"update_password", model.Escalate}, {"update_user_info", model.Escalate},
+		// Amendment 2: no identity-change rule in the pilot pack.
+		{"update_password", model.Allow}, {"update_user_info", model.Allow},
 	} {
 		if got, ids := call("clean", tc.tool); got != tc.want {
 			t.Errorf("clean session %s: %s %v, want %s", tc.tool, got, ids, tc.want)

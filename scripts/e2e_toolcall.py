@@ -1,8 +1,8 @@
 """Tool-call smoke test against a live stopbard running a tool-call bundle (scripts/e2e.sh).
 
 Usage: e2e_toolcall.py PATH/TO/stopbard BUNDLE_DIR
-A synthetic session, built from tool names only (no AgentDojo task): a clean
-transfer is allowed; reading an untrusted-output tool taints the session;
+A synthetic session, built from tool names only (no AgentDojo task): clean
+state changes are allowed; reading an untrusted-output tool taints the session;
 the next state-changing call is denied; reads stay allowed; an undeclared
 tool fails closed; a call without a session ID fails closed.
 """
@@ -34,7 +34,7 @@ with tempfile.TemporaryDirectory() as tmp:
         addr = line.rsplit(" ", 1)[1].strip()
         for i, (name, body, want_status, want) in enumerate([
             ("clean transfer allowed", req(0, "send_money", "clean", {"recipient": "X", "amount": 1}), 200, None),
-            ("identity change escalates", req(1, "update_password", "clean", {"password": "p"}), 202, "account-identity-change"),
+            ("clean identity change allowed (no identity rule in the pilot pack)", req(1, "update_password", "clean", {"password": "p"}), 200, None),
             ("untrusted read allowed", req(2, "read_file", args={"file_path": "f"}), 200, None),
             ("state change after untrusted read denied", req(3, "send_money", args={"recipient": "X", "amount": 1}), 403, "tainted-state-change"),
             ("reads stay allowed", req(4, "get_balance"), 200, None),

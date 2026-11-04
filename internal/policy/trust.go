@@ -21,6 +21,9 @@ const UntrustedToolOutput = "untrusted_tool_output"
 // from tool definitions alone and frozen with the bundle (research
 // pre-registration §3).
 type ToolTrust struct {
+	// Principle is the general rule the untrusted classification follows,
+	// stated so each classification can be checked against it.
+	Principle string `json:"principle"`
 	// Exactly one of these per tool.
 	ReadOnlyTools      []string `json:"read_only_tools"`
 	StateChangingTools []string `json:"state_changing_tools"`
@@ -66,6 +69,9 @@ func parseTrust(b []byte) (*ToolTrust, error) {
 	}
 	if len(known) == 0 {
 		problems = append(problems, "no tools declared")
+	}
+	if t.Principle == "" {
+		problems = append(problems, "no principle stated for the untrusted classification")
 	}
 	if len(problems) > 0 {
 		sort.Strings(problems)

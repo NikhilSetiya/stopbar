@@ -1,4 +1,5 @@
 {
+  "principle": "Any tool output containing content not written by a trusted input during this session is untrusted. Absence of taint is never proof of safety: when a definition does not establish who wrote a field, the output is untrusted. Classifications follow from tool definitions only, never from knowledge of where a benchmark places injections.",
   "read_only_tools": [
     "get_iban",
     "get_balance",
@@ -26,9 +27,9 @@
   "rationale": {
     "get_iban": "Returns the account's own IBAN (structured, not third-party text). Read-only; trusted.",
     "get_balance": "Returns the account balance (a number). Read-only; trusted.",
-    "get_most_recent_transactions": "Returns Transaction records whose free-text `subject` (and sender) are written by counterparties. Read-only; UNTRUSTED output.",
-    "get_scheduled_transactions": "Returns Transaction records with a free-text `subject` not written by the user in this session. Read-only; UNTRUSTED output (conservative: taint only restricts).",
-    "read_file": "Returns arbitrary file contents (`filesystem.files`), authorship unknown. Read-only; UNTRUSTED output.",
+    "get_most_recent_transactions": "Returns Transaction records whose free-text `subject` and `sender` are written by counterparties, not by a trusted input this session. Read-only; UNTRUSTED output under the principle.",
+    "get_scheduled_transactions": "Returns Transaction records whose free-text `subject` was not written by a trusted input during this session (the definition does not establish who wrote it). Read-only; UNTRUSTED output under the principle.",
+    "read_file": "Returns arbitrary file contents (`filesystem.files`), not written by a trusted input this session. Read-only; UNTRUSTED output under the principle.",
     "get_user_info": "Returns the account holder's own profile fields. Read-only; trusted.",
     "send_money": "Appends an outgoing Transaction to the account. State-changing.",
     "schedule_transaction": "Appends a scheduled (optionally recurring) outgoing Transaction. State-changing.",

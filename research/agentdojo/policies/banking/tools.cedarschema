@@ -9,7 +9,7 @@ namespace Stopbar {
     resource: [Tool],
     context: {
       state_changing: Bool,     // tool mutates the account (tool-trust.json)
-      account_identity: Bool,   // tool changes credentials or account-holder identity
+      account_identity: Bool,   // tool changes credentials or identity; used by no pilot rule (Amendment 2)
       taint: Set<String>        // includes "untrusted_tool_output" once the session read untrusted content
     }
   };
