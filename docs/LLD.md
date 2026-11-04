@@ -131,7 +131,7 @@ Every component returns typed errors; the engine maps any non-domain error to `d
   "destination": "0x…",
   "flags": ["new_destination"],          // see §6.2
   "human": "Transfer 50,000 DRB (~$174,000) on Base to 0x9f3…c21 (never seen before).",
-  "payload_hash": "keccak256:…"
+  "payload_hash": "sha256:…"
 }
 ```
 
@@ -156,7 +156,7 @@ Every component returns typed errors; the engine maps any non-domain error to `d
   "outcome": "deny",                       // allow | deny | escalate
   "reasons": [{"policy_id": "taint-unknown-destination", "message": "Untrusted on-chain content in context; destination not allowlisted"}],
   "policy_bundle_hash": "sha256:…",
-  "payload_hash": "keccak256:…",
+  "payload_hash": "sha256:…",
   "approvals": [],
   "reservation_id": null,
   "issued_at": "…",
@@ -392,9 +392,12 @@ Rules:
 
 ### 10.1 JWS (gatekeeper / generic)
 
-- Algorithm: EdDSA (Ed25519). Header `kid` maps to `/v1/keys`.
-- Claims: `request_id`, `payload_hash`, `outcome`, `policy_bundle_hash`, `iat`, `exp`, `nonce`, `tenant`.
-- Signer adapters **must** verify the JWS and that `payload_hash` equals the hash of the tx they are about to sign.
+Normative spec: [`spec/decision-token-v1.md`](../spec/decision-token-v1.md), with vectors in `spec/vectors/decision-token-v1.json`.
+
+- Algorithm: EdDSA (Ed25519). The header is exactly `{alg, kid, typ}`, and `kid` is the RFC 7638 thumbprint of a key pinned from `/v1/keys`.
+- Claims (closed set, JCS-canonical): `v`, `iss`, `aud`, `tenant`, `request_id`, `nonce`, `outcome`, `payload_hash`, `policy_bundle_hash`, `reservation_id`, `iat`, `exp`.
+- `payload_hash` = sha256 over JCS of the normalised action (spec §2), not a chain tx hash. Gas, nonce and fees are adapter-chosen and capped.
+- Signer adapters **must** run the spec §4 checks in order. The checks include recomputing `payload_hash` from the tx they are about to sign, and single use per `(iss, tenant, nonce)`.
 
 ### 10.2 EIP-712 (co-signer, Phase 4)
 

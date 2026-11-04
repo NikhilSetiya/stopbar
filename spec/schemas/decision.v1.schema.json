@@ -48,10 +48,12 @@
       }
     },
     "policy_bundle_hash": {
-      "type": "string"
+      "type": "string",
+      "pattern": "^(sha256:[0-9a-f]{64})?$"
     },
     "payload_hash": {
-      "type": "string"
+      "type": "string",
+      "pattern": "^(sha256:[0-9a-f]{64})?$"
     },
     "approvals": {
       "type": "array",

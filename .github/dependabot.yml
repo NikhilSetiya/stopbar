@@ -8,3 +8,8 @@ updates:
   - package-ecosystem: gomod
     directory: /
     schedule: {interval: weekly}
+    ignore:
+      # v1.9.0+ requires Go 1.26; the module targets 1.24 (ADR 0001).
+      # Lift this when go.mod deliberately moves to 1.26.
+      - dependency-name: "github.com/cedar-policy/cedar-go"
+        versions: [">=1.9.0"]

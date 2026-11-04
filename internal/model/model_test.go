@@ -126,7 +126,7 @@ func TestValidateReportsAllProblems(t *testing.T) {
 
 func TestDecisionValidate(t *testing.T) {
 	now := time.Now()
-	base := Decision{RequestID: "r", Outcome: Allow, PolicyBundleHash: "sha256:x", PayloadHash: "keccak256:y", IssuedAt: now, ExpiresAt: now.Add(time.Minute)}
+	base := Decision{RequestID: "r", Outcome: Allow, PolicyBundleHash: "sha256:" + strings.Repeat("a", 64), PayloadHash: "sha256:" + strings.Repeat("b", 64), IssuedAt: now, ExpiresAt: now.Add(time.Minute)}
 	if err := base.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +139,11 @@ func TestDecisionValidate(t *testing.T) {
 	d.PayloadHash = ""
 	if d.Validate() == nil {
 		t.Error("allow without payload binding accepted")
+	}
+	d = base
+	d.PayloadHash = "keccak256:" + strings.Repeat("b", 64)
+	if d.Validate() == nil {
+		t.Error("non-sha256 payload_hash accepted")
 	}
 	d = base
 	d.Outcome = "maybe"
