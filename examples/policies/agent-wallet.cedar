@@ -19,7 +19,7 @@ forbid (principal, action, resource) when { context.flags.contains("delegatecall
 forbid (principal, action, resource) when { context.flags.contains("proxy_upgrade") };
 
 @id("large-share-of-balance") @outcome("escalate")
-forbid (principal, action, resource) when { context.pct_of_balance > decimal("0.20") };
+forbid (principal, action, resource) when { context.pct_of_balance.greaterThan(decimal("0.20")) };
 
 @id("address-poisoning") @outcome("escalate")
 forbid (principal, action, resource) when { context.dest_similar_to_known && !context.dest_known };
