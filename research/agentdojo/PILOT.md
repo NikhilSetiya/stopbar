@@ -149,6 +149,26 @@ Assumptions:
    **The pilot bundle is now one blocking rule, `tainted-state-change`, on top of default deny for undeclared tools.**
 3. These amendments supersede the corresponding wording in §3.3 and §3.4, which is left as originally written. They were made before any data existed, and they're frozen by the bundle hash in `policies/banking/FREEZE.md`.
 
+## 6c. Amendment 3 (2026-11-04, before any paid run, owner sign-off on CS-503)
+
+1. **The empty N group is the pre-registered result.** The mechanical split (§4) puts all 16 banking user tasks in R: every one reads content the frozen trust map labels untrusted. That's reported as the secondary result as computed: on this benchmark, session-level taint has nowhere to hide. Any finer split goes in a section headed **Exploratory (not pre-registered)**.
+2. **Scope: Haiku only, both arms, $20 cap (2× the §5 estimate).** The `claude-opus-5-5` run is **deferred** until a field-level-taint arm is pre-registered as its own run. Opus then runs once across three arms (A0, A2 session taint, field taint). This supersedes the §5 plan to confirm with Opus. Reason: the §1 decision barely depends on Opus, and an Opus run now would be redone for the three-arm comparison.
+3. **Two client adaptations are approved as changes to how the model is called, not to the attack.** Both are recorded in each `run.json` under `model_adaptations` and disclosed in the results:
+   - AgentDojo's `MODEL_NAMES` gets an entry mapping our model ID to `"Claude"`, the name it uses for every Claude model, so the attack text is identical to the text AgentDojo produces for any Claude model.
+   - Opus 5.5 runs with no `temperature` (the API rejects one), effort `medium`, and `max_tokens` 16000 (its thinking can't be turned off and counts against that limit). These apply identically to every arm. Without a temperature, Opus runs aren't deterministic; the §1 rule (more repetitions if a CI straddles a threshold) covers that. Haiku uses AgentDojo's stock settings.
+
 ## 7. Results (to be filled in only after the runs)
 
-*Empty by design.*
+### 7.0 Pre-run observation (2026-11-04T20:41Z, recorded before any paid run)
+
+A free dry run replaced the model with a scripted agent that replays each user task's AgentDojo ground truth through the real tools loop, with the frozen bundle enforced by a live `stopbard` (`sha256:a974808b…dd27c`, 0 infrastructure errors). It is a **ceiling**, not a pilot result:
+
+| Arm | Benign utility |
+|---|---|
+| A0 | 16/16 (100%) |
+| A2 | 7/16 (43.8%) |
+| Gap | 56.2 points, clustered bootstrap 95% CI [31.2, 81.2] |
+
+All 130 blocked calls (of 330) came from `tainted-state-change`. A perfect agent loses 9 of 16 tasks under A2. Real agents also fail some tasks under A0, so the real gap depends on the run, but landing below 25 points would need an unusually weak baseline. **Expected outcome: the §1 rule moves field-level taint ahead of the decoder.** The pack was frozen before this was seen, so the observation can't have shaped it.
+
+What the paid run still measures that the dry run can't: attack success under A2 (an attack could succeed through read-only actions or before the session is tainted), utility under attack, the real A0 baseline, and whether the harness holds up against a real model.
