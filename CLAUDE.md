@@ -6,7 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Stopbar is an open-source **intent firewall for signers**: nothing gets signed or executed (by an AI agent, hot wallet or enterprise system) unless an independent policy engine in a separate trust domain clears it first. Thesis: the attack surface has moved from the key to the request path, since in the big recent incidents no key was stolen. Instead, a trusted signer was fed a malicious request.
 
-Status is pre-alpha. Only `internal/model` (wire types) and `internal/canon` (RFC 8785 JCS and hashing) are implemented. Every other `internal/*` package is a placeholder `doc.go` whose responsibilities are defined in `docs/LLD.md` §1. `cmd/stopbard` (service/sidecar) and `cmd/stopbar` (CLI) only print their version for now.
+Status is pre-alpha. Implemented so far:
+
+- `internal/model`: wire types.
+- `internal/canon`: RFC 8785 JCS and hashing.
+- `internal/gateway`: the HTTP API with strict request checks. See LLD §4 for check order and error codes.
+
+The Cedar spike (`internal/policy`) and the decision-token reference (`internal/decision`) exist only as tests. Every other `internal/*` package is a placeholder `doc.go` whose responsibilities are defined in LLD §1. `cmd/stopbard` serves the gateway on loopback only until auth exists (CS-103). It has no engine until CS-104, so `/v1/evaluate` answers 503.
 
 ## Commands
 

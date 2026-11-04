@@ -20,8 +20,9 @@ else
   step "test (NO RACE: C toolchain unavailable; on macOS run 'sudo xcodebuild -license')"
   CGO_ENABLED=0 go test -count=1 ./...
 fi
-step "fuzz smoke (canonicaliser)"
+step "fuzz smoke (canonicaliser, gateway)"
 go test -run='^$' -fuzz=FuzzTransformIdempotent -fuzztime="${FUZZTIME:-10s}" ./internal/canon/
+go test -run='^$' -fuzz=FuzzEvaluate -fuzztime="${FUZZTIME:-10s}" ./internal/gateway/
 
 step "policy: starter pack validates and combines (CS-007)"
 go test -count=1 -run 'TestSpike' ./internal/policy/
@@ -33,9 +34,26 @@ go test -count=1 -run 'TestDecisionTokenVectors|TestPayloadHash' ./internal/deci
 step "corpus + spec fixtures against schemas"
 python3 scripts/validate_corpus.py
 
-step "binaries start"
-go run ./cmd/stopbard
-go run ./cmd/stopbar
+step "binaries"
+BIN="$(mktemp -d)"
+trap 'kill "${PID:-}" 2>/dev/null || true; rm -rf "$BIN"' EXIT
+go build -o "$BIN/" ./cmd/...
+"$BIN/stopbar"
+"$BIN/stopbard" -version
+
+step "gateway over HTTP (CS-101)"
+if "$BIN/stopbard" -listen 0.0.0.0:0 >/dev/null 2>&1; then
+  echo "FAIL stopbard accepted a non-loopback listen address without auth"; exit 1
+fi
+echo "ok   non-loopback listen refused"
+"$BIN/stopbard" -listen 127.0.0.1:0 >"$BIN/out" 2>"$BIN/log" &
+PID=$!
+for _ in $(seq 50); do grep -q 'listening on' "$BIN/out" 2>/dev/null && break; sleep 0.1; done
+ADDR="$(sed -n 's/.*listening on //p' "$BIN/out")"
+[[ -n "$ADDR" ]] || { echo "stopbard did not start"; cat "$BIN/log"; exit 1; }
+python3 scripts/e2e_gateway.py "http://$ADDR"
+kill -TERM "$PID"; wait "$PID" && echo "ok   graceful shutdown on SIGTERM (exit 0)"
+PID=
 
 # Tool pins; keep in step with .github/workflows/ci.yml.
 GOLANGCI_LINT=v2.15.0
@@ -56,7 +74,7 @@ fi
 
 # Pending stages, enabled as they land:
 #   CS-161/162  real signer + adapter verifier pass spec/vectors/decision-token-v1.json
-#   CS-101/104  POST every corpus request to a running stopbard, assert outcome
+#   CS-104      corpus requests through stopbard assert expected outcome, not 503
 #   CS-171      audit chain verify over the replay run
 #   CS-191..193 full corpus replay (test/replay)
 
