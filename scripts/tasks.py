@@ -54,7 +54,7 @@ t("CS-123","P1",E,"Per-tx and % balance caps","Absolute and pct_of_balance caps 
 t("CS-124","P1",E,"Circuit breaker","Tenant outflow breaker; M-of-N reset via CLI.","Breach -> CIRCUIT_OPEN until reset; alert metric emitted.",1.5,"CS-122","FR-LIM-3")
 
 E = "E4 Enrichment"
-t("CS-131","P1",E,"Price oracle client","Chainlink + CoinGecko with staleness bound and cache.","Stale -> price_stale=true; tests with fake clock.",2,"CS-104","FR-LIM-5")
+t("CS-131","P1",E,"Price oracle client","Chainlink + CoinGecko with staleness bound and cache. Make amount_usd optional in the schema (amount_usd?) so a stale price reaches the stale-price escalate policy instead of failing closed; policies must guard with `context has amount_usd` (unguarded reads error, and errors deny). Rendered intent says \"price unavailable\", never $0.","Stale -> price_stale=true, amount_usd absent, starter pack escalates (stale-price); tests with fake clock; rendering shows \"price unavailable\".",2,"CS-104","FR-LIM-5")
 t("CS-132","P1",E,"Balance provider","RPC balance reads (native + ERC-20) with cache.","Anvil test returns correct balances.",1,"CS-104")
 t("CS-133","P1",E,"Destination registry","Known destinations per tenant; similarity check (prefix/suffix).","Poisoned address flagged similar_to_known.",1.5,"CS-104","FR-IR-2")
 

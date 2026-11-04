@@ -142,7 +142,7 @@ Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decod
 
 | Field | Type | Source |
 |---|---|---|
-| `amount_usd` | decimal | price oracle; `null` + `price_stale=true` if stale. **Note:** the schema requires `amount_usd`, so today a stale price fails closed (deny via `FAIL_CLOSED_POLICY`) rather than reaching the `stale-price` escalate policy. CS-131 decides between making it optional (`context has amount_usd`) and keeping the stricter deny. |
+| `amount_usd` | decimal | price oracle; `null` + `price_stale=true` if stale. **Decided (CS-131):** `amount_usd` becomes optional in the schema (`amount_usd?`), so a stale price reaches the `stale-price` escalate policy. This is safe: a policy that reads it without `context has amount_usd` errors, and errors deny. Token-count caps still apply without a price. The rendered intent must say "price unavailable", never $0. Until CS-131 the schema requires it, so a stale price currently denies. |
 | `pct_of_balance` | decimal | balance provider |
 | `velocity.{1m,1h,24h}.usd` / `.count` | decimal/int | limiter snapshot |
 | `destination.known` | bool | destination registry |
