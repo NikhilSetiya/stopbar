@@ -16,7 +16,8 @@ HTTP/1.1 403 Forbidden
 
 Every attack in the [corpus](corpus/) is replayed like this, over real HTTP, on every PR. The gateway, engine, Cedar policy, limiter and decision signer are real. In gatekeeper mode an allow comes back as a signed transaction, and the replay checks its recovered sender. The decoder, price/balance data and audit store are still [dev stubs](internal/devstub/), being replaced task by task.
 
-> Status: pre-alpha. The gateway, engine and Cedar policy layer are in, and the seed attacks are blocked end to end. See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
+> **Status: v0.1.0-alpha. Alpha. Not for real funds. Dev-mode keys only.**
+> The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter and audit log are real, and every corpus attack is blocked end to end in CI. The decoder and price/balance data are still dev stubs. Keys come only from local dev providers (authentication, KMS and HSM aren't in yet), and `stopbard` refuses non-loopback addresses. No binaries are published yet; build from source. See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
 
 ```bash
 make e2e     # everything CI runs, plus corpus replay against a live stopbard
