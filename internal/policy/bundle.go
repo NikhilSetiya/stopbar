@@ -31,8 +31,12 @@ type Bundle struct {
 	escalate  *cedar.PolicySet
 	validator *validate.Validator
 	messages  map[cedar.PolicyID]string
+	trust     *ToolTrust // tool-call bundles only
 	hash      string
 }
+
+// Trust is the bundle's tool trust map, or nil for bundles without one.
+func (b *Bundle) Trust() *ToolTrust { return b.trust }
 
 // Hash is the bundle hash bound into every decision (LLD §5.4).
 func (b *Bundle) Hash() string { return b.hash }
@@ -49,7 +53,7 @@ func Load(dir string) (*Bundle, error) {
 	files := map[string][]byte{}
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || (!strings.HasSuffix(name, ".cedar") && !strings.HasSuffix(name, ".cedarschema")) {
+		if e.IsDir() || (!strings.HasSuffix(name, ".cedar") && !strings.HasSuffix(name, ".cedarschema") && name != TrustFile) {
 			continue
 		}
 		b, err := os.ReadFile(filepath.Join(dir, name))
@@ -57,6 +61,9 @@ func Load(dir string) (*Bundle, error) {
 			return nil, err
 		}
 		files[name] = b
+		if name == TrustFile {
+			continue
+		}
 		if strings.HasSuffix(name, ".cedarschema") {
 			schemaFiles = append(schemaFiles, name)
 		} else {
@@ -83,6 +90,11 @@ func Load(dir string) (*Bundle, error) {
 	b := &Bundle{
 		main: cedar.NewPolicySet(), escalate: cedar.NewPolicySet(),
 		validator: validate.New(resolved), messages: map[cedar.PolicyID]string{},
+	}
+	if raw, ok := files[TrustFile]; ok {
+		if b.trust, err = parseTrust(raw); err != nil {
+			return nil, fmt.Errorf("policy: %w", err)
+		}
 	}
 
 	var problems []string
@@ -155,6 +167,7 @@ func (b *Bundle) add(p *cedar.Policy, seen map[cedar.PolicyID]string) string {
 }
 
 // bundleHash = sha256(JCS({"v":1,"files":[{"name","sha256"}…] sorted by name}))
+// over every .cedar, the .cedarschema and tool-trust.json.
 // over the exact source bytes (ADR 0001 condition 3). It is independent of
 // file order and of how cedar-go would re-serialise the policies.
 func bundleHash(files map[string][]byte) (string, error) {

@@ -25,6 +25,7 @@ import (
 
 	"github.com/NikhilSetiya/stopbar/internal/audit"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
+	"github.com/NikhilSetiya/stopbar/internal/decode/toolcall"
 	"github.com/NikhilSetiya/stopbar/internal/devstub"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/gateway"
@@ -165,9 +166,14 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		return runtime{}, err
 	}
 
+	enrichers := []engine.Enricher{w, lim} // lim supplies velocity
+	if b.Trust() != nil {
+		// Tool-call bundle: session taint from its frozen trust map.
+		enrichers = append(enrichers, &policy.SessionTaint{Bundle: b})
+	}
 	e, err := engine.New(engine.Config{
-		Decoders:  []engine.Decoder{devstub.Decoder{}},
-		Enrichers: []engine.Enricher{w, lim}, // lim supplies velocity
+		Decoders:  []engine.Decoder{devstub.Decoder{}, toolcall.Decoder{}},
+		Enrichers: enrichers,
 		Policy:    b,
 		Limiter:   lim,
 		Signer:    &decision.Signer{Keys: ring, Iss: devIssuer, Aud: devAudience},

@@ -1,0 +1,16 @@
+// Tool-call schema for the AgentDojo banking pilot (pre-registration §3).
+// Context facts come only from tool-trust.json (frozen with this bundle) and
+// from session taint that Stopbar computes from the same file.
+namespace Stopbar {
+  entity Agent { tenant: String };
+  entity Tool;
+  action "tool_call" appliesTo {
+    principal: Agent,
+    resource: [Tool],
+    context: {
+      state_changing: Bool,     // tool mutates the account (tool-trust.json)
+      account_identity: Bool,   // tool changes credentials or account-holder identity
+      taint: Set<String>        // includes "untrusted_tool_output" once the session read untrusted content
+    }
+  };
+}

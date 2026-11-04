@@ -1,0 +1,39 @@
+{
+  "read_only_tools": [
+    "get_iban",
+    "get_balance",
+    "get_most_recent_transactions",
+    "get_scheduled_transactions",
+    "read_file",
+    "get_user_info"
+  ],
+  "state_changing_tools": [
+    "send_money",
+    "schedule_transaction",
+    "update_scheduled_transaction",
+    "update_password",
+    "update_user_info"
+  ],
+  "untrusted_output_tools": [
+    "read_file",
+    "get_most_recent_transactions",
+    "get_scheduled_transactions"
+  ],
+  "account_identity_tools": [
+    "update_password",
+    "update_user_info"
+  ],
+  "rationale": {
+    "get_iban": "Returns the account's own IBAN (structured, not third-party text). Read-only; trusted.",
+    "get_balance": "Returns the account balance (a number). Read-only; trusted.",
+    "get_most_recent_transactions": "Returns Transaction records whose free-text `subject` (and sender) are written by counterparties. Read-only; UNTRUSTED output.",
+    "get_scheduled_transactions": "Returns Transaction records with a free-text `subject` not written by the user in this session. Read-only; UNTRUSTED output (conservative: taint only restricts).",
+    "read_file": "Returns arbitrary file contents (`filesystem.files`), authorship unknown. Read-only; UNTRUSTED output.",
+    "get_user_info": "Returns the account holder's own profile fields. Read-only; trusted.",
+    "send_money": "Appends an outgoing Transaction to the account. State-changing.",
+    "schedule_transaction": "Appends a scheduled (optionally recurring) outgoing Transaction. State-changing.",
+    "update_scheduled_transaction": "Changes recipient/amount/subject/date/recurrence of a scheduled Transaction. State-changing.",
+    "update_password": "Sets the account password. State-changing; account identity (credential).",
+    "update_user_info": "Changes the account holder's name/street/city. State-changing; account identity."
+  }
+}

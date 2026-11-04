@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -22,7 +23,7 @@ const CodeDefaultDeny = "DEFAULT_DENY"
 // Evaluate implements engine.Policy. A returned error means the engine fails
 // closed with FAIL_CLOSED_POLICY.
 func (b *Bundle) Evaluate(_ context.Context, er model.EnrichedRequest) (engine.PolicyResult, error) {
-	req, entities, err := cedarRequest(er)
+	req, entities, err := b.cedarRequest(er)
 	if err != nil {
 		return engine.PolicyResult{}, err
 	}
@@ -86,10 +87,12 @@ var evmActions = map[string]bool{"transfer": true, "approve": true, "contract_ca
 // cedarRequest maps the enriched request onto the schema in
 // examples/policies/stopbar.cedarschema. Anything it cannot represent
 // faithfully is an error, never a default.
-func cedarRequest(er model.EnrichedRequest) (cedar.Request, cedar.EntityMap, error) {
+func (b *Bundle) cedarRequest(er model.EnrichedRequest) (cedar.Request, cedar.EntityMap, error) {
 	a := er.Request.Action
+	if a.Kind == model.KindToolCall {
+		return b.toolCallRequest(er)
+	}
 	if a.Kind != model.KindEVMTx {
-		// tool_call context is defined by CS-502; until then it fails closed.
 		return cedar.Request{}, nil, fmt.Errorf("policy: no policy context for action kind %q", a.Kind)
 	}
 	if !evmActions[er.Intent.Kind] {
@@ -181,4 +184,37 @@ func toCedarDecimal(s string) (cedar.Decimal, error) {
 	}
 	v := q.Int64()
 	return types.ParseDecimal(fmt.Sprintf("%d.%04d", v/10000, v%10000))
+}
+
+// toolCallRequest maps a tool call onto a tool-call bundle's schema:
+// principal Agent, action "tool_call", resource Tool::<name>, and context
+// facts derived only from the bundle's frozen trust map and the taint set.
+// A bundle without a trust map, or a tool it doesn't declare, fails closed.
+func (b *Bundle) toolCallRequest(er model.EnrichedRequest) (cedar.Request, cedar.EntityMap, error) {
+	if b.trust == nil {
+		return cedar.Request{}, nil, errors.New("policy: bundle has no tool trust map; tool calls fail closed")
+	}
+	tool := ""
+	if er.Request.Action.Tool != nil {
+		tool = *er.Request.Action.Tool
+	}
+	if !b.trust.known(tool) {
+		return cedar.Request{}, nil, fmt.Errorf("policy: tool %q is not declared in %s; failing closed", tool, TrustFile)
+	}
+	principal := cedar.NewEntityUID("Stopbar::Agent", cedar.String(er.Request.Actor.AgentID))
+	resource := cedar.NewEntityUID("Stopbar::Tool", cedar.String(tool))
+	entities := cedar.EntityMap{
+		principal: {UID: principal, Attributes: cedar.NewRecord(cedar.RecordMap{"tenant": cedar.String(er.Request.Tenant)})},
+		resource:  {UID: resource, Attributes: cedar.NewRecord(cedar.RecordMap{})},
+	}
+	return cedar.Request{
+		Principal: principal,
+		Action:    cedar.NewEntityUID("Stopbar::Action", "tool_call"),
+		Resource:  resource,
+		Context: cedar.NewRecord(cedar.RecordMap{
+			"state_changing":   cedar.Boolean(slices.Contains(b.trust.StateChangingTools, tool)),
+			"account_identity": cedar.Boolean(slices.Contains(b.trust.AccountIdentityTools, tool)),
+			"taint":            stringSet(er.Taint),
+		}),
+	}, entities, nil
 }
