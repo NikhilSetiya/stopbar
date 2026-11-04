@@ -70,7 +70,7 @@ t("CS-151","P1",E,"Approver keys + CLI approvals","Ed25519 approver keys; `stopb
 t("CS-152","P1",E,"Escalation lifecycle","Create, poll (/v1/decisions), timeout -> deny, reject -> deny.","E2E: escalate -> approve -> signed tx returned.",1.5,"CS-151","FR-ESC-3")
 
 E = "E7 Decision & signer"
-t("CS-161","P1",E,"Decision signer (JWS Ed25519)","Sign decisions; JWKS endpoint; local key provider (dev-only guard).","Tokens verify with published JWKS; prod mode refuses local key.",1.5,"CS-008","LLD §10")
+t("CS-161","P1",E,"Decision signer (JWS Ed25519)","Sign decisions; JWKS endpoint; local key provider (dev-only guard). Blocked by CS-102: once Stopbar signs, a replayed request is a replayed signature.","Tokens verify with published JWKS; prod mode refuses local key.",1.5,"CS-008,CS-102","LLD §10")
 t("CS-162","P1",E,"Gatekeeper local signer adapter","Holds agent keystore; verifies decision token + payload_hash before signing.","Signing without valid token impossible (test).",2,"CS-161","FR-INT-3")
 t("CS-163","P1",E,"AWS KMS signer + decision key","KMS secp256k1 for tx signing; KMS for decision key.","Integration test against KMS (or localstack).",2,"CS-162")
 t("CS-164","P1",E,"Turnkey adapter","Gatekeeper via Turnkey API key held only by Stopbar.","Sandbox org test passes.",2,"CS-162")
@@ -140,7 +140,7 @@ t("CS-406","P4",E,"Passkey approvals","WebAuthn approvals bound to payload_hash.
 t("CS-407","P4",E,"Solana support","Decoder + signer adapter for Solana.","Seed Solana attacks blocked.",8,"CS-141")
 t("CS-408","P4",E,"External security audit","Independent audit of core + guard.","Report published; criticals fixed.",15,"CS-401,CS-403")
 
-THIN_SLICE = ["CS-001","CS-002","CS-003","CS-005","CS-006","CS-101","CS-104","CS-111","CS-112",
+THIN_SLICE = ["CS-001","CS-002","CS-003","CS-005","CS-006","CS-101","CS-102","CS-104","CS-111","CS-112",
               "CS-113","CS-121","CS-133","CS-122","CS-141","CS-142","CS-161","CS-162","CS-171","CS-181",
               "CS-183","CS-191","CS-192","CS-193"]
 

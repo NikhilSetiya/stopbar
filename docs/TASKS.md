@@ -20,7 +20,7 @@ Estimates are focused build days for one engineer. IDs are stable; reference the
 Phase windows assume full-time focus. Part-time (~12 h/week) multiplies calendar time by ~3x.
 Ship the **thin slice** first: the minimum path to a public demo where Stopbar blocks the seed attacks against an EVM agent wallet.
 
-**Thin slice: 23 tasks, ~41 build days** — CS-001, CS-002, CS-003, CS-005, CS-006, CS-101, CS-104, CS-111, CS-112, CS-113, CS-121, CS-133, CS-122, CS-141, CS-142, CS-161, CS-162, CS-171, CS-181, CS-183, CS-191, CS-192, CS-193
+**Thin slice: 24 tasks, ~42 build days** — CS-001, CS-002, CS-003, CS-005, CS-006, CS-101, CS-102, CS-104, CS-111, CS-112, CS-113, CS-121, CS-133, CS-122, CS-141, CS-142, CS-161, CS-162, CS-171, CS-181, CS-183, CS-191, CS-192, CS-193
 
 Everything else in Phase 1 hardens or widens the slice after it's public.
 
@@ -100,7 +100,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 
 | ID | Task | Detail | Acceptance criteria | Est | Depends | Refs |
 |---|---|---|---|---|---|---|
-| CS-161 | Decision signer (JWS Ed25519) | Sign decisions; JWKS endpoint; local key provider (dev-only guard). | Tokens verify with published JWKS; prod mode refuses local key. | 1.5d | CS-008 | LLD §10 |
+| CS-161 | Decision signer (JWS Ed25519) | Sign decisions; JWKS endpoint; local key provider (dev-only guard). Blocked by CS-102: once Stopbar signs, a replayed request is a replayed signature. | Tokens verify with published JWKS; prod mode refuses local key. | 1.5d | CS-008,CS-102 | LLD §10 |
 | CS-162 | Gatekeeper local signer adapter | Holds agent keystore; verifies decision token + payload_hash before signing. | Signing without valid token impossible (test). | 2d | CS-161 | FR-INT-3 |
 | CS-163 | AWS KMS signer + decision key | KMS secp256k1 for tx signing; KMS for decision key. | Integration test against KMS (or localstack). | 2d | CS-162 |  |
 | CS-164 | Turnkey adapter | Gatekeeper via Turnkey API key held only by Stopbar. | Sandbox org test passes. | 2d | CS-162 |  |
