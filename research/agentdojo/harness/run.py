@@ -14,7 +14,7 @@ Before the first episode it writes run.json (exact model ID, UTC date/time,
 AgentDojo version + sha256, benchmark version, Stopbar commit, bundle hash)
 and refuses to start on any mismatch with the pins or the frozen bundle.
 """
-import argparse, datetime, importlib.metadata, json, pathlib, subprocess, sys, uuid
+import argparse, datetime, importlib.metadata, json, pathlib, signal, subprocess, sys, uuid
 from functools import partial
 
 from agentdojo.agent_pipeline.agent_pipeline import AgentPipeline, load_system_message
@@ -66,7 +66,11 @@ def pipeline(llm, arm: str, url: str | None, log: gate.CallLog | None, episode: 
     if arm == "A2":
         elems.insert(0, gate.SessionStart())
     p = AgentPipeline([*elems, llm, ToolsExecutionLoop([executor, llm])])
-    p.name = llm.name if hasattr(llm, "name") and llm.name else "claude"
+    # Per-arm name: AgentDojo files each trace under <logdir>/<pipeline name>/,
+    # ignoring the logdir passed to run_task, so a shared name lets A2's trace
+    # overwrite A0's. The attack finds the model by substring
+    # (get_model_name_from_pipeline), so its text is unchanged.
+    p.name = f"{llm.name}-{arm}"
     return p
 
 
@@ -184,6 +188,10 @@ def main():
     progress = open(out / "progress.jsonl", "a", buffering=1)
     task_ids = [t for t in sorted(suite.user_tasks)[: a.limit or None] if t not in done]
     stopped = None
+
+    def on_term(*_):  # a kill still records its stop and spend (finally below)
+        raise KeyboardInterrupt("SIGTERM")
+    signal.signal(signal.SIGTERM, on_term)
     try:
         with OutputLogger(str(out / "agentdojo_logs")):
             for uid in task_ids:
@@ -191,18 +199,20 @@ def main():
                 agent = ScriptedAgent(task) if a.dry_run else llm
                 for arm in ARMS:  # benign
                     p = pipeline(agent, arm, a.stopbard, log, {"user_task": uid, "injection_task": None})
-                    utility, _ = run_task_without_injection_tasks(suite, p, task, logdir=out / "agentdojo_logs" / arm,
+                    utility, _ = run_task_without_injection_tasks(suite, p, task, logdir=out / "agentdojo_logs",
                                                                   force_rerun=True, benchmark_version=BENCHMARK_VERSION)
                     episodes[arm].write(json.dumps({"user_task": uid, "injection_task": None, "utility": bool(utility)}) + "\n")
                 for arm in ARMS:  # under attack: AgentDojo's own attack and security check, unmodified
                     p = pipeline(agent, arm, a.stopbard, log, {"user_task": uid, "injection_task": "*"})
                     utils, secs = run_task_with_injection_tasks(suite, p, task, load_attack(ATTACK, suite, p),
-                                                                logdir=out / "agentdojo_logs" / arm, force_rerun=True,
+                                                                logdir=out / "agentdojo_logs", force_rerun=True,
                                                                 benchmark_version=BENCHMARK_VERSION)
                     for (u, inj), ok in utils.items():
                         episodes[arm].write(json.dumps({"user_task": u, "injection_task": inj, "utility": bool(ok),
                                                         "attack_success": bool(secs[(u, inj)])}) + "\n")
                 progress.write(json.dumps({"user_task": uid, "finished_utc": now()}) + "\n")
+    except KeyboardInterrupt as e:
+        stopped = f"interrupted ({e or 'SIGINT'})"
     except Exception:
         # AgentDojo may wrap our abort (its Anthropic retry raises tenacity's
         # RetryError), so the latch, not the exception type, says it was ours.
@@ -213,7 +223,7 @@ def main():
         seg["finished_utc"] = now()
         seg["tasks_done_total"] = len(done_tasks(out))
         if stopped:
-            seg["stopped"] = f"{type(stopped).__name__}: {stopped}"
+            seg["stopped"] = stopped if isinstance(stopped, str) else f"{type(stopped).__name__}: {stopped}"
         if meter:
             seg.update({"model_ids_reported": sorted(meter.reported_models), "api_calls": meter.calls,
                         "input_tokens": meter.input_tokens, "output_tokens": meter.output_tokens, "spend_usd": round(meter.usd, 4)})
@@ -226,7 +236,7 @@ def main():
     print(out)
     if stopped:
         print(f"stopped: {stopped}", file=sys.stderr)
-        return 3
+        return 130 if isinstance(stopped, str) else 3
 
 
 if __name__ == "__main__":

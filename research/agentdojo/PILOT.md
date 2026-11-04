@@ -187,6 +187,15 @@ Assumptions:
 
    Both crashed the pipeline before any request was sent: 0 API calls and $0, in an aborted start at 2026-11-04T22:31Z. 0.125.0 is the newest version that tested compatible on both, and it's inside AgentDojo's declared range (`anthropic>=0.47.0`). A unit test binds AgentDojo's actual call against the pinned SDK. This only selects a working dependency version; it changes no behaviour.
 
+## 6e. Aborted starts (harness faults; no outcome was inspected)
+
+| Start (UTC) | Fault | Requests | Disposition |
+|---|---|---|---|
+| 2026-11-04 22:31 | `anthropic` 1.x has no `temperature` in `stream()`, so AgentDojo crashed before its first request | 0 ($0) | Fixed by pinning `anthropic==0.125.0` (§6d.5) |
+| 2026-11-04 22:32 | AgentDojo filed both arms' traces under one pipeline name, so A2's trace overwrote A0's | user_task_0 only (4 episode rows); spend not recorded because the kill skipped the final write (under $1 estimated) | Stopped on discovery. The partial was moved to `results/aborted/` unanalysed and is not part of the pilot. Fixed with per-arm pipeline names (the attack text is unchanged) and an e2e check of one trace per episode per arm. A kill now records its stop and spend. |
+
+The pilot restarts from user_task_0 with every arm and pin unchanged.
+
 ## 7. Results (to be filled in only after the runs)
 
 ### 7.0 Pre-run observation (2026-11-04T20:41Z, recorded before any paid run)

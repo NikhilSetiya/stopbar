@@ -91,6 +91,8 @@ assert len(done) == 3, f"expected 3 finished user tasks, got {done}"
 for arm in ("A0", "A2"):
     eps = [json.loads(l) for l in open(f"{d}/{arm}/episodes.jsonl")]
     assert {e["user_task"] for e in eps} == set(done), f"{arm} episodes don't match finished tasks"
+    traces = glob.glob(f"{d}/agentdojo_logs/*-{arm}/banking/*/*/*.json")
+    assert len(traces) == len(eps), f"{arm}: {len(traces)} traces for {len(eps)} episodes (arms must not share trace paths)"
 print(f"ok   dry run: A0+A2 interleaved, {len(calls)} gated calls on frozen bundle {run['frozen_bundle_hash'][:19]}…, 0 infra errors")
 PY
 kill -TERM "$PID"; wait "$PID" || true
