@@ -12,7 +12,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.lock   # agentdoj
 #   stopbard -listen 127.0.0.1:7777 -dev-world /tmp/world.json -policies research/agentdojo/policies/banking -state-dir /tmp/pilot-state
 
 .venv/bin/python -m harness.run --dry-run --out results/                     # free: scripted ground-truth agent, no API
-.venv/bin/python -m harness.run --model claude-haiku-4-5 --cap-usd 20 --out results/   # the pilot (PAID), both arms interleaved
+.venv/bin/python -m harness.run --model claude-haiku-4-5-20251001 --cap-usd 20 --out results/   # the pilot (PAID), both arms interleaved
 .venv/bin/python -m harness.run --resume results/<run dir>                   # after a quota or infrastructure stop
 .venv/bin/python -m harness.analyze results/<run dir>
 ```
@@ -24,7 +24,7 @@ The runner refuses to start if:
 
 Before the first episode it writes `run.json`: the requested model ID (the model versions the API reports back are added per run segment), the UTC start time, the pins, the Stopbar commit, the bundle hashes, and every client adaptation. A hard spend cap aborts the run.
 
-**The pilot model** is `claude-haiku-4-5` with a $20 cap across the whole run (PILOT Amendment 3.2). Gemini Flash on the free tier was evaluated and not taken (Amendment 4). Keys come from the macOS keychain (`security add-generic-password -s stopbar-anthropic-key -a "$USER" -w`; Gemini: `stopbar-gemini-key`) and are never logged.
+**The pilot model** is `claude-haiku-4-5-20251001` with a $20 cap across the whole run (PILOT Amendment 3.2). Gemini Flash on the free tier was evaluated and not taken (Amendment 4). Keys come from the macOS keychain (`security add-generic-password -s stopbar-anthropic-key -a "$USER" -w`; Gemini: `stopbar-gemini-key`) and are never logged.
 - **Interleaved and atomic:** each user task runs benign A0, benign A2, then attacked A0 and A2. A task counts only once both arms finish it. A stopped run discards the unfinished task, and `--resume` reruns it.
 - **Infrastructure is not a result:** rate limits, overloads, 5xx, timeouts and network errors are retried with backoff inside the client (SDK retries off; logged to `infra.jsonl`). Exhausted retries, a quota or the spend cap stops the run with exit code 3, and the run can be resumed.
 - **Pinned model:** the run stops if the API reports a model other than the pin.

@@ -12,10 +12,10 @@ ATTACK = "important_instructions"
 # Flash on the free tier) was evaluated and not taken; the Gemini client stays
 # for later runs. Opus 5.5 moves to the three-arm run; its effort is pinned
 # explicitly to its default (medium).
-PILOT_MODEL = "claude-haiku-4-5"
+PILOT_MODEL = "claude-haiku-4-5-20251001"
 
 MODELS = {
-    "claude-haiku-4-5": {"provider": "anthropic", "price_in": 1.0, "price_out": 5.0, "output_config": None},
+    "claude-haiku-4-5-20251001": {"provider": "anthropic", "price_in": 1.0, "price_out": 5.0, "output_config": None},
     "claude-opus-5-5": {"provider": "anthropic", "price_in": 4.0, "price_out": 20.0, "output_config": {"effort": "medium"}},
     "gemini-3.8-flash": {"provider": "google", "model_name_prose": "AI model developed by Google"},
 }

@@ -1,6 +1,6 @@
 """Run the pilot (PILOT.md), both arms interleaved per user task. Usage:
 
-  python -m harness.run --model claude-haiku-4-5 --cap-usd 20 --out results/ [--stopbard URL]
+  python -m harness.run --model claude-haiku-4-5-20251001 --cap-usd 20 --out results/ [--stopbard URL]
   python -m harness.run --resume results/<run dir> [--stopbard URL]        # after a quota stop
   python -m harness.run --dry-run --stopbard URL --out results/            # no API: scripted ground-truth agent
 

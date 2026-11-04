@@ -58,8 +58,8 @@ class Pins(unittest.TestCase):
         self.assertRegex(pins.frozen_bundle_hash(), r"^sha256:[0-9a-f]{64}$")
 
     def test_models_are_the_pre_registered_ones(self):
-        self.assertEqual(set(pins.MODELS), {"gemini-3.8-flash", "claude-haiku-4-5", "claude-opus-5-5"})
-        self.assertEqual(pins.PILOT_MODEL, "claude-haiku-4-5")  # Amendment 4 not taken
+        self.assertEqual(set(pins.MODELS), {"gemini-3.8-flash", "claude-haiku-4-5-20251001", "claude-opus-5-5"})
+        self.assertEqual(pins.PILOT_MODEL, "claude-haiku-4-5-20251001")  # Amendment 4 not taken
 
 
 class _Resp:
@@ -137,7 +137,7 @@ def _api_err(cls, status, headers=None):
 
 
 class _Msg:
-    def __init__(self, model="claude-haiku-4-5", inp=1000, out=100):
+    def __init__(self, model="claude-haiku-4-5-20251001", inp=1000, out=100):
         self.model = model
         self.usage = type("U", (), {"input_tokens": inp, "output_tokens": out})()
 
@@ -169,13 +169,13 @@ class _AMessages:
 
 class AnthropicInfra(_NoSleep):
     def client(self, *script, cap=20.0, attempts=12):
-        meter = llm.Meter("claude-haiku-4-5", cap, infra.Infra(max_attempts=attempts))
+        meter = llm.Meter("claude-haiku-4-5-20251001", cap, infra.Infra(max_attempts=attempts))
         inner = _AMessages(*script)
         return llm._Messages(inner, meter, None), meter, inner
 
     def final(self, msgs):
         async def go():
-            async with msgs.stream(model="claude-haiku-4-5") as s:
+            async with msgs.stream(model="claude-haiku-4-5-20251001") as s:
                 return await s.get_final_message()
         return asyncio.run(go())
 
@@ -183,7 +183,7 @@ class AnthropicInfra(_NoSleep):
         msgs, meter, inner = self.client(_api_err(anthropic.RateLimitError, 429, {"retry-after": "7"}),
                                          _api_err(anthropic.InternalServerError, 529),
                                          anthropic.APIConnectionError(request=httpx.Request("POST", "https://x")), _Msg())
-        self.assertEqual(self.final(msgs).model, "claude-haiku-4-5")
+        self.assertEqual(self.final(msgs).model, "claude-haiku-4-5-20251001")
         self.assertEqual(meter.infra.retries, {"http_429": 1, "http_529": 1, "network": 1})
         self.assertEqual((meter.calls, inner.n), (1, 4))
 
