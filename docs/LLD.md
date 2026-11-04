@@ -242,6 +242,13 @@ Cedar natively yields permit/forbid. Stopbar layers **escalate** via annotations
 
 Combination: `deny > escalate > allow`. Evaluate escalate-annotated policies as a separate Cedar policy set so "forbid" in that set means escalate.
 
+Engine rules from the Cedar spike ([ADR 0001](adr/0001-cedar.md)):
+
+- **Any `Diagnostic.Errors` in either set → `deny` / `FAIL_CLOSED_POLICY`.** cedar-go skips policies whose condition errors, so an erroring `forbid` would otherwise not fire (fail open).
+- `@id` is an annotation, not the cedar-go PolicyID (`policy0..N`). The loader maps `@id` to PolicyID and rejects missing or duplicate IDs. An unannotated `forbid` means deny, and `@outcome` on a `permit` is rejected.
+- Decimals use methods (`.greaterThan(decimal("0.20"))`), not `>`. Bundles and requests are validated against the schema before activation and before evaluation.
+- Cedar `decimal` is int64 with 4 fractional digits (about ±9.2e14). Only USD values reach Cedar, rounded toward the stricter outcome. Raw on-chain units stay in the limiter.
+
 ### 5.3 Example policy (`examples/policies/agent-wallet.cedar`)
 
 ```cedar
@@ -260,7 +267,7 @@ when { context.flags.contains("unlimited_approval") };
 forbid (principal, action, resource) when { context.flags.contains("delegatecall") };
 
 @id("large-share-of-balance") @outcome("escalate")
-forbid (principal, action, resource) when { context.pct_of_balance > decimal("0.20") };
+forbid (principal, action, resource) when { context.pct_of_balance.greaterThan(decimal("0.20")) };
 
 @id("address-poisoning") @outcome("escalate")
 forbid (principal, action, resource) when { context.dest_similar_to_known && !context.dest_known };

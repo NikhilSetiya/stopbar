@@ -23,7 +23,7 @@ jobs:
       - name: fuzz smoke (canonicaliser)
         run: go test -run='^$' -fuzz=FuzzTransformIdempotent -fuzztime=30s ./internal/canon/
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: GOTOOLCHAIN=local go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
   lint:
     runs-on: ubuntu-latest
     steps:
