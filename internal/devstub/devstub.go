@@ -1,15 +1,13 @@
 // Package devstub provides stand-in engine components so stopbard can run the
 // real gateway, engine and policy bundle end to end before the production
 // components exist. NOT FOR PRODUCTION: stopbard enables them only with
-// -dev-world, logs a warning, and the stub signer issues tokens that every
-// conforming verifier rejects (decision-token-v1 §4 step 1).
+// -dev-world and logs a warning.
 //
 // Each stub names the task that replaces it.
 package devstub
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,9 +37,43 @@ const (
 
 var maxUint256 = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
 
+// Fee-drain thresholds (dev values; CS-141 makes them per chain). A zero-value
+// transaction with an absurd fee burns ETH while passing value caps.
+var (
+	maxSaneFeeWei    = big.NewInt(50_000_000_000_000_000) // 0.05 ETH total max fee
+	maxSaneFeePerGas = big.NewInt(1_000_000_000_000)      // 1,000 gwei
+	maxSaneGasLimit  = big.NewInt(15_000_000)
+)
+
+// MaxFeeWei is gas_limit × max_fee_per_gas: the most the tx can pay in fees.
+func MaxFeeWei(a model.Action) *big.Int {
+	g, _ := new(big.Int).SetString(a.GasLimit, 10)
+	f, _ := new(big.Int).SetString(a.MaxFeePerGas, 10)
+	if g == nil || f == nil {
+		return nil
+	}
+	return g.Mul(g, f)
+}
+
 func (Decoder) Supports(a model.Action) bool { return a.Kind == model.KindEVMTx }
 
-func (Decoder) Decode(_ context.Context, a model.Action) (model.IntentSummary, error) {
+// Decode renders the intent and adds excessive_fee when the fee terms are
+// out of line, whatever the call itself is.
+func (d Decoder) Decode(ctx context.Context, a model.Action) (model.IntentSummary, error) {
+	in, err := d.decode(ctx, a)
+	if err != nil {
+		return in, err
+	}
+	g, _ := new(big.Int).SetString(a.GasLimit, 10)
+	f, _ := new(big.Int).SetString(a.MaxFeePerGas, 10)
+	if fee := MaxFeeWei(a); fee == nil || fee.Cmp(maxSaneFeeWei) > 0 || f.Cmp(maxSaneFeePerGas) > 0 || g.Cmp(maxSaneGasLimit) > 0 {
+		in.Flags = append(in.Flags, "excessive_fee")
+		in.Human += fmt.Sprintf(" (max fee %s wei: excessive)", MaxFeeWei(a))
+	}
+	return in, nil
+}
+
+func (Decoder) decode(_ context.Context, a model.Action) (model.IntentSummary, error) {
 	data := strings.ToLower(strings.TrimPrefix(a.Data, "0x"))
 	to := strings.ToLower(a.To)
 	if data == "" {
@@ -159,6 +191,15 @@ func (w *World) Enrich(_ context.Context, er *model.EnrichedRequest) error {
 	} else {
 		er.PriceStale = true
 	}
+	// Fees are paid in the native asset whatever is being moved.
+	if fee := MaxFeeWei(er.Request.Action); fee != nil {
+		if p, ok := ratOf(w.PricesUSD["ETH"]); ok && !w.PriceStale {
+			eth := new(big.Rat).SetFrac(fee, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+			er.MaxFeeUSD = decimalString(eth.Mul(eth, p))
+		} else {
+			er.PriceStale = true
+		}
+	}
 	if bal, ok := ratOf(w.Balances[symbol]); ok && bal.Sign() > 0 {
 		er.PctOfBalance = decimalString(new(big.Rat).Quo(tokens, bal))
 	}
@@ -197,26 +238,6 @@ func decimalString(r *big.Rat) *string {
 		s += "." + frac
 	}
 	return &s
-}
-
-// ---- signer (replaced by CS-161) ----
-
-// UnsignedSigner returns a token with header alg "none". Every conforming
-// verifier rejects it at decision-token-v1 §4 step 1 (BAD_HEADER), so a dev
-// allow can never be used to sign anything.
-type UnsignedSigner struct{}
-
-func (UnsignedSigner) Sign(_ context.Context, d model.Decision) (string, error) {
-	hdr, err := canon.Marshal(map[string]string{"alg": "none", "typ": "stopbar-dev-unsigned"})
-	if err != nil {
-		return "", err
-	}
-	body, err := canon.Marshal(map[string]any{"request_id": d.RequestID, "payload_hash": d.PayloadHash, "outcome": d.Outcome})
-	if err != nil {
-		return "", err
-	}
-	b64 := base64.RawURLEncoding
-	return b64.EncodeToString(hdr) + "." + b64.EncodeToString(body) + ".dev-unsigned", nil
 }
 
 // ---- audit (replaced by CS-171) ----

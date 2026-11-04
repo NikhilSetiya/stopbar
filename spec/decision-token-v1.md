@@ -1,6 +1,6 @@
 # Decision token — v1
 
-Status: draft (CS-008). Test vectors: [`vectors/decision-token-v1.json`](vectors/decision-token-v1.json),
+Status: draft (CS-008). Amended in CS-161 to bind every transaction field (§2.1, §2.3). No verifier outside this repository existed, so the version stays at v1, and the vectors were regenerated. Test vectors: [`vectors/decision-token-v1.json`](vectors/decision-token-v1.json),
 generated and checked by `internal/decision/token_v1_test.go`.
 
 A decision token is Stopbar's signed statement that one specific action may be
@@ -33,15 +33,19 @@ Any other field, including the whole request envelope, is outside the binding.
 
 ### 2.1 `evm_tx`
 
+The requester sends the **complete unsigned transaction**. Every field is bound, and the signer adapter fills in nothing after the decision: any field filled in later would be a field policy never saw. Only EIP-1559 (`tx_type` 2) transactions with no access list are supported in v1.
+
 ```json
-{"v": 1, "kind": "evm_tx", "chain_id": 8453,
- "from": "0x…", "to": "0x…", "value_wei": "0", "data": "0x…"}
+{"v": 1, "kind": "evm_tx", "tx_type": 2, "chain_id": 8453,
+ "from": "0x…", "to": "0x…", "value_wei": "0", "data": "0x…",
+ "tx_nonce": "7", "gas_limit": "100000",
+ "max_fee_per_gas": "2000000000", "max_priority_fee_per_gas": "1000000000"}
 ```
 
-- `from`, `to` and `data` are lower-cased. The hex digits and the `0x` prefix are both lower-case, so EIP-55 checksummed and upper-case input bind the same way.
-- `value_wei` is re-serialised as a base-10 integer with no sign and no leading zeros (`"000"` becomes `"0"`). Negative or non-decimal values are an error.
+- `from`, `to` and `data` are lower-cased. The hex digits and the `0x` prefix are both lower-case, so EIP-55 checksummed and upper-case input bind the same way. Empty calldata is `"0x"`, whether sent as `""` or `"0x"`.
+- `value_wei`, `tx_nonce`, `gas_limit`, `max_fee_per_gas` and `max_priority_fee_per_gas` are re-serialised as base-10 integers with no sign and no leading zeros (`"000"` becomes `"0"`). Negative or non-decimal values are an error. These are strings, so values beyond 2^53 survive.
 - `chain_id` MUST be in `[1, 2^53)`, since JCS numbers are IEEE-754 doubles.
-- Contract creation (no `to`) has no binding in v1, so no token can be issued for it.
+- Contract creation (no `to`), legacy and EIP-2930 transactions, and access lists have no binding in v1, so no token can be issued for them.
 
 ### 2.2 `tool_call`
 
@@ -52,14 +56,15 @@ Any other field, including the whole request envelope, is outside the binding.
 - `args` is hashed as JCS of the JSON value as received. A missing or null `args` becomes `{}`.
 - Numbers inside `args` are JCS doubles. Integers beyond ±2^53 MUST be sent as strings. The gateway MUST reject requests whose numbers don't round-trip (CS-101).
 
-### 2.3 What is *not* bound
+### 2.3 Nothing is left unbound
 
-For `evm_tx`, the account nonce, gas limit, fee fields, tx type and access list
-are chosen by the signer adapter, not by the requester, and are outside the hash.
-The adapter MUST take them from its own configuration and chain state, and MUST
-enforce a configured fee ceiling. A compromised requester can therefore not
-raise fees through the token. A compromised adapter is out of scope, because
-it already holds the key.
+Earlier drafts left nonce, gas and fees for the adapter to choose. That let an
+approved transaction differ from the one signed. It also hid the fee from
+policy: a zero-value transaction with an absurd `gas_limit × max_fee_per_gas`
+burns ETH while passing every value cap (corpus `CS-2026-0007`). Now all of
+them are bound, so the adapter MUST sign the transaction byte-for-byte as
+approved. The engine also counts `gas_limit × max_fee_per_gas`, priced, as
+spend against USD caps, and the decoder flags `excessive_fee`.
 
 `withdrawal` has no binding in v1. The engine MUST NOT issue tokens for it, and
 any request of that kind fails closed.
@@ -127,7 +132,7 @@ run these steps in order and stop at the first failure. Every failure means
 | 8b | `iat ≤ now + 5s` (clock skew) | `NOT_YET_VALID` |
 | 8c | `now < exp` (`exp` is exclusive, with no skew) | `EXPIRED` |
 | 9 | `outcome` = `allow` | `NOT_ALLOWED` |
-| 10 | `payload_hash` equals §2 recomputed **from the transaction or call the adapter is about to sign**, never from a value the requester supplied alongside the token | `PAYLOAD_MISMATCH` |
+| 10 | `payload_hash` equals §2 recomputed **from the transaction or call the adapter is about to sign**, never from a value the requester supplied alongside the token. A swap of any field (to, value, calldata, nonce, gas, fees, chain) fails here | `PAYLOAD_MISMATCH` |
 | 11 | `(iss, tenant, nonce)` has not been accepted before. Record it until `exp` only after steps 0–10 pass, so a failed attempt never burns the nonce. | `REPLAYED` |
 
 The replay store MUST be durable across adapter restarts for at least the

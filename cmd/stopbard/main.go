@@ -3,13 +3,14 @@
 // Until authentication lands (CS-103) it only listens on loopback. Without
 // -dev-world it runs no engine and /v1/evaluate answers ENGINE_UNAVAILABLE.
 // With -dev-world it runs the real engine and policy bundle on stub
-// components (internal/devstub) and the real limiter: decisions are real,
-// tokens are deliberately unverifiable, so nothing it returns can authorise
-// a signature.
+// components (internal/devstub) with the real limiter and decision signer.
+// With -dev-wallet it is in gatekeeper mode: an allow returns a transaction
+// signed by the adapter after it verified the decision token.
 package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,12 +24,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/devstub"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/gateway"
 	"github.com/NikhilSetiya/stopbar/internal/limiter"
 	"github.com/NikhilSetiya/stopbar/internal/nonce"
 	"github.com/NikhilSetiya/stopbar/internal/policy"
+	"github.com/NikhilSetiya/stopbar/internal/signer"
 	"github.com/NikhilSetiya/stopbar/internal/version"
 )
 
@@ -38,23 +41,23 @@ func main() {
 	devWorld := flag.String("dev-world", "", "DEV ONLY: run the engine on stub components seeded from this world JSON (corpus setup shape)")
 	policies := flag.String("policies", "examples/policies", "policy bundle directory (with -dev-world)")
 	devAudit := flag.String("dev-audit", "", "DEV ONLY: append the stub audit chain to this file (default stderr)")
-	stateDir := flag.String("state-dir", "", "directory for durable state (limiter.db, nonces.db); default in memory, lost on restart")
+	stateDir := flag.String("state-dir", "", "directory for durable state (limiter.db, nonces.db, adapter-spent.db); default in memory, lost on restart")
+	decisionKey := flag.String("decision-key", "", "DEV ONLY (local key provider): Ed25519 decision key file, mode 0600; default an ephemeral key")
+	devWallet := flag.String("dev-wallet", "", "DEV ONLY: secp256k1 wallet key file, mode 0600; enables gatekeeper mode (allow returns a signed tx)")
+	tenant := flag.String("tenant", "test", "tenant this deployment serves (decision tokens are scoped to it)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("stopbard", version.Version)
 		return
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	nonces, err := openNonces(*stateDir)
+	nonces, err := openStore(*stateDir, "nonces.db")
 	if err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
 	}
-	limiterDB := ""
-	if *stateDir != "" {
-		limiterDB = filepath.Join(*stateDir, "limiter.db")
-	}
-	eval, err := devEngine(*devWorld, *policies, *devAudit, limiterDB, log)
+	eval, keys, err := devEngine(devOpts{world: *devWorld, policies: *policies, audit: *devAudit, stateDir: *stateDir,
+		decisionKey: *decisionKey, wallet: *devWallet, tenant: *tenant}, log)
 	if err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
@@ -62,76 +65,123 @@ func main() {
 	if *stateDir == "" {
 		log.Warn("no -state-dir: nonces and limiter state are in memory; a restart reopens replay windows and resets caps")
 	}
-	if err := run(*listen, eval, nonces, log); err != nil {
+	if err := run(*listen, eval, nonces, keys, log); err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
 	}
 }
 
-// devEngine wires the real engine and policy bundle to devstub components.
-// It returns nil (no engine) when world is empty.
-func devEngine(world, policies, auditPath, limiterDB string, log *slog.Logger) (gateway.Evaluator, error) {
-	if world == "" {
-		return nil, nil
+type devOpts struct {
+	world, policies, audit, stateDir, decisionKey, wallet, tenant string
+}
+
+const (
+	devIssuer   = "stopbar:dev"
+	devAudience = "signer:dev-local"
+)
+
+// devEngine wires the real engine, limiter, policy bundle and decision signer
+// to devstub components. With a dev wallet it runs in gatekeeper mode. It
+// returns no engine when world is empty. The local key providers (decision
+// key, wallet) are dev only, so they refuse to load without -dev-world.
+func devEngine(o devOpts, log *slog.Logger) (gateway.Evaluator, func() []decision.JWK, error) {
+	if o.world == "" {
+		if o.decisionKey != "" || o.wallet != "" {
+			return nil, nil, errors.New("-decision-key and -dev-wallet are dev-only local key providers and require -dev-world")
+		}
+		return nil, nil, nil
 	}
-	w, err := devstub.LoadWorld(world)
-	if err != nil {
-		return nil, err
+	if o.decisionKey != "" && o.decisionKey == o.wallet {
+		return nil, nil, errors.New("the decision key and the wallet key must be different files")
 	}
-	b, err := policy.Load(policies)
+	w, err := devstub.LoadWorld(o.world)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	b, err := policy.Load(o.policies)
+	if err != nil {
+		return nil, nil, err
 	}
 	var aw io.Writer = os.Stderr
-	if auditPath != "" {
-		f, err := os.OpenFile(auditPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if o.audit != "" {
+		f, err := os.OpenFile(o.audit, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		aw = f // closed at process exit
 	}
 	var store limiter.Store
-	if limiterDB != "" {
-		bs, err := limiter.OpenBolt(limiterDB)
+	if o.stateDir != "" {
+		bs, err := limiter.OpenBolt(filepath.Join(o.stateDir, "limiter.db"))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		store = bs // closed at process exit
 	}
 	lim, err := limiter.New(limiter.Config{Rules: w.Limits, Store: store})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+
+	var dk ed25519.PrivateKey
+	if o.decisionKey != "" {
+		if dk, err = decision.LoadKeyFile(o.decisionKey); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		_, dk, _ = ed25519.GenerateKey(nil)
+		log.Warn("ephemeral decision key: tokens stop verifying when this process exits", "kid", decision.Kid(dk.Public().(ed25519.PublicKey)))
+	}
+	ring := decision.NewKeyRing(dk)
+
 	e, err := engine.New(engine.Config{
 		Decoders:  []engine.Decoder{devstub.Decoder{}},
 		Enrichers: []engine.Enricher{w, lim}, // lim supplies velocity
 		Policy:    b,
 		Limiter:   lim,
-		Signer:    devstub.UnsignedSigner{},
+		Signer:    &decision.Signer{Keys: ring, Iss: devIssuer, Aud: devAudience},
 		Audit:     &devstub.Audit{W: aw},
 		Logger:    log,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	log.Warn("DEV STUBS ENABLED: decoder, price/balance enricher, signer and audit are stand-ins; tokens are unsigned. Not for production.",
-		"world", world, "policies", policies, "bundle_hash", b.Hash())
-	return e, nil
+	var eval gateway.Evaluator = e
+	mode := "advisory (allow returns a decision token)"
+	if o.wallet != "" {
+		keys, err := signer.LoadDevWallet(o.wallet)
+		if err != nil {
+			return nil, nil, err
+		}
+		spent, err := openStore(o.stateDir, "adapter-spent.db")
+		if err != nil {
+			return nil, nil, err
+		}
+		ad, err := signer.New(&decision.Verifier{Keys: ring.PublicKeys, Iss: devIssuer, Aud: devAudience, Tenant: o.tenant, Spent: spent}, keys)
+		if err != nil {
+			return nil, nil, err
+		}
+		eval = &signer.Gatekeeper{Engine: e, Adapter: ad, Logger: log}
+		mode = fmt.Sprintf("gatekeeper (allow returns a signed tx; wallets %v)", ad.Addresses())
+	}
+	log.Warn("DEV STUBS ENABLED: decoder, price/balance enricher and audit are stand-ins; local key providers. Not for production.",
+		"world", o.world, "policies", o.policies, "bundle_hash", b.Hash(), "mode", mode, "decision_kid", ring.ActiveKid())
+	return eval, ring.JWKS, nil
 }
 
-// openNonces returns the replay-protection store: durable under stateDir,
-// in memory otherwise.
-func openNonces(stateDir string) (*nonce.Store, error) {
+// openStore returns a single-use store (nonces, spent tokens): durable under
+// stateDir, in memory otherwise.
+func openStore(stateDir, file string) (*nonce.Store, error) {
 	if stateDir == "" {
 		return nonce.NewMemory(nil), nil
 	}
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, err
 	}
-	return nonce.OpenBolt(filepath.Join(stateDir, "nonces.db"), nil)
+	return nonce.OpenBolt(filepath.Join(stateDir, file), nil)
 }
 
-func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, log *slog.Logger) error {
+func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys func() []decision.JWK, log *slog.Logger) error {
 	if err := requireLoopback(addr); err != nil {
 		return err
 	}
@@ -140,7 +190,7 @@ func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, log *sl
 		return err
 	}
 	srv := &http.Server{
-		Handler:           gateway.New(gateway.Config{Evaluator: eval, Nonces: nonces, Logger: log}),
+		Handler:           gateway.New(gateway.Config{Evaluator: eval, Nonces: nonces, Keys: keys, Logger: log}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,

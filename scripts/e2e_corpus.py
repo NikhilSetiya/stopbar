@@ -1,6 +1,6 @@
 """Replay every corpus attack through a live stopbard over HTTP (scripts/e2e.sh, CI).
 
-Usage: e2e_corpus.py PATH/TO/stopbard
+Usage: e2e_corpus.py PATH/TO/stopbard PATH/TO/stopbar
 For each corpus/attacks/*.yaml: start stopbard on the entry's `setup` (dev
 stubs + the real engine, limiter and starter policy bundle) and POST its
 request, or each request of its `requests` sequence in order. Requests are
@@ -10,14 +10,20 @@ before expected.at_step must be allowed (200). The stopping step must have
 the expected outcome as its HTTP status (allow 200 / escalate 202 / deny 403 /
 reject 400, refused by the gateway and never evaluated),
 exactly the expected policy IDs, the expected reason code if one is given,
-and an audit record. Needs: pyyaml.
+and an audit record. stopbard runs in gatekeeper mode: every allowed step must
+return a signed tx, which `stopbar decode-tx` decodes independently. Its
+recovered sender must equal `from` and its payload hash the decision's.
+Needs: pyyaml.
 """
 import glob, json, os, subprocess, sys, tempfile, urllib.error, urllib.request
 import yaml
 from corpus_template import Templater
 
 STATUS = {"allow": 200, "escalate": 202, "deny": 403, "reject": 400}
-stopbard = sys.argv[1]
+stopbard, stopbar_cli = sys.argv[1], sys.argv[2]
+# Anvil test account 0: a public test key, never funded. Corpus `from`
+# addresses use it, so gatekeeper mode can sign the allowed steps.
+ANVIL_KEY = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 failures = 0
 
 
@@ -33,6 +39,26 @@ def post(addr, body):
         return e.code, json.loads(e.read())
 
 
+def check_signed(i, sent, d):
+    """An allow must carry a signed tx that does exactly what was approved."""
+    if not d.get("signed_tx") or not d.get("token"):
+        return [f"step {i}: allow without signed_tx/token"]
+    out = subprocess.run([stopbar_cli, "decode-tx", d["signed_tx"]], capture_output=True, text=True)
+    if out.returncode != 0:
+        return [f"step {i}: decode-tx failed: {out.stderr.strip()}"]
+    tx = json.loads(out.stdout)
+    errs = []
+    if tx["action"]["from"] != sent["action"]["from"].lower():
+        errs.append(f"step {i}: recovered sender {tx['action']['from']} != from {sent['action']['from']}")
+    if tx["payload_hash"] != d["payload_hash"]:
+        errs.append(f"step {i}: signed tx payload {tx['payload_hash']} != decision {d['payload_hash']}")
+    if tx["tx_hash"] != d.get("tx_hash"):
+        errs.append(f"step {i}: tx_hash mismatch")
+    if not errs:
+        print(f"     step {i}: signed by {tx['action']['from']}, tx {tx['tx_hash'][:18]}…, payload bound")
+    return errs
+
+
 for path in sorted(glob.glob("corpus/attacks/*.yaml")):
     entry = yaml.safe_load(open(path))
     want = entry["expected"]
@@ -42,9 +68,11 @@ for path in sorted(glob.glob("corpus/attacks/*.yaml")):
     setup = dict(entry.get("setup", {}))
     tpl = Templater(setup.pop("issued_at_offset", "0s"))
     with tempfile.TemporaryDirectory() as tmp:
-        world, audit = os.path.join(tmp, "world.json"), os.path.join(tmp, "audit.jsonl")
+        world, audit, wallet = (os.path.join(tmp, f) for f in ("world.json", "audit.jsonl", "wallet"))
         json.dump(setup, open(world, "w"))
-        proc = subprocess.Popen([stopbard, "-listen", "127.0.0.1:0", "-dev-world", world, "-dev-audit", audit],
+        with open(os.open(wallet, os.O_CREAT | os.O_WRONLY, 0o600), "w") as f:
+            f.write("stopbar-dev-wallet-secp256k1-v1\n" + ANVIL_KEY + "\n")
+        proc = subprocess.Popen([stopbard, "-listen", "127.0.0.1:0", "-dev-world", world, "-dev-audit", audit, "-dev-wallet", wallet],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             line = proc.stdout.readline()
@@ -52,9 +80,12 @@ for path in sorted(glob.glob("corpus/attacks/*.yaml")):
                 raise RuntimeError(f"stopbard did not start: {line!r} {proc.stderr.read()}")
             addr = line.rsplit(" ", 1)[1].strip()
             for i, body in enumerate(steps[:stop_at]):
-                status, d = post(addr, tpl.render(body))
+                sent = tpl.render(body)
+                status, d = post(addr, sent)
                 if status != 200:
                     problems.append(f"step {i} should be allowed, got {status} {d.get('reasons')}")
+                    continue
+                problems += check_signed(i, sent, d)
             audit_lines = lambda: [json.loads(l) for l in open(audit)] if os.path.exists(audit) else []
             before = len(audit_lines())
             status, d = post(addr, tpl.render(steps[stop_at]))

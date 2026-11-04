@@ -1,6 +1,7 @@
-// Package decision holds the decision-token binding and, from CS-161, token
-// signing (spec/decision-token-v1.md). It is part of the trusted core:
-// stdlib only.
+// Package decision is the decision token (spec/decision-token-v1.md): the
+// payload binding, Ed25519 signing, key rotation and the verifier signer
+// adapters run before signing anything. It is part of the trusted core:
+// stdlib only, with compact JWS hand-rolled, so no JOSE library.
 package decision
 
 import (
@@ -35,10 +36,32 @@ func CanonicalAction(a model.Action) ([]byte, error) {
 		if !ok || v.Sign() < 0 {
 			return nil, errors.New("decision: evm_tx value_wei must be a non-negative decimal string")
 		}
+		if a.TxType == nil || *a.TxType != 2 {
+			return nil, fmt.Errorf("%w: only EIP-1559 (tx_type 2) transactions can be bound", ErrNoBinding)
+		}
+		fields := map[string]string{}
+		for name, raw := range map[string]string{
+			"tx_nonce": a.TxNonce, "gas_limit": a.GasLimit,
+			"max_fee_per_gas": a.MaxFeePerGas, "max_priority_fee_per_gas": a.MaxPriorityFeePerGas,
+		} {
+			n, ok := new(big.Int).SetString(raw, 10)
+			if !ok || n.Sign() < 0 {
+				return nil, fmt.Errorf("decision: evm_tx %s must be a non-negative decimal string", name)
+			}
+			fields[name] = n.String()
+		}
+		data := strings.ToLower(a.Data)
+		if data == "" {
+			data = "0x" // one spelling of empty calldata
+		}
+		// Every field of the unsigned transaction: the adapter signs exactly
+		// this and fills in nothing after the decision.
 		obj = map[string]any{
-			"v": 1, "kind": "evm_tx", "chain_id": *a.ChainID,
+			"v": 1, "kind": "evm_tx", "tx_type": 2, "chain_id": *a.ChainID,
 			"from": strings.ToLower(a.From), "to": strings.ToLower(a.To),
-			"value_wei": v.String(), "data": strings.ToLower(a.Data),
+			"value_wei": v.String(), "data": data,
+			"tx_nonce": fields["tx_nonce"], "gas_limit": fields["gas_limit"],
+			"max_fee_per_gas": fields["max_fee_per_gas"], "max_priority_fee_per_gas": fields["max_priority_fee_per_gas"],
 		}
 	case model.KindToolCall:
 		if a.Tool == nil || *a.Tool == "" {

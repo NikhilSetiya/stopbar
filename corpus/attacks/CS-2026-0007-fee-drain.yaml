@@ -1,0 +1,36 @@
+id: CS-2026-0007
+title: Zero-value transaction with an absurd fee burns the wallet's ETH (fee drain)
+category: fee_drain
+target: agent_wallet.evm
+description: >
+  The transaction moves nothing: zero value, to a known address. But it sets a 30,000,000 gas limit at
+  5,000 gwei per gas, so it may pay up to 150 ETH in fees. A value-only cap sees $0 and lets it through.
+  Stopbar binds every fee field into the decision, the decoder flags excessive_fee, and the limiter
+  counts the maximum fee as spend, so the drain is denied by policy and would also break the caps.
+setup:
+  known_destinations: ["0x4444444444444444444444444444444444444444"]
+  balances: {ETH: "10"}
+  prices_usd: {ETH: "3500"}
+request:
+  id: req_fixture_0007
+  tenant: test
+  nonce: ZmVlLWRyYWluLW5vbmNlLTAwMDc
+  issued_at: "2026-11-04T12:00:00Z"   # template: the replay sets it to now
+  ttl_seconds: 60
+  actor: {agent_id: defi-agent}
+  action:
+    kind: evm_tx
+    chain_id: 8453
+    from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"   # Anvil test account 0 (public test key, never funded)
+    to: "0x4444444444444444444444444444444444444444"
+    value_wei: "0"
+    data: "0x"
+    tx_type: 2
+    tx_nonce: "0"
+    gas_limit: "30000000"              # 30M gas ...
+    max_fee_per_gas: "5000000000000"   # ... at 5,000 gwei = up to 150 ETH in fees
+    max_priority_fee_per_gas: "5000000000000"
+  provenance: {labels: [trusted_user]}
+expected:
+  outcome: deny
+  policy_ids: [excessive-fee]

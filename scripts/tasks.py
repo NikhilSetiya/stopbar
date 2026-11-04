@@ -59,7 +59,7 @@ t("CS-132","P1",E,"Balance provider","RPC balance reads (native + ERC-20) with c
 t("CS-133","P1",E,"Destination registry","Known destinations per tenant; similarity check (prefix/suffix).","Poisoned address flagged similar_to_known.",1.5,"CS-104","FR-IR-2")
 
 E = "E5 Decoder & intent"
-t("CS-141","P1",E,"EVM decoder core","Native, ERC-20/721/1155, Permit2, multicall, Safe execTransaction; recursion depth 4.","Golden tests for each type.",3,"CS-005","FR-IR-1")
+t("CS-141","P1",E,"EVM decoder core","Native, ERC-20/721/1155, Permit2, multicall, Safe execTransaction; recursion depth 4. Per-chain excessive_fee thresholds (replaces devstub constants). Watch for allowed-but-loses-money patterns like fee drain (CS-2026-0007) and zero-min-out swaps: each becomes a flag + corpus entry.","Golden tests for each type; excessive_fee per chain.",3,"CS-005","FR-IR-1")
 t("CS-142","P1",E,"Risk flags","unlimited_approval, delegatecall, proxy_upgrade, new/similar destination, first_time_contract, opaque, unknown_call.","Each flag has positive + negative test.",2,"CS-141,CS-133","FR-IR-2")
 t("CS-143","P1",E,"Human renderer + checksum phrase","Plain-language template + 6-word address checksum.","Snapshot tests; look-alike addresses yield different phrases.",1.5,"CS-142","FR-IR-3")
 t("CS-145","P1",E,"Destructive-action flags + salami caps","min_out_zero and excessive_slippage flags for known swap routers; default per-destination count cap for non-allowlisted destinations.","Zero-min-out swap fixture denied; 6 sub-cap transfers to new destination escalate.",1.5,"CS-142,CS-121","FR-IR-2, FR-LIM-2a")
@@ -70,8 +70,8 @@ t("CS-151","P1",E,"Approver keys + CLI approvals","Ed25519 approver keys; `stopb
 t("CS-152","P1",E,"Escalation lifecycle","Create, poll (/v1/decisions), timeout -> deny, reject -> deny.","E2E: escalate -> approve -> signed tx returned.",1.5,"CS-151","FR-ESC-3")
 
 E = "E7 Decision & signer"
-t("CS-161","P1",E,"Decision signer (JWS Ed25519)","Sign decisions; JWKS endpoint; local key provider (dev-only guard). Blocked by CS-102: once Stopbar signs, a replayed request is a replayed signature.","Tokens verify with published JWKS; prod mode refuses local key.",1.5,"CS-008,CS-102","LLD §10")
-t("CS-162","P1",E,"Gatekeeper local signer adapter","Holds agent keystore; verifies decision token + payload_hash before signing.","Signing without valid token impossible (test).",2,"CS-161","FR-INT-3")
+t("CS-161","P1",E,"Decision signer (JWS Ed25519)","Sign decisions; JWKS endpoint; local key provider (dev-only guard). Blocked by CS-102: once Stopbar signs, a replayed request is a replayed signature.","Tokens verify with published JWKS; production verifier passes spec vectors (alg none/HS256/crit/kid swap); rotation: retired keys verify, never sign; local key provider requires -dev-world and 0600.",1.5,"CS-008,CS-102","LLD §10")
+t("CS-162","P1",E,"Gatekeeper local signer adapter","Holds agent keystore; verifies decision token + payload_hash (recomputed from the exact unsigned tx) before signing; own spent-token store; every tx field bound (nonce, gas, fees). Sign -> commit, failure -> release, both audited.","Signing without valid token impossible; tx swap, token replay, expired, wrong kid, alg confusion all refused (tests); allowed request returns tx whose recovered sender is from; fee drain (CS-2026-0007) denied.",2,"CS-161","FR-INT-3")
 t("CS-163","P1",E,"AWS KMS signer + decision key","KMS secp256k1 for tx signing; KMS for decision key.","Integration test against KMS (or localstack).",2,"CS-162")
 t("CS-164","P1",E,"Turnkey adapter","Gatekeeper via Turnkey API key held only by Stopbar.","Sandbox org test passes.",2,"CS-162")
 

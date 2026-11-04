@@ -87,6 +87,16 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
       "description": "Decision token (spec/decision-token-v1.md); allow only."
+    },
+    "signed_tx": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]+$",
+      "description": "Gatekeeper mode, allow only: raw signed EIP-1559 transaction."
+    },
+    "tx_hash": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{64}$",
+      "description": "Hash of signed_tx."
     }
   },
   "if": {

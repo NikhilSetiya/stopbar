@@ -67,9 +67,11 @@ type Limiter interface { // derives its own keys/amounts from the enriched reque
     Commit(ctx, id, txRef string) error
     Release(ctx, id string) error // idempotent; no-op for unknown id
 }
-type Signer interface {
-    Sign(ctx, d model.Decision) (token string, err error) // spec/decision-token-v1.md
+type Signer interface { // decision.Signer: Ed25519, stdlib, compact JWS hand-rolled (no JOSE library)
+    Sign(ctx, req model.ActionRequest, d model.Decision) (token string, err error) // spec/decision-token-v1.md
 }
+// Keys are served as decision.JWK (our own RFC 8037 OKP type, with a status
+// of active or retired) at /v1/keys. There is no jose.JSONWebKey in the core.
 type AuditLog interface {
     Append(ctx, typ model.AuditRecordType, body any) error
 }
@@ -110,6 +112,11 @@ Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decod
     "to": "0x…",
     "value_wei": "0",
     "data": "0xa9059cbb…",
+    "tx_type": 2,                      // EIP-1559 only; the complete unsigned tx is sent and bound
+    "tx_nonce": "7",
+    "gas_limit": "100000",
+    "max_fee_per_gas": "2000000000",
+    "max_priority_fee_per_gas": "1000000000",
     "tool": null,
     "args": null
   },
@@ -469,6 +476,18 @@ Normative spec: [`spec/decision-token-v1.md`](../spec/decision-token-v1.md), wit
 - `payload_hash` = sha256 over JCS of the normalised action (spec §2), not a chain tx hash. Gas, nonce and fees are adapter-chosen and capped.
 - Signer adapters **must** run the spec §4 checks in order. The checks include recomputing `payload_hash` from the tx they are about to sign, and single use per `(iss, tenant, nonce)`.
 
+### 10.1a Gatekeeper adapter (`internal/signer`, CS-162; edge)
+
+The adapter is edge code: it uses go-ethereum for secp256k1 and EIP-1559, which the stdlib lacks. It touches no key until the core verifier (`internal/decision`, stdlib only) has accepted the token. `SignTx` runs these steps in order:
+
+1. Verify the token (spec §4). This recomputes `payload_hash` from the exact unsigned tx and spends the token in the adapter's **own** spent store (`-state-dir/adapter-spent.db`, retention max TTL + 2× skew).
+2. Find the key for `from`.
+3. Build the transaction from the approved fields only.
+4. Sign, recover the sender, and require it to equal `from`.
+5. Read the *signed* tx back and require its payload hash to equal the token's.
+
+**Gatekeeper flow:** allow → sign → `Commit(reservation, tx hash)`. If the adapter refuses, or the commit can't be recorded, the reservation is released with the reason audited, the signed bytes are discarded, and the caller gets a 403 with `FAIL_CLOSED_ADAPTER`. `stopbar decode-tx` decodes any signed tx independently: recovered sender, every field, and its payload hash.
+
 ### 10.2 EIP-712 (co-signer, Phase 4)
 
 ```
@@ -480,7 +499,11 @@ domain: {name: "Stopbar", version: "1", chainId, verifyingContract: guard}
 
 ### 10.3 Key providers
 
-`local` (file, dev only — refuses to start in `--mode=prod`), `awskms`, `pkcs11` (HSM, Phase 4), `nitro` (enclave, Phase 4).
+`local` (file, dev only), `awskms`, `pkcs11` (HSM, Phase 4), `nitro` (enclave, Phase 4).
+
+- The `local` provider loads only with `-dev-world`, and refuses key files more open than 0600.
+- Decision keys (Ed25519) and wallet keys (secp256k1) live in **separately tagged files**, so neither can be loaded as the other, and the same path for both is refused.
+- **Rotation:** `KeyRing.Rotate` makes a new key active. The old key moves to retired, where it still verifies and never signs again. `/v1/keys` lists both with their status.
 
 ## 11. Audit log
 

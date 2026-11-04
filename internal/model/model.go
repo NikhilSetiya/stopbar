@@ -58,14 +58,22 @@ type Actor struct {
 
 // Action is the thing to be signed or executed.
 type Action struct {
-	Kind     ActionKind     `json:"kind"`
-	ChainID  *uint64        `json:"chain_id,omitempty"`
-	From     string         `json:"from,omitempty"`
-	To       string         `json:"to,omitempty"`
-	ValueWei string         `json:"value_wei,omitempty"`
-	Data     string         `json:"data,omitempty"`
-	Tool     *string        `json:"tool"`
-	Args     map[string]any `json:"args"`
+	Kind     ActionKind `json:"kind"`
+	ChainID  *uint64    `json:"chain_id,omitempty"`
+	From     string     `json:"from,omitempty"`
+	To       string     `json:"to,omitempty"`
+	ValueWei string     `json:"value_wei,omitempty"`
+	Data     string     `json:"data,omitempty"`
+	// The rest of the unsigned EVM transaction. All of it is bound by
+	// payload_hash: the signer adapter fills in nothing after the decision
+	// (decision-token-v1 §2.1). Only EIP-1559 (type 2) is supported.
+	TxType               *int           `json:"tx_type,omitempty"`
+	TxNonce              string         `json:"tx_nonce,omitempty"`
+	GasLimit             string         `json:"gas_limit,omitempty"`
+	MaxFeePerGas         string         `json:"max_fee_per_gas,omitempty"`
+	MaxPriorityFeePerGas string         `json:"max_priority_fee_per_gas,omitempty"`
+	Tool                 *string        `json:"tool"`
+	Args                 map[string]any `json:"args"`
 }
 
 // Provenance carries taint: where the inputs that led to this action came from.
@@ -110,9 +118,13 @@ type Asset struct {
 // EnrichedRequest is the policy evaluation context (LLD §3.3).
 // Decimal values are strings to avoid float rounding in policy comparisons.
 type EnrichedRequest struct {
-	Request                ActionRequest       `json:"request"`
-	Intent                 IntentSummary       `json:"intent"`
-	AmountUSD              *string             `json:"amount_usd"`
+	Request   ActionRequest `json:"request"`
+	Intent    IntentSummary `json:"intent"`
+	AmountUSD *string       `json:"amount_usd"`
+	// MaxFeeUSD is the most the transaction can spend on fees
+	// (gas_limit × max_fee_per_gas, priced). The limiter counts it on top of
+	// AmountUSD, so a zero-value transaction cannot burn ETH under a value cap.
+	MaxFeeUSD              *string             `json:"max_fee_usd"`
 	PriceStale             bool                `json:"price_stale"`
 	PctOfBalance           *string             `json:"pct_of_balance"`
 	Velocity               map[string]Velocity `json:"velocity"` // keys: 1m, 1h, 24h
@@ -156,6 +168,10 @@ type Decision struct {
 	// Token is the decision token (spec/decision-token-v1.md), present only
 	// on allow. It is not part of what it signs.
 	Token string `json:"token,omitempty"`
+	// SignedTx and TxHash are set in gatekeeper mode: the raw signed
+	// transaction, ready to broadcast, and its hash. Allow only.
+	SignedTx string `json:"signed_tx,omitempty"`
+	TxHash   string `json:"tx_hash,omitempty"`
 }
 
 // Approval is a human (or second-agent) countersignature on an escalation.
@@ -252,6 +268,30 @@ func (r ActionRequest) Validate() error {
 		if a.Data != "" && !reHexData.MatchString(a.Data) {
 			add("action.data must be 0x-prefixed even-length hex")
 		}
+		if a.TxType == nil || *a.TxType != 2 {
+			add("action.tx_type must be 2 (EIP-1559)")
+		}
+		num := func(name, v string, bits int) *big.Int {
+			if !reDecimal.MatchString(v) {
+				add("action.%s must be a non-negative decimal integer string", name)
+				return nil
+			}
+			n, _ := new(big.Int).SetString(v, 10)
+			if n.BitLen() > bits {
+				add("action.%s exceeds uint%d", name, bits)
+				return nil
+			}
+			return n
+		}
+		num("tx_nonce", a.TxNonce, 64)
+		if g := num("gas_limit", a.GasLimit, 64); g != nil && g.Cmp(big.NewInt(21000)) < 0 {
+			add("action.gas_limit must be at least 21000")
+		}
+		maxFee := num("max_fee_per_gas", a.MaxFeePerGas, 256)
+		tip := num("max_priority_fee_per_gas", a.MaxPriorityFeePerGas, 256)
+		if maxFee != nil && tip != nil && tip.Cmp(maxFee) > 0 {
+			add("action.max_priority_fee_per_gas must not exceed max_fee_per_gas")
+		}
 	case KindToolCall:
 		if a.Tool == nil || *a.Tool == "" {
 			add("action.tool is required for tool_call")
@@ -292,8 +332,8 @@ func (d Decision) Validate() error {
 	if d.Outcome != Allow && len(d.Reasons) == 0 {
 		return errors.New("model: deny/escalate decisions must carry at least one reason")
 	}
-	if d.Outcome != Allow && d.Token != "" {
-		return errors.New("model: only allow decisions may carry a token")
+	if d.Outcome != Allow && (d.Token != "" || d.SignedTx != "" || d.TxHash != "") {
+		return errors.New("model: only allow decisions may carry a token or signed transaction")
 	}
 	if d.Outcome == Allow && (d.PolicyBundleHash == "" || d.PayloadHash == "") {
 		return errors.New("model: allow decisions must bind policy_bundle_hash and payload_hash")

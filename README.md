@@ -11,10 +11,10 @@ HTTP/1.1 403 Forbidden
 {"request_id":"req_fixture_0001","outcome":"deny",
  "reasons":[{"code":"POLICY","policy_id":"taint-unknown-destination",
    "message":"Untrusted content is in the agent's context and the destination is not allowlisted"}],
- "policy_bundle_hash":"sha256:…","payload_hash":"sha256:b5bca746…", …}
+ "policy_bundle_hash":"sha256:…","payload_hash":"sha256:b1feb874…", …}
 ```
 
-Every attack in the [corpus](corpus/) is replayed like this, over real HTTP, on every PR. Today the engine and Cedar policy are real, and the decoder, price/balance data, limiter and signer are [dev stubs](internal/devstub/) that are being replaced task by task.
+Every attack in the [corpus](corpus/) is replayed like this, over real HTTP, on every PR. The gateway, engine, Cedar policy, limiter and decision signer are real. In gatekeeper mode an allow comes back as a signed transaction, and the replay checks its recovered sender. The decoder, price/balance data and audit store are still [dev stubs](internal/devstub/), being replaced task by task.
 
 > Status: pre-alpha. The gateway, engine and Cedar policy layer are in, and the seed attacks are blocked end to end. See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
 

@@ -102,6 +102,26 @@
             "object",
             "null"
           ]
+        },
+        "tx_type": {
+          "const": 2,
+          "description": "EIP-1559 only"
+        },
+        "tx_nonce": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "gas_limit": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "max_fee_per_gas": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "max_priority_fee_per_gas": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
         }
       },
       "allOf": [
@@ -118,7 +138,12 @@
               "chain_id",
               "from",
               "to",
-              "value_wei"
+              "value_wei",
+              "tx_type",
+              "tx_nonce",
+              "gas_limit",
+              "max_fee_per_gas",
+              "max_priority_fee_per_gas"
             ],
             "properties": {
               "from": {
