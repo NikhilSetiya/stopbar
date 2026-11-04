@@ -63,10 +63,15 @@ def _retry_hint(e) -> float | None:
 
 class _Stream:
     """Stands in for the SDK's stream manager. The request (with retries)
-    happens in get_final_message, which is all AgentDojo calls."""
+    happens in get_final_message, which is all AgentDojo calls.
 
-    def __init__(self, inner, kw, meter: Meter):
-        self.inner, self.kw, self.meter = inner, kw, meter
+    Each attempt uses a fresh SDK client, closed afterwards: AgentDojo runs
+    every query in its own asyncio.run(), and a pooled connection from the
+    previous event loop fails ("Event loop is closed"). In the PILOT run that
+    cost one network retry per call (PILOT §7.1)."""
+
+    def __init__(self, sdk_factory, kw, meter: Meter):
+        self.sdk_factory, self.kw, self.meter = sdk_factory, kw, meter
 
     async def __aenter__(self):
         return self
@@ -80,8 +85,9 @@ class _Stream:
         attempt = 0
         while True:
             attempt += 1
+            sdk = self.sdk_factory()
             try:
-                async with self.inner.stream(**self.kw) as s:
+                async with sdk.messages.stream(**self.kw) as s:
                     msg = await s.get_final_message()
             except anthropic.APIStatusError as e:
                 if e.status_code not in RETRY_STATUS:
@@ -92,25 +98,27 @@ class _Stream:
             else:
                 self.meter.record(msg)
                 return msg
+            finally:
+                await sdk.close()
             await asyncio.sleep(wait)
 
 
 class _Messages:
-    def __init__(self, inner, meter, output_config):
-        self.inner, self.meter, self.output_config = inner, meter, output_config
+    def __init__(self, sdk_factory, meter, output_config):
+        self.sdk_factory, self.meter, self.output_config = sdk_factory, meter, output_config
 
     def stream(self, **kw):
         if self.output_config:
             kw["extra_body"] = {**kw.get("extra_body", {}), "output_config": self.output_config}
-        return _Stream(self.inner, kw, self.meter)
+        return _Stream(self.sdk_factory, kw, self.meter)
 
 
 class MeteredClient:
-    """Wraps AsyncAnthropic: injects pinned output_config, meters spend, retries infrastructure."""
+    """Stands in for AsyncAnthropic: injects pinned output_config, meters
+    spend, retries infrastructure. sdk_factory returns a new AsyncAnthropic."""
 
-    def __init__(self, inner, meter, output_config):
-        self.inner = inner  # keep the SDK client alive
-        self.messages = _Messages(inner.messages, meter, output_config)
+    def __init__(self, sdk_factory, meter, output_config):
+        self.messages = _Messages(sdk_factory, meter, output_config)
 
 
 def make_llm(model: str, cap_usd: float, infra: Infra):
@@ -118,8 +126,9 @@ def make_llm(model: str, cap_usd: float, infra: Infra):
         raise SystemExit(f"model {model} is not pinned in PILOT §2")
     ad_models.MODEL_NAMES.setdefault(model, "Claude")  # same prose name as every Claude model
     meter = Meter(model, cap_usd, infra)
-    sdk = anthropic.AsyncAnthropic(api_key=read_keychain(KEYCHAIN_SERVICE), max_retries=0, timeout=300.0)
-    client = MeteredClient(sdk, meter, MODELS[model]["output_config"])
+    key = read_keychain(KEYCHAIN_SERVICE)
+    client = MeteredClient(lambda: anthropic.AsyncAnthropic(api_key=key, max_retries=0, timeout=300.0),
+                           meter, MODELS[model]["output_config"])
     if model == "claude-opus-5-5":
         llm = AnthropicLLM(client, model, temperature=None, max_tokens=16000)
     else:

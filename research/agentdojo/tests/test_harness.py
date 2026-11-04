@@ -160,18 +160,30 @@ class _AStream:
 
 class _AMessages:
     def __init__(self, *script):
-        self.script, self.n = list(script), 0
+        self.script, self.n, self.clients, self.closed = list(script), 0, 0, 0
 
     def stream(self, **kw):
         self.n += 1
         return _AStream(self.script.pop(0))
+
+    def factory(self):
+        """A fresh fake SDK client per request, as make_llm's factory gives."""
+        self.clients += 1
+        outer = self
+
+        class SDK:
+            messages = outer
+
+            async def close(self):
+                outer.closed += 1
+        return SDK()
 
 
 class AnthropicInfra(_NoSleep):
     def client(self, *script, cap=20.0, attempts=12):
         meter = llm.Meter("claude-haiku-4-5-20251001", cap, infra.Infra(max_attempts=attempts))
         inner = _AMessages(*script)
-        return llm._Messages(inner, meter, None), meter, inner
+        return llm._Messages(inner.factory, meter, None), meter, inner
 
     def final(self, msgs):
         async def go():
@@ -186,6 +198,16 @@ class AnthropicInfra(_NoSleep):
         self.assertEqual(self.final(msgs).model, "claude-haiku-4-5-20251001")
         self.assertEqual(meter.infra.retries, {"http_429": 1, "http_529": 1, "network": 1})
         self.assertEqual((meter.calls, inner.n), (1, 4))
+        self.assertEqual((inner.clients, inner.closed), (4, 4))  # one client per attempt, always closed
+
+    def test_no_connection_outlives_its_event_loop(self):
+        """AgentDojo runs each query in its own asyncio.run(); the PILOT lost
+        one retry per call to a pooled connection from the previous loop."""
+        msgs, meter, inner = self.client(_Msg(), _Msg())
+        self.final(msgs)
+        self.final(msgs)  # second asyncio.run
+        self.assertEqual(meter.infra.retries, {})
+        self.assertEqual((inner.clients, inner.closed), (2, 2))
 
     def test_bad_request_is_not_retried(self):
         msgs, meter, inner = self.client(_api_err(anthropic.BadRequestError, 400))
