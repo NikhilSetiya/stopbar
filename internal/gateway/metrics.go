@@ -79,3 +79,17 @@ func writeCounter(w *strings.Builder, name, help, label string, vals map[string]
 		fmt.Fprintf(w, "%s{%s=%q} %d\n", name, label, k, vals[k])
 	}
 }
+
+// renderCounters renders plain named counters, sorted by name.
+func renderCounters(c map[string]uint64) string {
+	names := make([]string, 0, len(c))
+	for n := range c {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var w strings.Builder
+	for _, n := range names {
+		fmt.Fprintf(&w, "# TYPE %s counter\n%s %d\n", n, n, c[n])
+	}
+	return w.String()
+}

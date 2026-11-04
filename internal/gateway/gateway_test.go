@@ -34,7 +34,7 @@ func newGW(cfg Config) *Gateway {
 // alwaysFresh lets the fuzzer reach the evaluator with repeated nonces.
 type alwaysFresh struct{}
 
-func (alwaysFresh) Consume(string, time.Time) (bool, error) { return true, nil }
+func (alwaysFresh) ConsumeWith(string, time.Time, *model.AuditEntry) (bool, error) { return true, nil }
 
 func fixture(t testing.TB, name string) []byte {
 	t.Helper()
@@ -423,7 +423,9 @@ func TestConcurrentReplayExactlyOneWins(t *testing.T) {
 
 type brokenNonces struct{}
 
-func (brokenNonces) Consume(string, time.Time) (bool, error) { return false, errors.New("disk full") }
+func (brokenNonces) ConsumeWith(string, time.Time, *model.AuditEntry) (bool, error) {
+	return false, errors.New("disk full")
+}
 
 func TestNonceStoreFailureFailsClosed(t *testing.T) {
 	var evaluations atomic.Int64
@@ -434,6 +436,13 @@ func TestNonceStoreFailureFailsClosed(t *testing.T) {
 	res, b := do(t, g, "POST", "/v1/evaluate", "application/json", fixture(t, "action_request.evm_tx.json"))
 	if res.StatusCode != 500 || errCode(t, b) != CodeInternal || evaluations.Load() != 0 {
 		t.Fatalf("got %d %s, evaluations=%d", res.StatusCode, b, evaluations.Load())
+	}
+}
+
+func TestExtraCountersInMetrics(t *testing.T) {
+	g := newGW(Config{Counters: func() map[string]uint64 { return map[string]uint64{"stopbar_audit_unavailable_denials_total": 3} }})
+	if _, b := do(t, g, "GET", "/metrics", "", nil); !bytes.Contains(b, []byte("stopbar_audit_unavailable_denials_total 3")) {
+		t.Fatalf("%s", b)
 	}
 }
 

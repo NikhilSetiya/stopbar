@@ -11,14 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"os"
 	"strings"
-	"sync"
-	"time"
 
-	"github.com/NikhilSetiya/stopbar/internal/canon"
 	"github.com/NikhilSetiya/stopbar/internal/limiter"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
@@ -238,51 +234,4 @@ func decimalString(r *big.Rat) *string {
 		s += "." + frac
 	}
 	return &s
-}
-
-// ---- audit (replaced by CS-171) ----
-
-// Audit appends hash-chained JSON lines (spec/audit-hash-v1.md) to W.
-type Audit struct {
-	W     io.Writer
-	Clock func() time.Time
-
-	mu   sync.Mutex
-	seq  uint64
-	prev string
-}
-
-func (a *Audit) Append(_ context.Context, typ model.AuditRecordType, body any) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.prev == "" {
-		a.prev = canon.GenesisHash
-	}
-	now := time.Now
-	if a.Clock != nil {
-		now = a.Clock
-	}
-	// Round-trip the body through JSON so the hash covers exactly what is written.
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	var generic any
-	if err := json.Unmarshal(raw, &generic); err != nil {
-		return err
-	}
-	rec := model.AuditRecord{Seq: a.seq + 1, TS: now().UTC().Format(time.RFC3339Nano), Type: typ, Body: generic, PrevHash: a.prev}
-	rec.Hash, err = canon.RecordHash(rec.Seq, rec.TS, string(rec.Type), rec.Body, rec.PrevHash)
-	if err != nil {
-		return err
-	}
-	line, err := json.Marshal(rec)
-	if err != nil {
-		return err
-	}
-	if _, err := a.W.Write(append(line, '\n')); err != nil {
-		return err
-	}
-	a.seq, a.prev = rec.Seq, rec.Hash
-	return nil
 }

@@ -46,15 +46,27 @@ type Adapter struct {
 	keys     map[common.Address]*ecdsa.PrivateKey
 }
 
+// Options for New.
+type Options struct {
+	// AllowWellKnownTestKeys admits the public Anvil/Hardhat default accounts.
+	// stopbard sets it only with -dev-world: people copy example configs, and
+	// a known private key in production is an instant drain.
+	AllowWellKnownTestKeys bool
+}
+
 // New returns an adapter. The verifier must have pinned keys, this adapter's
 // audience, and a spent-token store.
-func New(v *decision.Verifier, keys []*ecdsa.PrivateKey) (*Adapter, error) {
+func New(v *decision.Verifier, keys []*ecdsa.PrivateKey, opts Options) (*Adapter, error) {
 	if v == nil || v.Spent == nil || v.Keys == nil || v.Aud == "" {
 		return nil, errors.New("signer: verifier needs pinned keys, an audience and a spent store")
 	}
 	a := &Adapter{verifier: v, keys: map[common.Address]*ecdsa.PrivateKey{}}
 	for _, k := range keys {
-		a.keys[crypto.PubkeyToAddress(k.PublicKey)] = k
+		addr := crypto.PubkeyToAddress(k.PublicKey)
+		if isWellKnownTestKey(addr) && !opts.AllowWellKnownTestKeys {
+			return nil, fmt.Errorf("%w: %s", ErrWellKnownKey, addr.Hex())
+		}
+		a.keys[addr] = k
 	}
 	return a, nil
 }

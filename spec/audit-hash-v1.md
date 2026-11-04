@@ -1,6 +1,6 @@
 # Audit record hash — v1
 
-Status: draft (CS-006). Implemented in `internal/canon/hash.go`.
+Status: draft (CS-006). Implemented in `internal/canon/hash.go`. Freezes at the first tagged release, like `decision-token-v1`: later changes bump `v`.
 
 Every audit record links to its predecessor:
 

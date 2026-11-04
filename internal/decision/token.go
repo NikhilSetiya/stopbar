@@ -124,6 +124,11 @@ func (k *KeyRing) JWKS() []JWK {
 	return out
 }
 
+// SignCheckpoint signs an audit checkpoint with the active key. Callers
+// pass a domain-prefixed message (audit.CheckpointDomain), which can never
+// be a token's signing input (that is two base64url segments).
+func (k *KeyRing) SignCheckpoint(msg []byte) (kid string, sig []byte) { return k.sign(msg) }
+
 func (k *KeyRing) sign(input []byte) (kid string, sig []byte) {
 	k.mu.RLock()
 	defer k.mu.RUnlock()

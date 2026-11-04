@@ -194,6 +194,14 @@ const (
 	AuditOverride     AuditRecordType = "override"
 )
 
+// AuditEntry is an audit record before the log assigns its sequence number,
+// timestamp and hashes. State stores take one so that the record is written
+// in the same transaction as the state change it describes.
+type AuditEntry struct {
+	Type AuditRecordType
+	Body any
+}
+
 // AuditRecord is one link in the hash chain (LLD §3.5, spec/audit-hash-v1.md).
 type AuditRecord struct {
 	Seq      uint64          `json:"seq"`

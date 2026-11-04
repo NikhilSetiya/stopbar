@@ -1,5 +1,5 @@
-// Package nonce is the single-use nonce store behind the gateway's replay
-// check (CS-102, LLD §4).
+// Package nonce is the single-use store behind the gateway's replay check
+// (CS-102, LLD §4) and the signer adapter's spent-token check.
 //
 // Consume is an atomic check-and-set: of any number of concurrent calls with
 // the same key, exactly one sees fresh=true. A nonce is recorded durably
@@ -12,12 +12,17 @@ package nonce
 import (
 	"container/heap"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+
+	"github.com/NikhilSetiya/stopbar/internal/audit"
+	"github.com/NikhilSetiya/stopbar/internal/model"
+	"github.com/NikhilSetiya/stopbar/internal/store"
 )
 
 // Key scopes a nonce to (tenant, agent): one tenant cannot burn another's
@@ -28,17 +33,17 @@ func Key(tenant, agent, nonce string) string {
 
 // Store records consumed nonces until their retention ends.
 type Store struct {
-	mu    sync.Mutex
-	clock func() time.Time
-	until map[string]time.Time
-	exp   expHeap
-	db    *bolt.DB // nil: memory only
+	mu     sync.Mutex
+	clock  func() time.Time
+	until  map[string]time.Time
+	exp    expHeap
+	db     *store.DB // nil: memory only
+	bucket []byte
+	log    *audit.Log // set: ConsumeWith records entries atomically
 }
 
-var bucket = []byte("nonces_v1")
-
-// NewMemory returns a store that forgets on restart (tests, dev without a
-// state directory).
+// NewMemory returns a store that forgets on restart and records no audit
+// entries. Unit tests only: stopbard always uses Open on the state file.
 func NewMemory(clock func() time.Time) *Store {
 	if clock == nil {
 		clock = time.Now
@@ -46,17 +51,16 @@ func NewMemory(clock func() time.Time) *Store {
 	return &Store{clock: clock, until: map[string]time.Time{}}
 }
 
-// OpenBolt opens or creates a durable store and loads unexpired nonces.
-func OpenBolt(path string, clock func() time.Time) (*Store, error) {
+// Open uses bucket in the shared state file and loads unexpired nonces. With
+// a log, ConsumeWith writes its audit entry in the same transaction as the
+// nonce: an accepted request is recorded if and only if its nonce is spent.
+func Open(db *store.DB, bucket string, log *audit.Log, clock func() time.Time) (*Store, error) {
 	s := NewMemory(clock)
-	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: time.Second})
-	if err != nil {
-		return nil, fmt.Errorf("nonce: open %s: %w", path, err)
-	}
+	s.db, s.bucket, s.log = db, []byte(bucket), log
 	now := s.clock()
 	var expired [][]byte
-	err = db.Update(func(tx *bolt.Tx) error {
-		b, err := tx.CreateBucketIfNotExists(bucket)
+	err := db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists(s.bucket)
 		if err != nil {
 			return err
 		}
@@ -82,24 +86,20 @@ func OpenBolt(path string, clock func() time.Time) (*Store, error) {
 		return nil
 	})
 	if err != nil {
-		_ = db.Close()
 		return nil, err
 	}
-	s.db = db
 	return s, nil
-}
-
-// Close releases the bbolt file.
-func (s *Store) Close() error {
-	if s.db == nil {
-		return nil
-	}
-	return s.db.Close()
 }
 
 // Consume records key until `until` and reports whether it was unseen. An
 // error means the nonce state is unknown, and the caller must fail closed.
 func (s *Store) Consume(key string, until time.Time) (fresh bool, err error) {
+	return s.ConsumeWith(key, until, nil)
+}
+
+// ConsumeWith is Consume plus an audit entry written in the same
+// transaction as the nonce (when the store has a log).
+func (s *Store) ConsumeWith(key string, until time.Time, entry *model.AuditEntry) (fresh bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.clock()
@@ -110,7 +110,18 @@ func (s *Store) Consume(key string, until time.Time) (fresh bool, err error) {
 	if s.db != nil {
 		v := make([]byte, 8)
 		binary.BigEndian.PutUint64(v, uint64(until.UnixNano()))
-		if err := s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bucket).Put([]byte(key), v) }); err != nil {
+		if entry != nil && s.log == nil {
+			return false, errors.New("nonce: no audit log configured for an audited consume")
+		}
+		if err := s.db.Update(func(tx *bolt.Tx) error {
+			if err := tx.Bucket(s.bucket).Put([]byte(key), v); err != nil {
+				return err
+			}
+			if entry != nil {
+				return s.log.AppendTx(tx, *entry)
+			}
+			return nil
+		}); err != nil {
 			return false, fmt.Errorf("nonce: persist: %w", err)
 		}
 	}
@@ -141,7 +152,7 @@ func (s *Store) prune(now time.Time) {
 	if s.db != nil && len(gone) > 0 {
 		// Best effort: OpenBolt drops expired entries on load as well.
 		_ = s.db.Update(func(tx *bolt.Tx) error {
-			b := tx.Bucket(bucket)
+			b := tx.Bucket(s.bucket)
 			for _, k := range gone {
 				if err := b.Delete([]byte(k)); err != nil {
 					return err

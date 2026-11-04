@@ -1,6 +1,8 @@
 # Decision token — v1
 
-Status: draft (CS-008). Amended in CS-161 to bind every transaction field (§2.1, §2.3). No verifier outside this repository existed, so the version stays at v1, and the vectors were regenerated. Test vectors: [`vectors/decision-token-v1.json`](vectors/decision-token-v1.json),
+Status: draft (CS-008). Amended in CS-161 to bind every transaction field (§2.1, §2.3). No verifier outside this repository existed, so the version stays at v1, and the vectors were regenerated.
+
+**Freeze rule:** this spec freezes at the first tagged release (v0.1.0-alpha). After that, *any* change to the header, the claims, the canonical action or the verification order bumps `v` and `typ`, and both versions are specified side by side. A frozen version is never amended in place. Test vectors: [`vectors/decision-token-v1.json`](vectors/decision-token-v1.json),
 generated and checked by `internal/decision/token_v1_test.go`.
 
 A decision token is Stopbar's signed statement that one specific action may be

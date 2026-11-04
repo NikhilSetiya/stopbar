@@ -76,7 +76,7 @@ t("CS-163","P1",E,"AWS KMS signer + decision key","KMS secp256k1 for tx signing;
 t("CS-164","P1",E,"Turnkey adapter","Gatekeeper via Turnkey API key held only by Stopbar.","Sandbox org test passes.",2,"CS-162")
 
 E = "E8 Audit"
-t("CS-171","P1",E,"Hash-chained log","Append-only bbolt bucket; record per event in same tx as state change. Denials that cannot be audited (store down) must not be silent: high-severity log + stopbar_audit_unavailable_denials_total metric.","Tampering one record fails verify. Audit store down -> deny, error log and counter increments (test).",2,"CS-006","FR-AUD-1")
+t("CS-171","P1",E,"Hash-chained log","Append-only bbolt bucket; record per event in same tx as state change. Denials that cannot be audited (store down) must not be silent: high-severity log + stopbar_audit_unavailable_denials_total metric.","Tampering one record fails verify (edit a byte, delete, reorder, re-hash, truncate). Audit store down -> deny, error log and counter increments (test). Record written in the same bbolt tx as the limiter/nonce state change. CI replay ends with audit verify passing over the run's log.",2,"CS-006","FR-AUD-1")
 t("CS-172","P1",E,"Checkpoints + verify CLI","Signed Merkle checkpoints; `stopbar audit verify`.","Verify passes clean log, fails tampered.",1.5,"CS-171,CS-161","FR-AUD-2,3")
 
 E = "E9 SDKs & provenance"

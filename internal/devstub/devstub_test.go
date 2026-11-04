@@ -1,15 +1,12 @@
 package devstub
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"math/big"
 	"slices"
 	"strings"
 	"testing"
 
-	"github.com/NikhilSetiya/stopbar/internal/canon"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
@@ -17,7 +14,6 @@ import (
 var (
 	_ engine.Decoder  = Decoder{}
 	_ engine.Enricher = (*World)(nil)
-	_ engine.AuditLog = (*Audit)(nil)
 )
 
 func evm(data string) model.Action {
@@ -121,27 +117,5 @@ func TestDecimalStringRoundsUp(t *testing.T) {
 	r, _ := new(big.Rat).SetString("1/3")
 	if got := *decimalString(r); got != "0.333333333333333334" {
 		t.Fatalf("1/3 -> %s", got)
-	}
-}
-
-func TestAuditChains(t *testing.T) {
-	var buf bytes.Buffer
-	a := &Audit{W: &buf}
-	for i := range 3 {
-		if err := a.Append(context.Background(), model.AuditDecision, map[string]any{"n": i}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	prev := canon.GenesisHash
-	for i, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-		var r model.AuditRecord
-		if err := json.Unmarshal([]byte(line), &r); err != nil {
-			t.Fatal(err)
-		}
-		h, err := canon.RecordHash(r.Seq, r.TS, string(r.Type), r.Body, r.PrevHash)
-		if err != nil || r.PrevHash != prev || r.Hash != h || r.Seq != uint64(i+1) {
-			t.Fatalf("record %d breaks the chain: %+v", i, r)
-		}
-		prev = r.Hash
 	}
 }

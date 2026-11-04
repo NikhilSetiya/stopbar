@@ -2,6 +2,7 @@ package signer
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/NikhilSetiya/stopbar/internal/canon"
@@ -49,7 +51,7 @@ func newRig(t *testing.T) *rig {
 	}
 	v := &decision.Verifier{Keys: r.ring.PublicKeys, Iss: "stopbar:test", Aud: "signer:local-1", Tenant: "acme",
 		Spent: nonce.NewMemory(nil), Clock: func() time.Time { return r.now }}
-	if r.adapter, err = New(v, nil); err == nil {
+	if r.adapter, err = New(v, nil, Options{}); err == nil {
 		r.adapter.keys[crypto.PubkeyToAddress(wk.PublicKey)] = wk
 	} else {
 		t.Fatal(err)
@@ -353,5 +355,31 @@ func TestGatekeeper(t *testing.T) {
 	req.Nonce = "nonce-000000000004"
 	if d, _ = g.Evaluate(context.Background(), req); d.Outcome != model.Deny || d.SignedTx != "" {
 		t.Fatalf("deny passthrough: %+v", d)
+	}
+}
+
+// Published test keys are refused unless explicitly allowed (dev mode).
+func TestWellKnownTestKeysRefused(t *testing.T) {
+	v := &decision.Verifier{Keys: func() map[string]ed25519.PublicKey { return nil }, Aud: "a", Spent: nonce.NewMemory(nil)}
+	k, _ := crypto.HexToECDSA(anvilKey)
+	if _, err := New(v, []*ecdsa.PrivateKey{k}, Options{}); !errors.Is(err, ErrWellKnownKey) {
+		t.Fatalf("anvil key accepted outside dev mode: %v", err)
+	}
+	if _, err := New(v, []*ecdsa.PrivateKey{k}, Options{AllowWellKnownTestKeys: true}); err != nil {
+		t.Fatalf("dev mode: %v", err)
+	}
+	fresh, _ := crypto.GenerateKey()
+	if _, err := New(v, []*ecdsa.PrivateKey{fresh}, Options{}); err != nil {
+		t.Fatalf("a fresh key was refused: %v", err)
+	}
+	// The blocklist is addresses: check the entries are well-formed, and that
+	// account 0's published key really maps to the first entry.
+	if len(wellKnownTestAddresses) != 20 || !isWellKnownTestKey(crypto.PubkeyToAddress(k.PublicKey)) {
+		t.Fatal("blocklist malformed")
+	}
+	for a := range wellKnownTestAddresses {
+		if !common.IsHexAddress(a) || a != strings.ToLower(a) {
+			t.Fatalf("bad entry %s", a)
+		}
 	}
 }

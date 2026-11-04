@@ -39,6 +39,9 @@ bad="$(go list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./internal/
 [[ -z "$bad" ]] || { echo "FAIL third-party imports in the trusted core: $bad"; exit 1; }
 echo "ok   no third-party imports"
 
+step "audit: chain, checkpoints, tamper (edit a byte, delete, reorder, truncate) fail verify (CS-171/172)"
+go test -race -count=1 ./internal/audit/
+
 step "corpus + spec fixtures against schemas"
 python3 scripts/validate_corpus.py
 
@@ -85,7 +88,6 @@ fi
 
 # Pending stages, enabled as they land:
 #   CS-121+     replace dev stubs with real limiter/enrichers; replay stays green
-#   CS-171      audit chain verify over the replay run
 #   CS-191..193 full corpus replay (test/replay)
 
 printf '\nE2E OK\n'
