@@ -21,9 +21,9 @@ go test -race -run TestRFC8785NumberVectors ./internal/canon/   # single test
 python3 scripts/tasks.py                                         # regenerate backlog
 ```
 
-**Run `make e2e` after every build step**, and extend `scripts/e2e.sh` in the same change that adds a pipeline stage (engine evaluate, corpus replay, audit verify). Locally on macOS, `make` and `-race` need the Xcode license accepted (`sudo xcodebuild -license`). Until then, run `./scripts/e2e.sh` directly, and it falls back to non-race tests.
+**Run `make e2e` after every build step**, and extend `scripts/e2e.sh` in the same change that adds a pipeline stage (engine evaluate, corpus replay, audit verify). On macOS, `make` and `-race` need the Xcode license accepted. Without it, `./scripts/e2e.sh` falls back to non-race tests. e2e fails if golangci-lint isn't exactly the pinned version, and it prints the install command.
 
-CI (`.github/workflows/ci.yml`) runs gofmt, vet, build, race tests, a 30s fuzz smoke, govulncheck and golangci-lint v1.64.8. The `corpus` workflow runs `scripts/validate_corpus.py`, which checks `corpus/attacks/*.yaml` (and each entry's `request`) and `spec/fixtures/*.json` against the JSON schemas. Keep both green. The module is `github.com/NikhilSetiya/stopbar` on Go 1.24. Dependencies whose latest versions need a newer Go are pinned: cedar-go v1.8.0 and govulncheck v1.1.4. Use `GOTOOLCHAIN=local` when adding deps so `go get` doesn't silently bump the `go` directive.
+CI (`.github/workflows/ci.yml`) runs gofmt, vet, build, race tests, a 30s fuzz smoke, govulncheck v1.9.0 and golangci-lint v2.15.0. The `corpus` workflow runs `scripts/validate_corpus.py`, which checks `corpus/attacks/*.yaml` (and each entry's `request`) and `spec/fixtures/*.json` against the JSON schemas. Keep both green. The module is `github.com/NikhilSetiya/stopbar` on Go 1.26 (`go 1.26.0`, `toolchain go1.26.10`). CI's setup-go reads the toolchain from `go.mod`, and locally `GOTOOLCHAIN=auto` fetches it. Tool versions are exact pins, never `@latest`, and live both in `ci.yml` and at the top of the lint section of `scripts/e2e.sh`. GitHub Actions are pinned to commit SHAs with a version comment. Dependabot proposes updates weekly. Before taking one, check that its `go` requirement doesn't exceed `go.mod`.
 
 ## Source of truth
 

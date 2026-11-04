@@ -5,6 +5,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# The toolchain comes from go.mod (go/toolchain lines); GOTOOLCHAIN=auto fetches it.
+printf '==> toolchain: %s\n' "$(go version)"
+
 step() { printf '\n==> %s\n' "$*"; }
 
 step gofmt
@@ -34,16 +37,21 @@ step "binaries start"
 go run ./cmd/stopbard
 go run ./cmd/stopbar
 
-# Lint is required: a skipped lint let a CI failure through once.
+# Tool pins; keep in step with .github/workflows/ci.yml.
+GOLANGCI_LINT=v2.15.0
+GOVULNCHECK=v1.9.0
+
+# Lint is required: a skipped lint let a CI failure through once. A stale
+# binary (e.g. v1) fails too, since its findings differ from CI's.
 PATH="$(go env GOPATH)/bin:$PATH"
-command -v golangci-lint >/dev/null || {
-  echo "golangci-lint missing. Install the CI version:"
-  echo "  GOTOOLCHAIN=local go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8"
+if ! golangci-lint --version 2>/dev/null | grep -q "version ${GOLANGCI_LINT#v} "; then
+  echo "golangci-lint ${GOLANGCI_LINT} required (CI version). Install from the repo root:"
+  echo "  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT}"
   exit 1
-}
+fi
 step golangci-lint; golangci-lint run
 if [[ "${OFFLINE:-0}" != 1 ]]; then
-  step govulncheck; GOTOOLCHAIN=local go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+  step govulncheck; go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK}" ./...
 fi
 
 # Pending stages, enabled as they land:
