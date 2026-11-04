@@ -28,7 +28,7 @@ Before the first episode it writes `run.json`: the requested model ID (the model
 - **Interleaved and atomic:** each user task runs benign A0, benign A2, then attacked A0 and A2. A task counts only once both arms finish it. A stopped run discards the unfinished task, and `--resume` reruns it.
 - **Infrastructure is not a result:** rate limits, overloads, 5xx, timeouts and network errors are retried with backoff inside the client (SDK retries off; logged to `infra.jsonl`). Exhausted retries, a quota or the spend cap stops the run with exit code 3, and the run can be resumed.
 - **Pinned model:** the run stops if the API reports a model other than the pin.
-- **`anthropic==1.17.0`:** AgentDojo 0.1.35's Anthropic element crashes on SDK 2.x, which made `MessageParam` a `Union`.
+- **`anthropic==0.125.0`:** AgentDojo 0.1.35's Anthropic element crashes on newer SDKs: 2.x made `MessageParam` a `Union`, and 1.x dropped `temperature` from `stream()`.
 
 **Client adaptations**, each recorded in `run.json` and to be disclosed in the results:
 - **Model-name entry:** the pinned model ID is added to AgentDojo's `MODEL_NAMES` with the prose AgentDojo uses for its family: `"AI model developed by Google"` for Gemini, `"Claude"` for Claude. The unmodified `important_instructions` attack looks the agent's name up there and otherwise raises an error.

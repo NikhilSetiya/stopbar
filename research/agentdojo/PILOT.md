@@ -181,7 +181,11 @@ Assumptions:
    - The run also stops if the API reports a model other than the pin.
 3. **The API key** is read from the macOS keychain (`stopbar-anthropic-key`) and never logged.
 4. **Exact model ID:** Haiku is requested by its snapshot ID, `claude-haiku-4-5-20251001`. The alias `claude-haiku-4-5` is answered with that ID (verified 2026-11-04), so the requested ID equals the reported one. The run stops if they ever differ. Same model, pinned exactly, per Amendment 1.
-5. **Dependency pin:** `anthropic==1.17.0` (it was 2.5.0). AgentDojo 0.1.35's Anthropic element builds `MessageParam(...)`, and from 2.0.0 the SDK made that a `Union`, which can't be instantiated. Every Anthropic episode would crash on its first message. 1.17.0 is the newest release where it works, and it's inside AgentDojo's declared range (`anthropic>=0.47.0`). This only selects a working dependency version; it changes no behaviour.
+5. **Dependency pin:** `anthropic==0.125.0` (it was 2.5.0). AgentDojo 0.1.35's Anthropic element makes two assumptions about the SDK:
+   - it calls `MessageParam(...)`, which 2.x made a `Union` that can't be instantiated;
+   - it passes `temperature` to `messages.stream()`, which 1.x removed.
+
+   Both crashed the pipeline before any request was sent: 0 API calls and $0, in an aborted start at 2026-11-04T22:31Z. 0.125.0 is the newest version that tested compatible on both, and it's inside AgentDojo's declared range (`anthropic>=0.47.0`). A unit test binds AgentDojo's actual call against the pinned SDK. This only selects a working dependency version; it changes no behaviour.
 
 ## 7. Results (to be filled in only after the runs)
 

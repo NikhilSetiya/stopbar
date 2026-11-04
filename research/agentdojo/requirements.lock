@@ -1,6 +1,6 @@
 agentdojo==0.1.35
 annotated-types==0.8.0
-anthropic==1.17.0
+anthropic==0.125.0
 anyio==4.16.0
 cachebox==5.2.3
 certifi==2026.10.23

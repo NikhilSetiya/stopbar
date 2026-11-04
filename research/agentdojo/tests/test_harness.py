@@ -212,6 +212,22 @@ class AnthropicInfra(_NoSleep):
             self.final(msgs)
 
 
+class AnthropicSdkCompatibility(unittest.TestCase):
+    """The fakes above accept any keyword; the real SDK doesn't. AgentDojo
+    0.1.35's Anthropic element needs a TypedDict MessageParam (it calls it)
+    and a stream() that takes temperature: anthropic 1.x drops temperature
+    and 2.x makes MessageParam a Union. Both broke a run before any request."""
+
+    def test_agentdojo_call_binds_to_the_pinned_sdk(self):
+        import inspect, typing
+        from anthropic.resources.messages import AsyncMessages
+        from anthropic.types import MessageParam
+        self.assertIsNone(typing.get_origin(MessageParam))
+        MessageParam(content="hi", role="user")
+        inspect.signature(AsyncMessages.stream).bind(
+            None, model="m", messages=[], tools=[], max_tokens=1, system="s", temperature=0.0, thinking={})
+
+
 class ThoughtSignatures(unittest.TestCase):
     def test_model_turn_is_sent_back_verbatim(self):
         """The stock element would rebuild this turn without its signature."""
