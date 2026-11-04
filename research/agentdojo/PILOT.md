@@ -157,6 +157,31 @@ Assumptions:
    - AgentDojo's `MODEL_NAMES` gets an entry mapping our model ID to `"Claude"`, the name it uses for every Claude model, so the attack text is identical to the text AgentDojo produces for any Claude model.
    - Opus 5.5 runs with no `temperature` (the API rejects one), effort `medium`, and `max_tokens` 16000 (its thinking can't be turned off and counts against that limit). These apply identically to every arm. Without a temperature, Opus runs aren't deterministic; the §1 rule (more repetitions if a CI straddles a threshold) covers that. Haiku uses AgentDojo's stock settings.
 
+## 6d. Amendment 4 (2026-11-04): Gemini Flash on the free tier, evaluated and NOT taken; no data collected
+
+**Proposal:** run the pilot on a stable Gemini Flash on the free tier instead of Haiku.
+
+**Evaluated on 2026-11-04 with about 15 single-request probes and no pilot episodes, then rejected:**
+- **Quota.** The free tier allows **20 requests per day per model**, according to the API's own 429: `GenerateRequestsPerDayPerProjectPerModel-FreeTier`, value `20`. The pilot needs about 1,000–1,600 model requests, which would take 50–80 days.
+- **Silent model redirects.**
+  - A request for `gemini-3.7-flash` was answered by `gemini-3.8-flash`, and `gemini-3.5-flash` by `gemini-3.6-flash`, according to `model_version` in the response.
+  - `gemini-2.5-flash` answers 404 for new users.
+  - A two-month run on a model ID that can be rerouted underneath us can't be pinned.
+- **No per-request billing signal.** On a key whose 429s name `FreeTier` quotas, `x-gemini-service-tier` reads `standard`. That header describes the service level, not billing, so a "$0 guard" can't be enforced from responses.
+
+**Decision:** the pilot stays on `claude-haiku-4-5` with a $20 cap (Amendment 3.2). The Gemini client is kept for later runs. It sends thought signatures back verbatim, which Gemini 3 requires (it rejects function-call turns without them, HTTP 400), and it stops on any rerouted model or non-free quota.
+
+**Kept from the proposal, applied to every model including Haiku** (recorded in `run.json`):
+1. **Arms interleaved per user task:** benign A0, benign A2, then A0 and A2 on every injection pair. Rate limits, outages or a model change land on both arms alike.
+2. **Infrastructure is never a task result.**
+   - Rate limits, overloads, 5xx, timeouts and network errors are retried with backoff inside the client. The SDK's own retries are off, so every retry is counted (`infra.jsonl`, `run.json`).
+   - Exhausted retries, a quota, or the spend cap **stop the run**.
+   - A user task counts only once both arms finish it. An interrupted task is discarded and rerun on `--resume`.
+   - The spend cap covers the whole run, across resumed segments.
+   - The run also stops if the API reports a model other than the pin.
+3. **The API key** is read from the macOS keychain (`stopbar-anthropic-key`) and never logged.
+4. **Dependency pin:** `anthropic==1.17.0` (it was 2.5.0). AgentDojo 0.1.35's Anthropic element builds `MessageParam(...)`, and from 2.0.0 the SDK made that a `Union`, which can't be instantiated. Every Anthropic episode would crash on its first message. 1.17.0 is the newest release where it works, and it's inside AgentDojo's declared range (`anthropic>=0.47.0`). This only selects a working dependency version; it changes no behaviour.
+
 ## 7. Results (to be filled in only after the runs)
 
 ### 7.0 Pre-run observation (2026-11-04T20:41Z, recorded before any paid run)

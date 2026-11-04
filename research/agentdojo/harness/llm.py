@@ -1,31 +1,36 @@
-"""Model clients for the pilot (PILOT §2, Amendment 1).
+"""Anthropic model client (PILOT §2, Amendments 1 and 3).
 
 Adaptations to AgentDojo's stock Anthropic element, each recorded in run.json:
 - the pinned model IDs are registered in AgentDojo's MODEL_NAMES with the
   same prose name AgentDojo uses for every Claude model ("Claude"), so the
-  unmodified important_instructions attack can address the agent exactly as
+  unmodified important_instructions attack addresses the agent exactly as
   it would any other Claude model;
 - claude-opus-5-5: no temperature (rejected by the API), effort pinned to
   "medium" via output_config, and max_tokens raised from AgentDojo's 1024
   because adaptive thinking (which can't be disabled) counts against it;
-- every response is metered against a hard spend cap, and the model ID the
-  API reports is recorded.
-"""
-import threading
+- the API key is read from the macOS keychain and never logged.
 
+Every response is metered against a hard spend cap, and the model ID the API
+reports is recorded. Infrastructure (harness.infra): rate limits, overloads,
+5xx, timeouts and network errors are retried here with backoff (honouring
+retry-after); the SDK's own retries are off so every retry is counted.
+"""
+import asyncio, threading
+
+import anthropic
 from agentdojo import models as ad_models
 from agentdojo.agent_pipeline.llms.anthropic_llm import AnthropicLLM
 
+from .infra import Infra, InfraAbort, SpendCapExceeded, read_keychain
 from .pins import MODELS
 
-
-class SpendCapExceeded(RuntimeError):
-    pass
+KEYCHAIN_SERVICE = "stopbar-anthropic-key"
+RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504, 529}
 
 
 class Meter:
-    def __init__(self, model: str, cap_usd: float):
-        self.model, self.cap = model, cap_usd
+    def __init__(self, model: str, cap_usd: float, infra: Infra):
+        self.model, self.cap, self.infra = model, cap_usd, infra
         self.input_tokens = self.output_tokens = self.calls = 0
         self.reported_models: set[str] = set()
         self._lock = threading.Lock()
@@ -42,25 +47,52 @@ class Meter:
             self.output_tokens += u.output_tokens or 0
             self.calls += 1
             self.reported_models.add(message.model)
-            if self.usd > self.cap:
-                raise SpendCapExceeded(f"spend ${self.usd:.2f} exceeded the cap ${self.cap:.2f}")
+            over = self.usd > self.cap
+        if over:
+            self.infra.abort(SpendCapExceeded(f"spend ${self.usd:.2f} exceeded the cap ${self.cap:.2f}"))
+        if message.model != self.model:
+            self.infra.abort(InfraAbort(f"API reports model {message.model!r}, pinned {self.model!r}"))
+
+
+def _retry_hint(e) -> float | None:
+    try:
+        return float(e.response.headers.get("retry-after"))
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 class _Stream:
-    def __init__(self, cm, meter):
-        self.cm, self.meter = cm, meter
+    """Stands in for the SDK's stream manager. The request (with retries)
+    happens in get_final_message, which is all AgentDojo calls."""
+
+    def __init__(self, inner, kw, meter: Meter):
+        self.inner, self.kw, self.meter = inner, kw, meter
 
     async def __aenter__(self):
-        self.stream = await self.cm.__aenter__()
         return self
 
     async def __aexit__(self, *a):
-        return await self.cm.__aexit__(*a)
+        return False
 
     async def get_final_message(self):
-        msg = await self.stream.get_final_message()
-        self.meter.record(msg)
-        return msg
+        infra = self.meter.infra
+        infra.check_open()
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                async with self.inner.stream(**self.kw) as s:
+                    msg = await s.get_final_message()
+            except anthropic.APIStatusError as e:
+                if e.status_code not in RETRY_STATUS:
+                    raise  # a real 4xx: AgentDojo's own handling applies
+                wait = infra.backoff(f"http_{e.status_code}", attempt, _retry_hint(e), request_id=getattr(e, "request_id", None))
+            except (anthropic.APIConnectionError, anthropic.APITimeoutError) as e:
+                wait = infra.backoff("network", attempt, error=type(e).__name__)
+            else:
+                self.meter.record(msg)
+                return msg
+            await asyncio.sleep(wait)
 
 
 class _Messages:
@@ -70,32 +102,34 @@ class _Messages:
     def stream(self, **kw):
         if self.output_config:
             kw["extra_body"] = {**kw.get("extra_body", {}), "output_config": self.output_config}
-        return _Stream(self.inner.stream(**kw), self.meter)
+        return _Stream(self.inner, kw, self.meter)
 
 
 class MeteredClient:
-    """Wraps AsyncAnthropic: injects pinned output_config and meters spend."""
+    """Wraps AsyncAnthropic: injects pinned output_config, meters spend, retries infrastructure."""
 
     def __init__(self, inner, meter, output_config):
+        self.inner = inner  # keep the SDK client alive
         self.messages = _Messages(inner.messages, meter, output_config)
 
 
-def make_llm(model: str, cap_usd: float):
-    import anthropic
-
+def make_llm(model: str, cap_usd: float, infra: Infra):
     if model not in MODELS:
         raise SystemExit(f"model {model} is not pinned in PILOT §2")
     ad_models.MODEL_NAMES.setdefault(model, "Claude")  # same prose name as every Claude model
-    meter = Meter(model, cap_usd)
-    client = MeteredClient(anthropic.AsyncAnthropic(), meter, MODELS[model]["output_config"])
+    meter = Meter(model, cap_usd, infra)
+    sdk = anthropic.AsyncAnthropic(api_key=read_keychain(KEYCHAIN_SERVICE), max_retries=0, timeout=300.0)
+    client = MeteredClient(sdk, meter, MODELS[model]["output_config"])
     if model == "claude-opus-5-5":
         llm = AnthropicLLM(client, model, temperature=None, max_tokens=16000)
     else:
         llm = AnthropicLLM(client, model)  # AgentDojo's stock settings
+    llm.name = model
     adaptations = {
         "model_names_entry": {model: "Claude"},
         "temperature": None if model == "claude-opus-5-5" else 0.0,
         "max_tokens": 16000 if model == "claude-opus-5-5" else 1024,
         "output_config": MODELS[model]["output_config"],
+        "api_key": f"macOS keychain service {KEYCHAIN_SERVICE!r}; never logged",
     }
     return llm, meter, adaptations

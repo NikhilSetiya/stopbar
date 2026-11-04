@@ -1,7 +1,14 @@
-"""Run one (model, arm) of the pilot (PILOT.md). Usage:
+"""Run the pilot (PILOT.md), both arms interleaved per user task. Usage:
 
-  python -m harness.run --arm A0|A2 --model claude-haiku-4-5 --out results/ [--stopbard URL] [--cap-usd 20]
-  python -m harness.run --arm A2 --dry-run --stopbard URL --out results/   # no API: scripted ground-truth agent
+  python -m harness.run --model claude-haiku-4-5 --cap-usd 20 --out results/ [--stopbard URL]
+  python -m harness.run --resume results/<run dir> [--stopbard URL]        # after a quota stop
+  python -m harness.run --dry-run --stopbard URL --out results/            # no API: scripted ground-truth agent
+
+For each user task it runs A0 then A2 on the benign episode, then A0 then A2
+on every injection pair (Amendment 4), so the arms see the same API
+conditions. A user task counts only once both arms finish it; if the run
+stops part-way (quota, infrastructure), that task's partial episodes are
+discarded and --resume reruns it. Infrastructure trouble is never a task result.
 
 Before the first episode it writes run.json (exact model ID, UTC date/time,
 AgentDojo version + sha256, benchmark version, Stopbar commit, bundle hash)
@@ -21,7 +28,8 @@ from agentdojo.task_suite.load_suites import get_suite
 from agentdojo.types import ChatAssistantMessage, text_content_block_from_string
 
 from . import gate
-from .pins import (AGENTDOJO_SDIST_SHA256, AGENTDOJO_VERSION, ATTACK, BENCHMARK_VERSION, BUNDLE_DIR, SUITE,
+from .infra import Infra
+from .pins import (AGENTDOJO_SDIST_SHA256, AGENTDOJO_VERSION, ATTACK, BENCHMARK_VERSION, BUNDLE_DIR, MODELS, SUITE,
                    frozen_bundle_hash)
 from .split import compute_split
 
@@ -71,81 +79,154 @@ def probe_bundle_hash(url: str) -> str:
     return d["policy_bundle_hash"]
 
 
+def now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def keep_done(path: pathlib.Path, done: set[str]):
+    """Drop rows of unfinished user tasks (a stopped run's partial task)."""
+    if path.exists():
+        rows = [l for l in path.read_text().splitlines() if l and json.loads(l)["user_task"] in done]
+        path.write_text("".join(r + "\n" for r in rows))
+
+
+def done_tasks(out: pathlib.Path) -> set[str]:
+    p = out / "progress.jsonl"
+    return {json.loads(l)["user_task"] for l in p.read_text().splitlines() if l} if p.exists() else set()
+
+
+ARMS = ("A0", "A2")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--arm", choices=["A0", "A2"], required=True)
     ap.add_argument("--model")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--resume", type=pathlib.Path, help="continue a stopped run in this directory")
     ap.add_argument("--stopbard", default="http://127.0.0.1:7777")
-    ap.add_argument("--out", type=pathlib.Path, required=True)
-    ap.add_argument("--cap-usd", type=float, default=20.0)
+    ap.add_argument("--out", type=pathlib.Path)
+    ap.add_argument("--cap-usd", type=float, default=20.0, help="hard spend cap across the whole run, all segments (Anthropic)")
     ap.add_argument("--limit", type=int, default=0, help="first N user tasks only (smoke runs; never for results)")
     a = ap.parse_args()
-    if not a.dry_run and not a.model:
-        ap.error("--model is required unless --dry-run")
+
+    prev = None
+    if a.resume:
+        prev = json.loads((a.resume / "run.json").read_text())
+        a.model, a.dry_run, a.limit = prev["model_id_requested"], prev["dry_run"], prev["limit"]
+    elif not a.out or (not a.dry_run and not a.model):
+        ap.error("--out and (--model or --dry-run) are required unless --resume")
+    if a.model and a.model not in MODELS:
+        ap.error(f"model {a.model} is not pinned")
 
     # ---- pins: refuse to start on any mismatch ----
     if importlib.metadata.version("agentdojo") != AGENTDOJO_VERSION:
         raise SystemExit(f"agentdojo {importlib.metadata.version('agentdojo')} != pinned {AGENTDOJO_VERSION}")
     frozen = frozen_bundle_hash()
-    bundle = None
-    if a.arm == "A2":
-        bundle = probe_bundle_hash(a.stopbard)
-        if bundle != frozen:
-            raise SystemExit(f"stopbard enforces {bundle}, frozen bundle is {frozen}: refusing to run")
+    bundle = probe_bundle_hash(a.stopbard)
+    if bundle != frozen:
+        raise SystemExit(f"stopbard enforces {bundle}, frozen bundle is {frozen}: refusing to run")
     commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=BUNDLE_DIR).stdout.strip()
     dirty = subprocess.run(["git", "status", "--porcelain", "--", "."], capture_output=True, text=True, cwd=BUNDLE_DIR).stdout.strip()
     if dirty:
         raise SystemExit("the policy bundle directory has uncommitted changes: refusing to run")
 
-    started = datetime.datetime.now(datetime.timezone.utc)
-    tag = "dry-run" if a.dry_run else a.model
-    out = a.out / f"{started:%Y%m%dT%H%M%SZ}_{tag}_{a.arm}"
-    out.mkdir(parents=True)
     suite = get_suite(BENCHMARK_VERSION, SUITE)
-    split = compute_split()
-    (out / "split.json").write_text(json.dumps(split, indent=2, sort_keys=True))
+    if prev:
+        out = a.resume
+        for k, v in (("stopbar_commit", commit), ("frozen_bundle_hash", frozen), ("agentdojo_version", AGENTDOJO_VERSION)):
+            if prev[k] != v:
+                raise SystemExit(f"resume: {k} is {v}, the run started with {prev[k]}: refusing to mix")
+        run = prev
+    else:
+        started = datetime.datetime.now(datetime.timezone.utc)
+        out = a.out / f"{started:%Y%m%dT%H%M%SZ}_{'dry-run' if a.dry_run else a.model}"
+        for arm in ARMS:
+            (out / arm).mkdir(parents=True)
+        (out / "split.json").write_text(json.dumps(compute_split(), indent=2, sort_keys=True))
+        run = {"arms": list(ARMS), "interleaved": "per user task: benign A0, A2; then attacked A0, A2",
+               "dry_run": a.dry_run, "model_id_requested": a.model, "started_utc": started.isoformat(),
+               "agentdojo_version": AGENTDOJO_VERSION, "agentdojo_sdist_sha256": AGENTDOJO_SDIST_SHA256,
+               "benchmark_version": BENCHMARK_VERSION, "suite": SUITE, "attack": ATTACK,
+               "stopbar_commit": commit, "frozen_bundle_hash": frozen, "limit": a.limit, "segments": []}
+    done = done_tasks(out)
+    for arm in ARMS:
+        keep_done(out / arm / "episodes.jsonl", done)
+    keep_done(out / "A2" / "calls.jsonl", done)
 
-    meter, adaptations = None, {}
+    meter = guard = None
+    infra = Infra(out / "infra.jsonl")
+    provider = MODELS[a.model]["provider"] if a.model else None
     if a.dry_run:
         from agentdojo import models as ad_models
         ad_models.MODEL_NAMES.setdefault(ScriptedAgent.name, "Claude")
+        adaptations = {}
+    elif provider == "google":
+        from . import gemini
+        llm, guard, adaptations = gemini.make_llm(a.model, MODELS[a.model], infra)
+        run["model_version_listed"] = llm.client.inner.models.get(model=a.model).version
     else:
         from .llm import make_llm
-        llm, meter, adaptations = make_llm(a.model, a.cap_usd)
-    run = {"arm": a.arm, "dry_run": a.dry_run, "model_id_requested": a.model, "started_utc": started.isoformat(),
-           "agentdojo_version": AGENTDOJO_VERSION, "agentdojo_sdist_sha256": AGENTDOJO_SDIST_SHA256,
-           "benchmark_version": BENCHMARK_VERSION, "suite": SUITE, "attack": ATTACK,
-           "stopbar_commit": commit, "frozen_bundle_hash": frozen, "enforced_bundle_hash": bundle,
-           "model_adaptations": adaptations, "cap_usd": a.cap_usd, "limit": a.limit}
+        cap = prev.get("cap_usd", a.cap_usd) if prev else a.cap_usd  # the cap covers every segment
+        spent = sum(s.get("spend_usd") or 0 for s in run["segments"])
+        llm, meter, adaptations = make_llm(a.model, cap - spent, infra)
+        run["cap_usd"] = cap
+    if not a.dry_run:
+        adaptations["infrastructure"] = ("rate limits, overloads, 5xx, timeouts and network errors retried with backoff in the "
+                                         "client (SDK retries off); exhausted retries, a quota or the spend cap stop the run, "
+                                         "and the unfinished user task is rerun on --resume")
+    run["model_adaptations"] = adaptations
+    seg = {"started_utc": now(), "enforced_bundle_hash": bundle, "tasks_already_done": len(done)}
+    run["segments"].append(seg)
     (out / "run.json").write_text(json.dumps(run, indent=2, sort_keys=True))
 
-    log = gate.CallLog(out / "calls.jsonl") if a.arm == "A2" else None
-    episodes = open(out / "episodes.jsonl", "w", buffering=1)
-    task_ids = sorted(suite.user_tasks)[: a.limit or None]
-    logdir = out / "agentdojo_logs"  # AgentDojo's own per-episode traces
+    log = gate.CallLog(out / "A2" / "calls.jsonl")
+    episodes = {arm: open(out / arm / "episodes.jsonl", "a", buffering=1) for arm in ARMS}
+    progress = open(out / "progress.jsonl", "a", buffering=1)
+    task_ids = [t for t in sorted(suite.user_tasks)[: a.limit or None] if t not in done]
+    stopped = None
     try:
-        with OutputLogger(str(logdir)):
+        with OutputLogger(str(out / "agentdojo_logs")):
             for uid in task_ids:
                 task = suite.user_tasks[uid]
-                llm_for_task = ScriptedAgent(task) if a.dry_run else llm
-                # benign
-                p = pipeline(llm_for_task, a.arm, a.stopbard, log, {"user_task": uid, "injection_task": None})
-                utility, _ = run_task_without_injection_tasks(suite, p, task, logdir=logdir, force_rerun=True, benchmark_version=BENCHMARK_VERSION)
-                episodes.write(json.dumps({"user_task": uid, "injection_task": None, "utility": bool(utility)}) + "\n")
-                # under attack: AgentDojo's own attack and security check, unmodified
-                p = pipeline(llm_for_task, a.arm, a.stopbard, log, {"user_task": uid, "injection_task": "*"})
-                attack = load_attack(ATTACK, suite, p)
-                utils, secs = run_task_with_injection_tasks(suite, p, task, attack, logdir=logdir, force_rerun=True, benchmark_version=BENCHMARK_VERSION)
-                for (u, inj), ok in utils.items():
-                    episodes.write(json.dumps({"user_task": u, "injection_task": inj, "utility": bool(ok), "attack_success": bool(secs[(u, inj)])}) + "\n")
+                agent = ScriptedAgent(task) if a.dry_run else llm
+                for arm in ARMS:  # benign
+                    p = pipeline(agent, arm, a.stopbard, log, {"user_task": uid, "injection_task": None})
+                    utility, _ = run_task_without_injection_tasks(suite, p, task, logdir=out / "agentdojo_logs" / arm,
+                                                                  force_rerun=True, benchmark_version=BENCHMARK_VERSION)
+                    episodes[arm].write(json.dumps({"user_task": uid, "injection_task": None, "utility": bool(utility)}) + "\n")
+                for arm in ARMS:  # under attack: AgentDojo's own attack and security check, unmodified
+                    p = pipeline(agent, arm, a.stopbard, log, {"user_task": uid, "injection_task": "*"})
+                    utils, secs = run_task_with_injection_tasks(suite, p, task, load_attack(ATTACK, suite, p),
+                                                                logdir=out / "agentdojo_logs" / arm, force_rerun=True,
+                                                                benchmark_version=BENCHMARK_VERSION)
+                    for (u, inj), ok in utils.items():
+                        episodes[arm].write(json.dumps({"user_task": u, "injection_task": inj, "utility": bool(ok),
+                                                        "attack_success": bool(secs[(u, inj)])}) + "\n")
+                progress.write(json.dumps({"user_task": uid, "finished_utc": now()}) + "\n")
+    except Exception:
+        # AgentDojo may wrap our abort (its Anthropic retry raises tenacity's
+        # RetryError), so the latch, not the exception type, says it was ours.
+        if not infra.aborted:
+            raise
+        stopped = infra.aborted  # infrastructure, not a result: the unfinished task is dropped on resume
     finally:
-        run["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        seg["finished_utc"] = now()
+        seg["tasks_done_total"] = len(done_tasks(out))
+        if stopped:
+            seg["stopped"] = f"{type(stopped).__name__}: {stopped}"
         if meter:
-            run.update({"model_ids_reported": sorted(meter.reported_models), "api_calls": meter.calls,
+            seg.update({"model_ids_reported": sorted(meter.reported_models), "api_calls": meter.calls,
                         "input_tokens": meter.input_tokens, "output_tokens": meter.output_tokens, "spend_usd": round(meter.usd, 4)})
+        if guard:
+            seg.update({"model_versions_reported": sorted(guard.reported_models), "service_tiers_seen": sorted(guard.tiers),
+                        "api_calls": guard.calls, "prompt_tokens": guard.prompt_tokens, "output_tokens": guard.output_tokens,
+                        "thought_tokens": guard.thought_tokens})
+        seg["infra_retries"] = dict(infra.retries)
         (out / "run.json").write_text(json.dumps(run, indent=2, sort_keys=True))
     print(out)
+    if stopped:
+        print(f"stopped: {stopped}", file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":
