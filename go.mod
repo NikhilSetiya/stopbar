@@ -1,3 +1,3 @@
-module github.com/setiyanikhil/countersign
+module github.com/setiyanikhil/stopbar
 
 go 1.24

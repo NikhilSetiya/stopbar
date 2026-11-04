@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Countersign attack corpus entry (v1)",
+  "title": "Stopbar attack corpus entry (v1)",
   "type": "object",
   "required": ["id", "title", "category", "target", "expected"],
   "oneOf": [{"required": ["request"]}, {"required": ["requests"]}],

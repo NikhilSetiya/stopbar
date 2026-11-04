@@ -1,4 +1,4 @@
-# Countersign — High-Level Design
+# Stopbar — High-Level Design
 
 | | |
 |---|---|
@@ -11,7 +11,7 @@
 ## 1. Design goals
 
 1. **Independent verification of intent** between any requester and any signer.
-2. **Unbypassable when it matters** — enforcement modes where the signer cannot act without Countersign.
+2. **Unbypassable when it matters** — enforcement modes where the signer cannot act without Stopbar.
 3. **Deterministic and replayable** — every decision reproducible from request + policy version + state snapshot.
 4. **Small trusted core** — the decision path is minimal; integrations live outside it.
 
@@ -24,7 +24,7 @@ flowchart LR
         S[Internal service]
         U[Operator UI]
     end
-    subgraph CS["Countersign (separate trust domain)"]
+    subgraph CS["Stopbar (separate trust domain)"]
         G[Gateway]
         E[Decision engine]
         DS[Decision signer]
@@ -54,18 +54,18 @@ The security of the system depends entirely on which mode is used. This is the m
 
 | Mode | How it works | Bypass possible? | Use |
 |---|---|---|---|
-| **Advisory** | Requester asks Countersign, then calls signer itself | Yes | Dev, shadow-mode rollout |
-| **Gatekeeper** | Countersign holds the signer credential (local key, KMS role, Turnkey API key). Requester never has it. | Only by compromising Countersign | Phase 1 default for agent wallets |
-| **Co-signer** | Signer requires Countersign's signature: 2-of-2 multisig, Safe Guard contract verifying an EIP-712 decision, or an MPC key share held by Countersign | Only by compromising Countersign *and* the requester's key | Phase 4, custody/exchange |
+| **Advisory** | Requester asks Stopbar, then calls signer itself | Yes | Dev, shadow-mode rollout |
+| **Gatekeeper** | Stopbar holds the signer credential (local key, KMS role, Turnkey API key). Requester never has it. | Only by compromising Stopbar | Phase 1 default for agent wallets |
+| **Co-signer** | Signer requires Stopbar's signature: 2-of-2 multisig, Safe Guard contract verifying an EIP-712 decision, or an MPC key share held by Stopbar | Only by compromising Stopbar *and* the requester's key | Phase 4, custody/exchange |
 
 ```mermaid
 flowchart TB
     subgraph Gatekeeper
-        R1[Requester] -->|request| C1[Countersign]
+        R1[Requester] -->|request| C1[Stopbar]
         C1 -->|holds credential, signs| K1[Signer]
     end
     subgraph CoSigner["Co-signer"]
-        R2[Requester] -->|request + partial sig| C2[Countersign]
+        R2[Requester] -->|request + partial sig| C2[Stopbar]
         C2 -->|countersignature| K2[Safe Guard / MPC]
         R2 -->|tx| K2
         K2 -->|requires both| Chain[(Chain)]
@@ -94,7 +94,7 @@ flowchart TB
 
 ### Trust boundary: harness vs. model
 
-v1 assumes the **harness** (agent framework + Provenance SDK) is trusted and the **model** is not. That covers T1 and T2 (PRD §2.4). It does not cover T3 or T4: a compromised requester or a scheming agent that controls code can forge, strip or launder labels. Against T3/T4 only controls that live inside Countersign hold: caps, allowlists, circuit breaker, gatekeeper mode.
+v1 assumes the **harness** (agent framework + Provenance SDK) is trusted and the **model** is not. That covers T1 and T2 (PRD §2.4). It does not cover T3 or T4: a compromised requester or a scheming agent that controls code can forge, strip or launder labels. Against T3/T4 only controls that live inside Stopbar hold: caps, allowlists, circuit breaker, gatekeeper mode.
 
 ### Note on provenance trust
 
@@ -146,7 +146,7 @@ sequenceDiagram
 
 1. Agent reads a tweet / NFT metadata → SDK labels it `untrusted_onchain` (+ `decoded` if model decoded an encoding).
 2. Agent proposes `transfer 50,000 DRB → 0xabc…`.
-3. SDK attaches context taint; sends to Countersign.
+3. SDK attaches context taint; sends to Stopbar.
 4. Decoder: ERC-20 transfer, destination never seen before.
 5. Policy: `forbid when tainted(untrusted_*) && destination not in allowlist` → **deny**.
 6. Audit entry written; agent receives a structured denial reason it can surface to its user.
@@ -154,7 +154,7 @@ sequenceDiagram
 ### 6.2 Code-mode agent (Phase 3)
 
 1. Model writes a script calling `crm.export()` then `email.send(external)`.
-2. Sandbox bindings are Countersign-instrumented; each call is an `ActionRequest` with field-level taint (`crm.export` output labelled `sensitive_internal`).
+2. Sandbox bindings are Stopbar-instrumented; each call is an `ActionRequest` with field-level taint (`crm.export` output labelled `sensitive_internal`).
 3. `email.send` with tainted payload to external domain → **deny**, script receives exception.
 4. Loop detection: N calls of the same binding in one script counted against velocity caps.
 
@@ -164,7 +164,7 @@ sequenceDiagram
 2. Enricher: deploy events show new code on the signing path 4 hours ago (`minutes_since_code_change = 240`).
 3. Policy: high-value withdrawal within 24h of code change → **escalate** to M-of-N.
 4. Independently, tenant circuit breaker caps aggregate outflow per hour → a compromised service can't exceed it even if approvals are socially engineered.
-5. Co-signer: on-chain guard / MPC share requires Countersign signature; a compromised container can't produce it.
+5. Co-signer: on-chain guard / MPC share requires Stopbar signature; a compromised container can't produce it.
 
 ## 7. Deployment topologies
 
@@ -186,9 +186,9 @@ Controls are rated by tier (PRD §2.4): T1 injected model, T2 agent error, T3 co
 | Agent error (no adversary) | OpenClaw | % of balance caps, escalation |
 | Malicious insider changes policy | Raise caps before attack | M-of-N policy changes, policy-change audit, cooling-off period for cap increases |
 | Replays old approval | Reuse decision token | Nonce, TTL, payload-hash binding |
-| Compromises Countersign host | — | Isolated trust domain, co-signer mode (needs two compromises), minimal surface, external audit |
+| Compromises Stopbar host | — | Isolated trust domain, co-signer mode (needs two compromises), minimal surface, external audit |
 | Stale/manipulated prices | Oracle attack to under-value transfer | Multiple sources, staleness bound → escalate, caps also on token count |
-| DoS on Countersign | Flood requests | Fail closed (safety over liveness); per-requester API limits; HA in Phase 4 |
+| DoS on Stopbar | Flood requests | Fail closed (safety over liveness); per-requester API limits; HA in Phase 4 |
 | Address poisoning | Look-alike destination | Similarity detection vs. known destinations → escalate |
 | Scheming agent (T4) | Hidden side task; launders taint; stays under thresholds | Caps, allowlists, circuit breaker only in v1; field-level taint in sandbox bindings (Phase 3); evaluated in Phase 1R |
 | Salami draining | Many sub-threshold transfers | Velocity caps + per-destination count caps |
@@ -203,7 +203,7 @@ Full STRIDE table maintained in LLD §14.
 flowchart LR
     AD[AgentDojo suite<br/>user tasks + injection tasks] --> AG[Agent under test]
     AG -->|tool call| AD2[Defence adapter]
-    AD2 -->|ActionRequest tool_call + taint| CS[countersignd]
+    AD2 -->|ActionRequest tool_call + taint| CS[stopbard]
     AD2 -->|transcript + call| MON[LLM monitor]
     CS -->|verdict| ARB{Arm}
     MON -->|verdict| ARB
@@ -213,7 +213,7 @@ flowchart LR
     LOG --> AN[Analysis: ASR, utility, disagreement matrix]
 ```
 
-Arms decide who enforces; shadow logging means both verdicts are recorded in every arm. The same `countersignd` binary serves product and research, so results apply to the shipped engine.
+Arms decide who enforces; shadow logging means both verdicts are recorded in every arm. The same `stopbard` binary serves product and research, so results apply to the shipped engine.
 
 ## 9. Failure behaviour
 

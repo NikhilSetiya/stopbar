@@ -5,7 +5,7 @@ CS-003,P0,E0 Foundations,CI pipeline,"GitHub Actions: lint (golangci-lint), test
 CS-004,P0,E0 Foundations,Supply-chain hygiene,"Dependabot, pinned action SHAs, SECURITY.md, CODEOWNERS, branch protection.",Branch protection on main; Dependabot PRs appear.,0.5,CS-003,NFR-7
 CS-005,P0,E0 Foundations,Core data model,"Implement ActionRequest, IntentSummary, EnrichedRequest, Decision, AuditRecord structs + JSON schema in spec/.",Round-trip JSON tests; schemas validate fixtures.,2,CS-002,LLD §3
 CS-006,P0,E0 Foundations,JCS canonicalisation + hashing utils,RFC 8785 canonical JSON; payload_hash and record hash helpers.,Matches RFC 8785 test vectors.,1,CS-005,LLD §3.5
-CS-007,P0,E0 Foundations,Cedar spike,Prototype cedar-go with Countersign schema; validate decimal/set context and escalate-annotation approach.,Spike doc in docs/adr/0001-cedar.md with go/no-go.,2,CS-005,PRD §13 Q1
+CS-007,P0,E0 Foundations,Cedar spike,Prototype cedar-go with Stopbar schema; validate decimal/set context and escalate-annotation approach.,Spike doc in docs/adr/0001-cedar.md with go/no-go.,2,CS-005,PRD §13 Q1
 CS-008,P0,E0 Foundations,Decision token spec,"Write spec/decision-token-v1.md (JWS claims, payload binding, expiry, nonce).",Spec merged; test vectors included.,1,CS-006,LLD §10.1
 CS-009,P0,E0 Foundations,ADR log,"docs/adr with ADRs: enforcement modes, Go, Cedar, fail-closed.",4 ADRs merged.,0.5,CS-001,
 CS-101,P1,E1 Gateway & engine,HTTP gateway skeleton,"/v1/evaluate, /healthz, /metrics; JSON schema validation; size limits.",Invalid requests 400 with typed code; tests.,2,CS-005,FR-INT-1
@@ -16,7 +16,7 @@ CS-105,P1,E1 Gateway & engine,Commit/release endpoints,/v1/actions/{id}/commit a
 CS-111,P1,E2 Policy,Cedar schema + loader,Load .cedar files + schema; validate; compute bundle hash.,Invalid policy rejected with line number; hash stable across file order.,2,CS-007,FR-POL-1
 CS-112,P1,E2 Policy,Outcome combiner,Deny/escalate/allow via @outcome annotations; default deny; reasons list.,Table tests for all combinations.,1.5,CS-111,"FR-POL-2,3"
 CS-113,P1,E2 Policy,Starter policy pack,examples/policies/agent-wallet.cedar per LLD §5.3.,All seed corpus attacks get expected outcome.,1,CS-112,
-CS-114,P1,E2 Policy,Policy dry-run,`countersign policy test` against corpus + recorded requests.,Diff of outcomes printed; non-zero exit on regression.,1.5,"CS-112,CS-192",FR-POL-4
+CS-114,P1,E2 Policy,Policy dry-run,`stopbar policy test` against corpus + recorded requests.,Diff of outcomes printed; non-zero exit on regression.,1.5,"CS-112,CS-192",FR-POL-4
 CS-115,P1,E2 Policy,Activation + cooling-off,Signed activation; loosening caps delayed by configurable period.,Loosening change inactive until delay passes; audited.,2,"CS-111,CS-151",FR-POL-5
 CS-121,P1,E3 Limiter,Sliding-window counters,"Sub-bucket windows for {usd,count} per scope key (bbolt impl).",Rollover tests pass; no double count.,2,CS-005,FR-LIM-2
 CS-122,P1,E3 Limiter,Reserve/commit/release,Atomic reservations with TTL and janitor.,"Property test: 1,000 concurrent reserves never exceed cap.",2.5,CS-121,FR-LIM-4
@@ -30,14 +30,14 @@ CS-142,P1,E5 Decoder & intent,Risk flags,"unlimited_approval, delegatecall, prox
 CS-143,P1,E5 Decoder & intent,Human renderer + checksum phrase,Plain-language template + 6-word address checksum.,Snapshot tests; look-alike addresses yield different phrases.,1.5,CS-142,FR-IR-3
 CS-145,P1,E5 Decoder & intent,Destructive-action flags + salami caps,min_out_zero and excessive_slippage flags for known swap routers; default per-destination count cap for non-allowlisted destinations.,Zero-min-out swap fixture denied; 6 sub-cap transfers to new destination escalate.,1.5,"CS-142,CS-121","FR-IR-2, FR-LIM-2a"
 CS-144,P1,E5 Decoder & intent,Decoder fuzzing,Go native fuzz targets on calldata.,24h fuzz run with no panics.,1,CS-141,
-CS-151,P1,E6 Escalation,Approver keys + CLI approvals,Ed25519 approver keys; `countersign approve/reject <id>` signs over payload_hash.,Wrong hash or key rejected; quorum honoured.,2,CS-104,"FR-ESC-1,2"
+CS-151,P1,E6 Escalation,Approver keys + CLI approvals,Ed25519 approver keys; `stopbar approve/reject <id>` signs over payload_hash.,Wrong hash or key rejected; quorum honoured.,2,CS-104,"FR-ESC-1,2"
 CS-152,P1,E6 Escalation,Escalation lifecycle,"Create, poll (/v1/decisions), timeout -> deny, reject -> deny.",E2E: escalate -> approve -> signed tx returned.,1.5,CS-151,FR-ESC-3
 CS-161,P1,E7 Decision & signer,Decision signer (JWS Ed25519),Sign decisions; JWKS endpoint; local key provider (dev-only guard).,Tokens verify with published JWKS; prod mode refuses local key.,1.5,CS-008,LLD §10
 CS-162,P1,E7 Decision & signer,Gatekeeper local signer adapter,Holds agent keystore; verifies decision token + payload_hash before signing.,Signing without valid token impossible (test).,2,CS-161,FR-INT-3
 CS-163,P1,E7 Decision & signer,AWS KMS signer + decision key,KMS secp256k1 for tx signing; KMS for decision key.,Integration test against KMS (or localstack).,2,CS-162,
-CS-164,P1,E7 Decision & signer,Turnkey adapter,Gatekeeper via Turnkey API key held only by Countersign.,Sandbox org test passes.,2,CS-162,
+CS-164,P1,E7 Decision & signer,Turnkey adapter,Gatekeeper via Turnkey API key held only by Stopbar.,Sandbox org test passes.,2,CS-162,
 CS-171,P1,E8 Audit,Hash-chained log,Append-only bbolt bucket; record per event in same tx as state change.,Tampering one record fails verify.,2,CS-006,FR-AUD-1
-CS-172,P1,E8 Audit,Checkpoints + verify CLI,Signed Merkle checkpoints; `countersign audit verify`.,"Verify passes clean log, fails tampered.",1.5,"CS-171,CS-161","FR-AUD-2,3"
+CS-172,P1,E8 Audit,Checkpoints + verify CLI,Signed Merkle checkpoints; `stopbar audit verify`.,"Verify passes clean log, fails tampered.",1.5,"CS-171,CS-161","FR-AUD-2,3"
 CS-181,P1,E9 SDKs & provenance,TypeScript SDK,"Client, context API with labels, evaluate/commit/release, typed errors.",Example agent protected end-to-end.,3,CS-104,"FR-INT-1, FR-PRV-1,2"
 CS-182,P1,E9 SDKs & provenance,Python SDK,Parity with TS SDK.,Same example in Python passes.,2,CS-181,
 CS-183,P1,E9 SDKs & provenance,Encoding detector,Detect base64/hex/Morse/ROT-n/zero-width in untrusted inputs -> add 'decoded'.,Grok-pattern fixture labelled decoded.,1,CS-181,
@@ -45,7 +45,7 @@ CS-184,P1,E9 SDKs & provenance,Framework integrations,Wrappers for one agent fra
 CS-191,P1,E10 Corpus & replay,Corpus schema,corpus/schema.json finalized; validator CLI.,All seed attacks validate.,1,CS-005,FR-COR-1
 CS-192,P1,E10 Corpus & replay,Replay harness,Seed state from setup; evaluate; assert outcome + policy_ids; CI job.,CI fails when a policy regression unblocks an attack.,2,"CS-191,CS-112",FR-COR-2
 CS-193,P1,E10 Corpus & replay,10 seed attacks,Grok/Bankr encoded injection; Bankr unauthorised signing; OpenClaw over-transfer; unlimited approval; delegatecall (Bybit pattern); proxy upgrade; address poisoning; velocity drain; stale-price under-valuation; multicall-hidden transfer.,All 10 present and blocked/escalated as expected.,3,CS-192,
-CS-195,P1,E11 DX & release,CLI: init,`countersign init --persona agent-wallet` generates config + policies + keys.,Fresh machine to protected agent < 30 min (timed).,1.5,CS-113,"FR-DX-1,3"
+CS-195,P1,E11 DX & release,CLI: init,`stopbar init --persona agent-wallet` generates config + policies + keys.,Fresh machine to protected agent < 30 min (timed).,1.5,CS-113,"FR-DX-1,3"
 CS-196,P1,E11 DX & release,Docker image + binaries,goreleaser; signed releases (cosign); SBOM.,Release artifacts signed and verifiable.,1,CS-003,"FR-DX-2, NFR-7"
 CS-197,P1,E11 DX & release,Benchmarks,Latency/throughput benchmarks vs. NFR-1/2.,p99 < 25ms sidecar at 1k rps published in docs.,1.5,CS-104,
 CS-198,P1,E11 DX & release,Quickstart + E2E demo,Anvil + sample agent + attack replay video/GIF.,Demo reproducible from README.,1.5,"CS-195,CS-193",
@@ -57,7 +57,7 @@ CS-205,P2,E12 Community,Design partners,Recruit 3 agent-wallet teams for shadow 
 CS-206,P2,E12 Community,Kill/pivot review,Review month-3 metrics vs PRD §11.,Written decision: continue / pivot.,0.5,CS-205,PRD §11
 CS-501,P1R,E15 Research eval,Threat-tier ADR,"docs/adr/0005-threat-tiers.md: T1-T4 definitions, harness-vs-model trust boundary, which controls hold per tier.",ADR merged; PRD §2.4 and HLD §8 reference it.,0.5,CS-009,PRD §2.4
 CS-502,P1R,E15 Research eval,Tool-call policy schema + AgentDojo pack,"Cedar context for tool_call (tool, recipient_external, amount, taint); examples/policies/agentdojo.cedar written before viewing injection tasks.",Bundle validates; hash frozen and recorded.,2,CS-112,LLD §18.4
-CS-503,P1R,E15 Research eval,AgentDojo defence adapter,Python adapter: tool call -> ActionRequest -> /v1/evaluate; block returns tool error with reason codes.,Benign banking suite runs end-to-end through countersignd.,3,"CS-101,CS-104,CS-502","FR-EVAL-1, LLD §18.1"
+CS-503,P1R,E15 Research eval,AgentDojo defence adapter,Python adapter: tool call -> ActionRequest -> /v1/evaluate; block returns tool error with reason codes.,Benign banking suite runs end-to-end through stopbard.,3,"CS-101,CS-104,CS-502","FR-EVAL-1, LLD §18.1"
 CS-504,P1R,E15 Research eval,Harness provenance labelling,"Label user prompt, tool outputs and AgentDojo injectable fields; session-level taint.",Injected-field outputs carry untrusted_* labels in the shadow log.,1.5,CS-503,LLD §18.1
 CS-505,P1R,E15 Research eval,LLM monitor,Versioned monitor prompt; frontier + open-weight model; threshold set on held-out calibration split.,Monitor verdicts reproducible at temperature 0 on a fixed sample.,1.5,CS-503,LLD §18.3
 CS-506,P1R,E15 Research eval,Shadow logging,Record policy and monitor verdicts on every call in every arm (JSONL schema §18.5).,Schema-validated log; both verdicts present for 100% of calls.,1,CS-505,FR-EVAL-3
@@ -73,8 +73,8 @@ CS-304,P3,E13 Code-mode,MCP gateway adapter,Enforce policy on MCP tool calls at 
 CS-305,P3,E13 Code-mode,Static pre-execution checks,Flag loops over sensitive bindings feeding network calls before running.,Pre-check catches seeded exfil script.,5,CS-302,
 CS-306,P3,E13 Code-mode,Postgres + Redis store,Production stores; Lua reserve script.,Concurrency property tests pass on Redis.,4,CS-122,
 CS-307,P3,E13 Code-mode,Code-mode corpus,"10 attacks: loop exfil, injected script, tool chaining, etc.",All blocked.,3,CS-302,
-CS-401,P4,E14 Custody grade,CountersignGuard (Safe Guard),Solidity guard verifying EIP-712 countersignature + nonce.,Foundry tests; external audit scheduled.,8,CS-161,LLD §10.2
-CS-402,P4,E14 Custody grade,MPC share integration,Countersign as one share holder with an MPC provider.,Tx impossible without Countersign share in test.,10,CS-161,
+CS-401,P4,E14 Custody grade,StopbarGuard (Safe Guard),Solidity guard verifying EIP-712 countersignature + nonce.,Foundry tests; external audit scheduled.,8,CS-161,LLD §10.2
+CS-402,P4,E14 Custody grade,MPC share integration,Stopbar as one share holder with an MPC provider.,Tx impossible without Stopbar share in test.,10,CS-161,
 CS-403,P4,E14 Custody grade,HSM / Nitro Enclave decision key,PKCS#11 and enclave key providers; attestation.,Key never leaves HSM/enclave; attestation verified.,8,CS-161,NFR-5
 CS-404,P4,E14 Custody grade,Deploy-event ingestion,/v1/events/deploy; minutes_since_code_change; unsigned artifact -> deny.,Binance-pattern fixture escalates/denies.,4,CS-104,FR-PRV-4
 CS-405,P4,E14 Custody grade,HA mode,Active/passive with shared store; fail-closed failover.,Chaos test: failover with no cap violations.,8,CS-306,NFR-3

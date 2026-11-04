@@ -23,7 +23,7 @@
   "provenance": {
     "labels": ["untrusted_onchain", "decoded"],
     "sources": [{"label": "untrusted_onchain", "ref": "nft:base:0x4444444444444444444444444444444444444444/42", "hash": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}],
-    "sdk": {"name": "countersign-ts", "version": "0.1.0"}
+    "sdk": {"name": "stopbar-ts", "version": "0.1.0"}
   },
   "parent_request_id": null
 }

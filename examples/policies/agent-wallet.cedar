@@ -1,15 +1,15 @@
-// Countersign starter policy: AI agent with an EVM hot wallet.
+// Stopbar starter policy: AI agent with an EVM hot wallet.
 // Outcomes: @outcome("deny") > @outcome("escalate") > permit. No permit match = deny.
 
 @id("base-permit")
-permit (principal, action in [Countersign::Action::"transfer", Countersign::Action::"contract_call"], resource);
+permit (principal, action in [Stopbar::Action::"transfer", Stopbar::Action::"contract_call"], resource);
 
 @id("taint-unknown-destination") @outcome("deny")
 forbid (principal, action, resource)
 when { context.taint.containsAny(["untrusted_web","untrusted_onchain","untrusted_email"]) && !context.dest_known };
 
 @id("unlimited-approval") @outcome("deny")
-forbid (principal, action == Countersign::Action::"approve", resource)
+forbid (principal, action == Stopbar::Action::"approve", resource)
 when { context.flags.contains("unlimited_approval") };
 
 @id("delegatecall") @outcome("deny")

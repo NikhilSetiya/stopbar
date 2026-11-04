@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/setiyanikhil/countersign/spec/schemas/action_request.v1.schema.json",
-  "title": "Countersign ActionRequest v1",
+  "$id": "https://github.com/setiyanikhil/stopbar/spec/schemas/action_request.v1.schema.json",
+  "title": "Stopbar ActionRequest v1",
   "description": "LLD \u00a73.1. Mirrors internal/model.ActionRequest.",
   "type": "object",
   "additionalProperties": false,

@@ -28,7 +28,7 @@ t("CS-003","P0",E,"CI pipeline","GitHub Actions: lint (golangci-lint), test, rac
 t("CS-004","P0",E,"Supply-chain hygiene","Dependabot, pinned action SHAs, SECURITY.md, CODEOWNERS, branch protection.","Branch protection on main; Dependabot PRs appear.",0.5,"CS-003","NFR-7")
 t("CS-005","P0",E,"Core data model","Implement ActionRequest, IntentSummary, EnrichedRequest, Decision, AuditRecord structs + JSON schema in spec/.","Round-trip JSON tests; schemas validate fixtures.",2,"CS-002","LLD §3")
 t("CS-006","P0",E,"JCS canonicalisation + hashing utils","RFC 8785 canonical JSON; payload_hash and record hash helpers.","Matches RFC 8785 test vectors.",1,"CS-005","LLD §3.5")
-t("CS-007","P0",E,"Cedar spike","Prototype cedar-go with Countersign schema; validate decimal/set context and escalate-annotation approach.","Spike doc in docs/adr/0001-cedar.md with go/no-go.",2,"CS-005","PRD §13 Q1")
+t("CS-007","P0",E,"Cedar spike","Prototype cedar-go with Stopbar schema; validate decimal/set context and escalate-annotation approach.","Spike doc in docs/adr/0001-cedar.md with go/no-go.",2,"CS-005","PRD §13 Q1")
 t("CS-008","P0",E,"Decision token spec","Write spec/decision-token-v1.md (JWS claims, payload binding, expiry, nonce).","Spec merged; test vectors included.",1,"CS-006","LLD §10.1")
 t("CS-009","P0",E,"ADR log","docs/adr with ADRs: enforcement modes, Go, Cedar, fail-closed.","4 ADRs merged.",0.5,"CS-001")
 
@@ -44,7 +44,7 @@ E = "E2 Policy"
 t("CS-111","P1",E,"Cedar schema + loader","Load .cedar files + schema; validate; compute bundle hash.","Invalid policy rejected with line number; hash stable across file order.",2,"CS-007","FR-POL-1")
 t("CS-112","P1",E,"Outcome combiner","Deny/escalate/allow via @outcome annotations; default deny; reasons list.","Table tests for all combinations.",1.5,"CS-111","FR-POL-2,3")
 t("CS-113","P1",E,"Starter policy pack","examples/policies/agent-wallet.cedar per LLD §5.3.","All seed corpus attacks get expected outcome.",1,"CS-112")
-t("CS-114","P1",E,"Policy dry-run","`countersign policy test` against corpus + recorded requests.","Diff of outcomes printed; non-zero exit on regression.",1.5,"CS-112,CS-192","FR-POL-4")
+t("CS-114","P1",E,"Policy dry-run","`stopbar policy test` against corpus + recorded requests.","Diff of outcomes printed; non-zero exit on regression.",1.5,"CS-112,CS-192","FR-POL-4")
 t("CS-115","P1",E,"Activation + cooling-off","Signed activation; loosening caps delayed by configurable period.","Loosening change inactive until delay passes; audited.",2,"CS-111,CS-151","FR-POL-5")
 
 E = "E3 Limiter"
@@ -66,18 +66,18 @@ t("CS-145","P1",E,"Destructive-action flags + salami caps","min_out_zero and exc
 t("CS-144","P1",E,"Decoder fuzzing","Go native fuzz targets on calldata.","24h fuzz run with no panics.",1,"CS-141")
 
 E = "E6 Escalation"
-t("CS-151","P1",E,"Approver keys + CLI approvals","Ed25519 approver keys; `countersign approve/reject <id>` signs over payload_hash.","Wrong hash or key rejected; quorum honoured.",2,"CS-104","FR-ESC-1,2")
+t("CS-151","P1",E,"Approver keys + CLI approvals","Ed25519 approver keys; `stopbar approve/reject <id>` signs over payload_hash.","Wrong hash or key rejected; quorum honoured.",2,"CS-104","FR-ESC-1,2")
 t("CS-152","P1",E,"Escalation lifecycle","Create, poll (/v1/decisions), timeout -> deny, reject -> deny.","E2E: escalate -> approve -> signed tx returned.",1.5,"CS-151","FR-ESC-3")
 
 E = "E7 Decision & signer"
 t("CS-161","P1",E,"Decision signer (JWS Ed25519)","Sign decisions; JWKS endpoint; local key provider (dev-only guard).","Tokens verify with published JWKS; prod mode refuses local key.",1.5,"CS-008","LLD §10")
 t("CS-162","P1",E,"Gatekeeper local signer adapter","Holds agent keystore; verifies decision token + payload_hash before signing.","Signing without valid token impossible (test).",2,"CS-161","FR-INT-3")
 t("CS-163","P1",E,"AWS KMS signer + decision key","KMS secp256k1 for tx signing; KMS for decision key.","Integration test against KMS (or localstack).",2,"CS-162")
-t("CS-164","P1",E,"Turnkey adapter","Gatekeeper via Turnkey API key held only by Countersign.","Sandbox org test passes.",2,"CS-162")
+t("CS-164","P1",E,"Turnkey adapter","Gatekeeper via Turnkey API key held only by Stopbar.","Sandbox org test passes.",2,"CS-162")
 
 E = "E8 Audit"
 t("CS-171","P1",E,"Hash-chained log","Append-only bbolt bucket; record per event in same tx as state change.","Tampering one record fails verify.",2,"CS-006","FR-AUD-1")
-t("CS-172","P1",E,"Checkpoints + verify CLI","Signed Merkle checkpoints; `countersign audit verify`.","Verify passes clean log, fails tampered.",1.5,"CS-171,CS-161","FR-AUD-2,3")
+t("CS-172","P1",E,"Checkpoints + verify CLI","Signed Merkle checkpoints; `stopbar audit verify`.","Verify passes clean log, fails tampered.",1.5,"CS-171,CS-161","FR-AUD-2,3")
 
 E = "E9 SDKs & provenance"
 t("CS-181","P1",E,"TypeScript SDK","Client, context API with labels, evaluate/commit/release, typed errors.","Example agent protected end-to-end.",3,"CS-104","FR-INT-1, FR-PRV-1,2")
@@ -91,7 +91,7 @@ t("CS-192","P1",E,"Replay harness","Seed state from setup; evaluate; assert outc
 t("CS-193","P1",E,"10 seed attacks","Grok/Bankr encoded injection; Bankr unauthorised signing; OpenClaw over-transfer; unlimited approval; delegatecall (Bybit pattern); proxy upgrade; address poisoning; velocity drain; stale-price under-valuation; multicall-hidden transfer.","All 10 present and blocked/escalated as expected.",3,"CS-192")
 
 E = "E11 DX & release"
-t("CS-195","P1",E,"CLI: init","`countersign init --persona agent-wallet` generates config + policies + keys.","Fresh machine to protected agent < 30 min (timed).",1.5,"CS-113","FR-DX-1,3")
+t("CS-195","P1",E,"CLI: init","`stopbar init --persona agent-wallet` generates config + policies + keys.","Fresh machine to protected agent < 30 min (timed).",1.5,"CS-113","FR-DX-1,3")
 t("CS-196","P1",E,"Docker image + binaries","goreleaser; signed releases (cosign); SBOM.","Release artifacts signed and verifiable.",1,"CS-003","FR-DX-2, NFR-7")
 t("CS-197","P1",E,"Benchmarks","Latency/throughput benchmarks vs. NFR-1/2.","p99 < 25ms sidecar at 1k rps published in docs.",1.5,"CS-104")
 t("CS-198","P1",E,"Quickstart + E2E demo","Anvil + sample agent + attack replay video/GIF.","Demo reproducible from README.",1.5,"CS-195,CS-193")
@@ -109,7 +109,7 @@ t("CS-206","P2",E,"Kill/pivot review","Review month-3 metrics vs PRD §11.","Wri
 E = "E15 Research eval"
 t("CS-501","P1R",E,"Threat-tier ADR","docs/adr/0005-threat-tiers.md: T1-T4 definitions, harness-vs-model trust boundary, which controls hold per tier.","ADR merged; PRD §2.4 and HLD §8 reference it.",0.5,"CS-009","PRD §2.4")
 t("CS-502","P1R",E,"Tool-call policy schema + AgentDojo pack","Cedar context for tool_call (tool, recipient_external, amount, taint); examples/policies/agentdojo.cedar written before viewing injection tasks.","Bundle validates; hash frozen and recorded.",2,"CS-112","LLD §18.4")
-t("CS-503","P1R",E,"AgentDojo defence adapter","Python adapter: tool call -> ActionRequest -> /v1/evaluate; block returns tool error with reason codes.","Benign banking suite runs end-to-end through countersignd.",3,"CS-101,CS-104,CS-502","FR-EVAL-1, LLD §18.1")
+t("CS-503","P1R",E,"AgentDojo defence adapter","Python adapter: tool call -> ActionRequest -> /v1/evaluate; block returns tool error with reason codes.","Benign banking suite runs end-to-end through stopbard.",3,"CS-101,CS-104,CS-502","FR-EVAL-1, LLD §18.1")
 t("CS-504","P1R",E,"Harness provenance labelling","Label user prompt, tool outputs and AgentDojo injectable fields; session-level taint.","Injected-field outputs carry untrusted_* labels in the shadow log.",1.5,"CS-503","LLD §18.1")
 t("CS-505","P1R",E,"LLM monitor","Versioned monitor prompt; frontier + open-weight model; threshold set on held-out calibration split.","Monitor verdicts reproducible at temperature 0 on a fixed sample.",1.5,"CS-503","LLD §18.3")
 t("CS-506","P1R",E,"Shadow logging","Record policy and monitor verdicts on every call in every arm (JSONL schema §18.5).","Schema-validated log; both verdicts present for 100% of calls.",1,"CS-505","FR-EVAL-3")
@@ -131,8 +131,8 @@ t("CS-307","P3",E,"Code-mode corpus","10 attacks: loop exfil, injected script, t
 
 # ---------------- Phase 4 ----------------
 E = "E14 Custody grade"
-t("CS-401","P4",E,"CountersignGuard (Safe Guard)","Solidity guard verifying EIP-712 countersignature + nonce.","Foundry tests; external audit scheduled.",8,"CS-161","LLD §10.2")
-t("CS-402","P4",E,"MPC share integration","Countersign as one share holder with an MPC provider.","Tx impossible without Countersign share in test.",10,"CS-161")
+t("CS-401","P4",E,"StopbarGuard (Safe Guard)","Solidity guard verifying EIP-712 countersignature + nonce.","Foundry tests; external audit scheduled.",8,"CS-161","LLD §10.2")
+t("CS-402","P4",E,"MPC share integration","Stopbar as one share holder with an MPC provider.","Tx impossible without Stopbar share in test.",10,"CS-161")
 t("CS-403","P4",E,"HSM / Nitro Enclave decision key","PKCS#11 and enclave key providers; attestation.","Key never leaves HSM/enclave; attestation verified.",8,"CS-161","NFR-5")
 t("CS-404","P4",E,"Deploy-event ingestion","/v1/events/deploy; minutes_since_code_change; unsigned artifact -> deny.","Binance-pattern fixture escalates/denies.",4,"CS-104","FR-PRV-4")
 t("CS-405","P4",E,"HA mode","Active/passive with shared store; fail-closed failover.","Chaos test: failover with no cap violations.",8,"CS-306","NFR-3")
@@ -149,7 +149,7 @@ def write():
     with open(root/"docs/tasks.csv","w",newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(T[0].keys()))
         w.writeheader(); w.writerows(T)
-    lines = ["# Countersign — Build Backlog","",
+    lines = ["# Stopbar — Build Backlog","",
              "> Generated from `scripts/tasks.py`. Edit there, then run `python3 scripts/tasks.py`.","",
              "Estimates are focused build days for one engineer. IDs are stable; reference them in commits (`CS-122: …`).",""]
     lines += ["## Summary","","| Phase | Tasks | Est. days |","|---|---|---|"]
@@ -160,7 +160,7 @@ def write():
     ts = [x for x in T if x["id"] in THIN_SLICE]
     lines += ["## Capacity reality","",
               "Phase windows assume full-time focus. Part-time (~12 h/week) multiplies calendar time by ~3x.",
-              "Ship the **thin slice** first: the minimum path to a public demo where Countersign blocks the seed attacks against an EVM agent wallet.","",
+              "Ship the **thin slice** first: the minimum path to a public demo where Stopbar blocks the seed attacks against an EVM agent wallet.","",
               f"**Thin slice: {len(ts)} tasks, ~{sum(x['est_days'] for x in ts):g} build days** — " + ", ".join(THIN_SLICE),"",
               "Everything else in Phase 1 hardens or widens the slice after it's public.",""]
     for p, name in PHASES.items():

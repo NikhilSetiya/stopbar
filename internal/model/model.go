@@ -1,4 +1,4 @@
-// Package model defines Countersign's wire types (LLD §3). JSON shapes here are
+// Package model defines Stopbar's wire types (LLD §3). JSON shapes here are
 // the contract; spec/schemas/*.schema.json mirror them for non-Go clients.
 //
 // Monetary and on-chain integer amounts are decimal strings, never JSON

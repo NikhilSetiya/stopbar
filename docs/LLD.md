@@ -1,4 +1,4 @@
-# Countersign — Low-Level Design
+# Stopbar — Low-Level Design
 
 | | |
 |---|---|
@@ -11,10 +11,10 @@
 ## 1. Repository layout
 
 ```
-countersign/
+stopbar/
 ├── cmd/
-│   ├── countersignd/        # service / sidecar binary
-│   └── countersign/         # CLI
+│   ├── stopbard/        # service / sidecar binary
+│   └── stopbar/         # CLI
 ├── internal/
 │   ├── gateway/             # HTTP API, authN, nonce/TTL
 │   ├── model/               # ActionRequest, Decision, IntentSummary, AuditRecord
@@ -115,7 +115,7 @@ Every component returns typed errors; the engine maps any non-domain error to `d
     "sources": [
       {"label": "untrusted_onchain", "ref": "nft:base:0x…/42", "hash": "sha256:…"}
     ],
-    "sdk": {"name": "countersign-ts", "version": "0.1.0"}
+    "sdk": {"name": "stopbar-ts", "version": "0.1.0"}
   },
   "parent_request_id": null
 }
@@ -207,7 +207,7 @@ Error body: `{"code": "NONCE_REPLAYED", "message": "…", "request_id": "…"}`.
 ### 5.1 Cedar schema (excerpt)
 
 ```cedar
-namespace Countersign {
+namespace Stopbar {
   entity Agent { tenant: String };
   entity Wallet { chain_id: Long, address: String };
   entity Destination { address: String };
@@ -234,7 +234,7 @@ namespace Countersign {
 
 ### 5.2 Outcome model
 
-Cedar natively yields permit/forbid. Countersign layers **escalate** via annotations:
+Cedar natively yields permit/forbid. Stopbar layers **escalate** via annotations:
 
 - `@outcome("deny")` on `forbid` policies → deny.
 - `@outcome("escalate")` on `forbid` policies → escalate (only if no deny matched).
@@ -246,14 +246,14 @@ Combination: `deny > escalate > allow`. Evaluate escalate-annotated policies as 
 
 ```cedar
 @id("base-permit")
-permit (principal, action in [Countersign::Action::"transfer", Countersign::Action::"contract_call"], resource);
+permit (principal, action in [Stopbar::Action::"transfer", Stopbar::Action::"contract_call"], resource);
 
 @id("taint-unknown-destination") @outcome("deny")
 forbid (principal, action, resource)
 when { context.taint.containsAny(["untrusted_web","untrusted_onchain","untrusted_email"]) && !context.dest_known };
 
 @id("unlimited-approval") @outcome("deny")
-forbid (principal, action == Countersign::Action::"approve", resource)
+forbid (principal, action == Stopbar::Action::"approve", resource)
 when { context.flags.contains("unlimited_approval") };
 
 @id("delegatecall") @outcome("deny")
@@ -348,7 +348,7 @@ Amount is two-dimensional `{usd, count}`; caps can be set on either. Token-count
 ### 8.2 v1 — context-level taint (SDK)
 
 ```ts
-const cs = new Countersign({ endpoint, agentId });
+const cs = new Stopbar({ endpoint, agentId });
 const ctx = cs.context();                     // per agent session
 ctx.add(userMessage, "trusted_user");
 ctx.add(await fetchTweet(url), "untrusted_web", { ref: url });
@@ -377,7 +377,7 @@ Rules:
 ## 9. Escalation
 
 1. Engine creates `Escalation{id, request_id, intent, payload_hash, required: M, approvers: [..], expires_at}`.
-2. Channel adapters push the rendered intent. Phase 1: CLI (`countersign approve <id>`) signing with an Ed25519 approver key; Phase 2: Slack/Telegram with deep link to a signing page; Phase 4: WebAuthn passkeys.
+2. Channel adapters push the rendered intent. Phase 1: CLI (`stopbar approve <id>`) signing with an Ed25519 approver key; Phase 2: Slack/Telegram with deep link to a signing page; Phase 4: WebAuthn passkeys.
 3. Approval payload = `{escalation_id, payload_hash, decision: approve|reject, ts}` signed by approver key. Engine verifies signer ∈ approvers, payload_hash matches, not expired, no duplicates.
 4. Any `reject` → deny. Timeout (default 15m) → deny.
 
@@ -393,10 +393,10 @@ Rules:
 
 ```
 Countersignature(address safe, bytes32 txHash, uint256 nonce, uint64 expiry, bytes32 policyBundle)
-domain: {name: "Countersign", version: "1", chainId, verifyingContract: guard}
+domain: {name: "Stopbar", version: "1", chainId, verifyingContract: guard}
 ```
 
-`CountersignGuard` (Safe Guard) `checkTransaction` requires a valid secp256k1 signature from the configured Countersign address over the struct. Guard keeps `usedNonces`.
+`StopbarGuard` (Safe Guard) `checkTransaction` requires a valid secp256k1 signature from the configured Stopbar address over the struct. Guard keeps `usedNonces`.
 
 ### 10.3 Key providers
 
@@ -407,7 +407,7 @@ domain: {name: "Countersign", version: "1", chainId, verifyingContract: guard}
 - Store: append-only table/bucket keyed by `seq`. No update/delete paths in code; DB role has INSERT/SELECT only.
 - Every request, decision, approval, policy change, commit, release, override appended in the same transaction as the state change it records (outbox pattern for Redis-backed limiter).
 - Checkpoint every N=1,000 records or 5 minutes: Merkle root over the range signed by the decision key; optional upload to Rekor.
-- `countersign audit verify --from X --to Y` recomputes hashes and validates checkpoint signatures.
+- `stopbar audit verify --from X --to Y` recomputes hashes and validates checkpoint signatures.
 
 ## 12. Error handling (fail closed)
 
@@ -452,7 +452,7 @@ Price/balance cached with TTLs (prices 15s, balances 10s); cache miss beyond bud
 | Information disclosure | Requests, intent | Minimal logging of payload `data` beyond hash in shared channels; tenant isolation |
 | DoS | Engine | Per-requester rate limits; fail closed; HA Phase 4 |
 | Elevation via token reuse | Decision token | Nonce, short exp, payload binding, single-use reservation |
-| Elevation via Countersign compromise | Decision key | HSM/enclave, isolated account, co-signer mode |
+| Elevation via Stopbar compromise | Decision key | HSM/enclave, isolated account, co-signer mode |
 
 ## 15. Corpus format
 
@@ -487,7 +487,7 @@ Replay harness: loads bundle, seeds limiter/registry from `setup`, evaluates `re
 | E2E | Anvil (local EVM) + sample agent + gatekeeper; scripted attacks |
 | Security | Threat-model review per phase; external audit before Phase 4 |
 
-## 17. Configuration (`countersign.yaml`)
+## 17. Configuration (`stopbar.yaml`)
 
 ```yaml
 mode: gatekeeper            # advisory | gatekeeper | cosigner
@@ -507,7 +507,7 @@ audit: {checkpoint_every: 1000, rekor: false}
 
 ## 18. Research evaluation harness (Phase 1R)
 
-Lives in `research/agentdojo/`. Python, pinned dependencies, one command per run. Talks to the same `countersignd` binary over `/v1/evaluate`; no Python re-implementation of policy.
+Lives in `research/agentdojo/`. Python, pinned dependencies, one command per run. Talks to the same `stopbard` binary over `/v1/evaluate`; no Python re-implementation of policy.
 
 ### 18.1 Defence adapter
 
@@ -516,7 +516,7 @@ AgentDojo lets a defence intercept every tool call before execution. The adapter
 1. Converts the call to `ActionRequest{action.kind: "tool_call", tool, args}` with a fresh nonce and the session's `provenance.labels`.
 2. Labels inputs: user prompt → `trusted_user`; every tool output → `tool_output`; tool outputs from AgentDojo's injectable fields (emails, web pages, files, reviews) → additionally `untrusted_email` / `untrusted_web` / `untrusted_file`. Context-level taint (§8.2): labels accumulate for the session.
 3. Calls the LLM monitor with the transcript so far + the proposed call (§18.3).
-4. Applies the arm's rule (§18.2). A block returns a tool error string containing Countersign's reason codes, so the agent can recover and the adaptive attacker can learn from it.
+4. Applies the arm's rule (§18.2). A block returns a tool error string containing Stopbar's reason codes, so the agent can recover and the adaptive attacker can learn from it.
 
 ### 18.2 Arms
 
@@ -524,7 +524,7 @@ AgentDojo lets a defence intercept every tool call before execution. The adapter
 |---|---|---|
 | A0 none | — | policy + monitor |
 | A1 monitor | LLM monitor | policy |
-| A2 countersign | policy (deny and escalate both block; escalate counted separately) | monitor |
+| A2 stopbar | policy (deny and escalate both block; escalate counted separately) | monitor |
 | A3 both | block if either blocks | — (both enforce) |
 
 ### 18.3 LLM monitor

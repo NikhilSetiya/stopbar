@@ -1,6 +1,6 @@
-# Countersign
+# Stopbar
 
-**An open-source intent firewall for signers.** Nothing gets signed — by an AI agent, a hot wallet, or an enterprise system — unless an independent policy engine countersigns it first.
+**An open-source intent firewall for signers.** Nothing gets signed — by an AI agent, a hot wallet, or an enterprise system — unless an independent policy engine clears it first. Like a runway stop bar: lit by default, and nothing crosses without clearance from an authority the requester does not control.
 
 > Status: pre-alpha. Foundations in progress — Go module, CI, core data model and RFC 8785 canonical hashing are in (CS-002/003/005/006). See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
 
@@ -25,7 +25,7 @@ Signers trust whoever calls them. In the largest recent incidents, **no key was 
 
 A signature proves **who** authorised an action. Nothing today independently verifies **whether it should happen**.
 
-## What Countersign does
+## What Stopbar does
 
 Sits between the requester (agent, service, UI) and the signer, in a **separate trust domain**, and checks every action before it can be signed:
 
@@ -66,7 +66,7 @@ Sits between the requester (agent, service, UI) and the signer, in a **separate 
 |---|---|---|
 | 0 Foundations | Weeks 0–2 | Repo, CI, core data model, decision contract |
 | 1 Agent-wallet MVP | Weeks 2–8 | Gatekeeper proxy for EVM agent wallets; replay suite blocks seed attacks |
-| 1R Research track | Weeks 4–10 (parallel) | AgentDojo eval: no defence vs LLM monitor vs Countersign vs both; adaptive attacker; scheming-agent setting; public write-up |
+| 1R Research track | Weeks 4–10 (parallel) | AgentDojo eval: no defence vs LLM monitor vs Stopbar vs both; adaptive attacker; scheming-agent setting; public write-up |
 | 2 Corpus & community | Weeks 8–12 | Open corpus, contribution flow, public launch |
 | 3 Code-mode agents | Months 3–9 | Policy on every binding call inside agent sandboxes |
 | 4 Custody grade | Year 2 | Co-signer mode (Safe guard / MPC share), HSM/TEE, deploy correlation |

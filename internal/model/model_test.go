@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/setiyanikhil/countersign/internal/canon"
+	"github.com/setiyanikhil/stopbar/internal/canon"
 )
 
 // roundTrip asserts fixture -> struct -> JSON is canonically identical to the fixture,

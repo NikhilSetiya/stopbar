@@ -1,4 +1,4 @@
-# Countersign — Build Backlog
+# Stopbar — Build Backlog
 
 > Generated from `scripts/tasks.py`. Edit there, then run `python3 scripts/tasks.py`.
 
@@ -18,7 +18,7 @@ Estimates are focused build days for one engineer. IDs are stable; reference the
 ## Capacity reality
 
 Phase windows assume full-time focus. Part-time (~12 h/week) multiplies calendar time by ~3x.
-Ship the **thin slice** first: the minimum path to a public demo where Countersign blocks the seed attacks against an EVM agent wallet.
+Ship the **thin slice** first: the minimum path to a public demo where Stopbar blocks the seed attacks against an EVM agent wallet.
 
 **Thin slice: 23 tasks, ~41 build days** — CS-001, CS-002, CS-003, CS-005, CS-006, CS-101, CS-104, CS-111, CS-112, CS-113, CS-121, CS-133, CS-122, CS-141, CS-142, CS-161, CS-162, CS-171, CS-181, CS-183, CS-191, CS-192, CS-193
 
@@ -36,7 +36,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 | CS-004 | Supply-chain hygiene | Dependabot, pinned action SHAs, SECURITY.md, CODEOWNERS, branch protection. | Branch protection on main; Dependabot PRs appear. | 0.5d | CS-003 | NFR-7 |
 | CS-005 | Core data model | Implement ActionRequest, IntentSummary, EnrichedRequest, Decision, AuditRecord structs + JSON schema in spec/. | Round-trip JSON tests; schemas validate fixtures. | 2d | CS-002 | LLD §3 |
 | CS-006 | JCS canonicalisation + hashing utils | RFC 8785 canonical JSON; payload_hash and record hash helpers. | Matches RFC 8785 test vectors. | 1d | CS-005 | LLD §3.5 |
-| CS-007 | Cedar spike | Prototype cedar-go with Countersign schema; validate decimal/set context and escalate-annotation approach. | Spike doc in docs/adr/0001-cedar.md with go/no-go. | 2d | CS-005 | PRD §13 Q1 |
+| CS-007 | Cedar spike | Prototype cedar-go with Stopbar schema; validate decimal/set context and escalate-annotation approach. | Spike doc in docs/adr/0001-cedar.md with go/no-go. | 2d | CS-005 | PRD §13 Q1 |
 | CS-008 | Decision token spec | Write spec/decision-token-v1.md (JWS claims, payload binding, expiry, nonce). | Spec merged; test vectors included. | 1d | CS-006 | LLD §10.1 |
 | CS-009 | ADR log | docs/adr with ADRs: enforcement modes, Go, Cedar, fail-closed. | 4 ADRs merged. | 0.5d | CS-001 |  |
 
@@ -59,7 +59,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 | CS-111 | Cedar schema + loader | Load .cedar files + schema; validate; compute bundle hash. | Invalid policy rejected with line number; hash stable across file order. | 2d | CS-007 | FR-POL-1 |
 | CS-112 | Outcome combiner | Deny/escalate/allow via @outcome annotations; default deny; reasons list. | Table tests for all combinations. | 1.5d | CS-111 | FR-POL-2,3 |
 | CS-113 | Starter policy pack | examples/policies/agent-wallet.cedar per LLD §5.3. | All seed corpus attacks get expected outcome. | 1d | CS-112 |  |
-| CS-114 | Policy dry-run | `countersign policy test` against corpus + recorded requests. | Diff of outcomes printed; non-zero exit on regression. | 1.5d | CS-112,CS-192 | FR-POL-4 |
+| CS-114 | Policy dry-run | `stopbar policy test` against corpus + recorded requests. | Diff of outcomes printed; non-zero exit on regression. | 1.5d | CS-112,CS-192 | FR-POL-4 |
 | CS-115 | Activation + cooling-off | Signed activation; loosening caps delayed by configurable period. | Loosening change inactive until delay passes; audited. | 2d | CS-111,CS-151 | FR-POL-5 |
 
 ### E3 Limiter
@@ -93,7 +93,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 
 | ID | Task | Detail | Acceptance criteria | Est | Depends | Refs |
 |---|---|---|---|---|---|---|
-| CS-151 | Approver keys + CLI approvals | Ed25519 approver keys; `countersign approve/reject <id>` signs over payload_hash. | Wrong hash or key rejected; quorum honoured. | 2d | CS-104 | FR-ESC-1,2 |
+| CS-151 | Approver keys + CLI approvals | Ed25519 approver keys; `stopbar approve/reject <id>` signs over payload_hash. | Wrong hash or key rejected; quorum honoured. | 2d | CS-104 | FR-ESC-1,2 |
 | CS-152 | Escalation lifecycle | Create, poll (/v1/decisions), timeout -> deny, reject -> deny. | E2E: escalate -> approve -> signed tx returned. | 1.5d | CS-151 | FR-ESC-3 |
 
 ### E7 Decision & signer
@@ -103,14 +103,14 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 | CS-161 | Decision signer (JWS Ed25519) | Sign decisions; JWKS endpoint; local key provider (dev-only guard). | Tokens verify with published JWKS; prod mode refuses local key. | 1.5d | CS-008 | LLD §10 |
 | CS-162 | Gatekeeper local signer adapter | Holds agent keystore; verifies decision token + payload_hash before signing. | Signing without valid token impossible (test). | 2d | CS-161 | FR-INT-3 |
 | CS-163 | AWS KMS signer + decision key | KMS secp256k1 for tx signing; KMS for decision key. | Integration test against KMS (or localstack). | 2d | CS-162 |  |
-| CS-164 | Turnkey adapter | Gatekeeper via Turnkey API key held only by Countersign. | Sandbox org test passes. | 2d | CS-162 |  |
+| CS-164 | Turnkey adapter | Gatekeeper via Turnkey API key held only by Stopbar. | Sandbox org test passes. | 2d | CS-162 |  |
 
 ### E8 Audit
 
 | ID | Task | Detail | Acceptance criteria | Est | Depends | Refs |
 |---|---|---|---|---|---|---|
 | CS-171 | Hash-chained log | Append-only bbolt bucket; record per event in same tx as state change. | Tampering one record fails verify. | 2d | CS-006 | FR-AUD-1 |
-| CS-172 | Checkpoints + verify CLI | Signed Merkle checkpoints; `countersign audit verify`. | Verify passes clean log, fails tampered. | 1.5d | CS-171,CS-161 | FR-AUD-2,3 |
+| CS-172 | Checkpoints + verify CLI | Signed Merkle checkpoints; `stopbar audit verify`. | Verify passes clean log, fails tampered. | 1.5d | CS-171,CS-161 | FR-AUD-2,3 |
 
 ### E9 SDKs & provenance
 
@@ -133,7 +133,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 
 | ID | Task | Detail | Acceptance criteria | Est | Depends | Refs |
 |---|---|---|---|---|---|---|
-| CS-195 | CLI: init | `countersign init --persona agent-wallet` generates config + policies + keys. | Fresh machine to protected agent < 30 min (timed). | 1.5d | CS-113 | FR-DX-1,3 |
+| CS-195 | CLI: init | `stopbar init --persona agent-wallet` generates config + policies + keys. | Fresh machine to protected agent < 30 min (timed). | 1.5d | CS-113 | FR-DX-1,3 |
 | CS-196 | Docker image + binaries | goreleaser; signed releases (cosign); SBOM. | Release artifacts signed and verifiable. | 1d | CS-003 | FR-DX-2, NFR-7 |
 | CS-197 | Benchmarks | Latency/throughput benchmarks vs. NFR-1/2. | p99 < 25ms sidecar at 1k rps published in docs. | 1.5d | CS-104 |  |
 | CS-198 | Quickstart + E2E demo | Anvil + sample agent + attack replay video/GIF. | Demo reproducible from README. | 1.5d | CS-195,CS-193 |  |
@@ -146,7 +146,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 |---|---|---|---|---|---|---|
 | CS-501 | Threat-tier ADR | docs/adr/0005-threat-tiers.md: T1-T4 definitions, harness-vs-model trust boundary, which controls hold per tier. | ADR merged; PRD §2.4 and HLD §8 reference it. | 0.5d | CS-009 | PRD §2.4 |
 | CS-502 | Tool-call policy schema + AgentDojo pack | Cedar context for tool_call (tool, recipient_external, amount, taint); examples/policies/agentdojo.cedar written before viewing injection tasks. | Bundle validates; hash frozen and recorded. | 2d | CS-112 | LLD §18.4 |
-| CS-503 | AgentDojo defence adapter | Python adapter: tool call -> ActionRequest -> /v1/evaluate; block returns tool error with reason codes. | Benign banking suite runs end-to-end through countersignd. | 3d | CS-101,CS-104,CS-502 | FR-EVAL-1, LLD §18.1 |
+| CS-503 | AgentDojo defence adapter | Python adapter: tool call -> ActionRequest -> /v1/evaluate; block returns tool error with reason codes. | Benign banking suite runs end-to-end through stopbard. | 3d | CS-101,CS-104,CS-502 | FR-EVAL-1, LLD §18.1 |
 | CS-504 | Harness provenance labelling | Label user prompt, tool outputs and AgentDojo injectable fields; session-level taint. | Injected-field outputs carry untrusted_* labels in the shadow log. | 1.5d | CS-503 | LLD §18.1 |
 | CS-505 | LLM monitor | Versioned monitor prompt; frontier + open-weight model; threshold set on held-out calibration split. | Monitor verdicts reproducible at temperature 0 on a fixed sample. | 1.5d | CS-503 | LLD §18.3 |
 | CS-506 | Shadow logging | Record policy and monitor verdicts on every call in every arm (JSONL schema §18.5). | Schema-validated log; both verdicts present for 100% of calls. | 1d | CS-505 | FR-EVAL-3 |
@@ -189,8 +189,8 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 
 | ID | Task | Detail | Acceptance criteria | Est | Depends | Refs |
 |---|---|---|---|---|---|---|
-| CS-401 | CountersignGuard (Safe Guard) | Solidity guard verifying EIP-712 countersignature + nonce. | Foundry tests; external audit scheduled. | 8d | CS-161 | LLD §10.2 |
-| CS-402 | MPC share integration | Countersign as one share holder with an MPC provider. | Tx impossible without Countersign share in test. | 10d | CS-161 |  |
+| CS-401 | StopbarGuard (Safe Guard) | Solidity guard verifying EIP-712 countersignature + nonce. | Foundry tests; external audit scheduled. | 8d | CS-161 | LLD §10.2 |
+| CS-402 | MPC share integration | Stopbar as one share holder with an MPC provider. | Tx impossible without Stopbar share in test. | 10d | CS-161 |  |
 | CS-403 | HSM / Nitro Enclave decision key | PKCS#11 and enclave key providers; attestation. | Key never leaves HSM/enclave; attestation verified. | 8d | CS-161 | NFR-5 |
 | CS-404 | Deploy-event ingestion | /v1/events/deploy; minutes_since_code_change; unsigned artifact -> deny. | Binance-pattern fixture escalates/denies. | 4d | CS-104 | FR-PRV-4 |
 | CS-405 | HA mode | Active/passive with shared store; fail-closed failover. | Chaos test: failover with no cap violations. | 8d | CS-306 | NFR-3 |
