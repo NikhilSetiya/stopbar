@@ -195,6 +195,7 @@ var (
 	reHexAddr = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
 	reHexData = regexp.MustCompile(`^0x([0-9a-fA-F]{2})*$`)
 	reDecimal = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
+	reSHA256  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
 // Validate checks structural invariants that do not depend on time or state.
@@ -287,6 +288,11 @@ func (d Decision) Validate() error {
 	}
 	if d.Outcome == Allow && (d.PolicyBundleHash == "" || d.PayloadHash == "") {
 		return errors.New("model: allow decisions must bind policy_bundle_hash and payload_hash")
+	}
+	for name, h := range map[string]string{"policy_bundle_hash": d.PolicyBundleHash, "payload_hash": d.PayloadHash} {
+		if h != "" && !reSHA256.MatchString(h) {
+			return fmt.Errorf("model: decision.%s must be sha256:<64 lower-case hex> (spec/decision-token-v1.md §2)", name)
+		}
 	}
 	if !d.ExpiresAt.After(d.IssuedAt) {
 		return errors.New("model: decision.expires_at must be after issued_at")
