@@ -133,8 +133,11 @@ type DestinationInfo struct {
 	SimilarToKnown bool `json:"similar_to_known"`
 }
 
-// Reason explains one policy contribution to a decision.
+// Reason explains one contribution to a decision. Code is machine-readable:
+// "POLICY" for a matched policy (PolicyID set), otherwise an engine code such
+// as FAIL_CLOSED_DECODER or CAP_EXCEEDED (LLD §12).
 type Reason struct {
+	Code     string `json:"code,omitempty"`
 	PolicyID string `json:"policy_id"`
 	Message  string `json:"message"`
 }
@@ -150,6 +153,9 @@ type Decision struct {
 	ReservationID    *string    `json:"reservation_id"`
 	IssuedAt         time.Time  `json:"issued_at"`
 	ExpiresAt        time.Time  `json:"expires_at"`
+	// Token is the decision token (spec/decision-token-v1.md), present only
+	// on allow. It is not part of what it signs.
+	Token string `json:"token,omitempty"`
 }
 
 // Approval is a human (or second-agent) countersignature on an escalation.
@@ -285,6 +291,9 @@ func (d Decision) Validate() error {
 	}
 	if d.Outcome != Allow && len(d.Reasons) == 0 {
 		return errors.New("model: deny/escalate decisions must carry at least one reason")
+	}
+	if d.Outcome != Allow && d.Token != "" {
+		return errors.New("model: only allow decisions may carry a token")
 	}
 	if d.Outcome == Allow && (d.PolicyBundleHash == "" || d.PayloadHash == "") {
 		return errors.New("model: allow decisions must bind policy_bundle_hash and payload_hash")

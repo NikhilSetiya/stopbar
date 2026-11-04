@@ -31,6 +31,9 @@ go test -run='^$' -bench=BenchmarkSpikeEvaluate -benchtime=20000x ./internal/pol
 step "decision token v1: vectors fresh and verify (CS-008)"
 go test -count=1 -run 'TestDecisionTokenVectors|TestPayloadHash' ./internal/decision/
 
+step "engine: fail-closed matrix, invariants, gateway wiring (CS-104)"
+go test -race -count=1 ./internal/engine/
+
 step "corpus + spec fixtures against schemas"
 python3 scripts/validate_corpus.py
 
@@ -74,7 +77,7 @@ fi
 
 # Pending stages, enabled as they land:
 #   CS-161/162  real signer + adapter verifier pass spec/vectors/decision-token-v1.json
-#   CS-104      corpus requests through stopbard assert expected outcome, not 503
+#   CS-111..    stopbard wires the real engine; corpus requests assert expected outcome, not 503
 #   CS-171      audit chain verify over the replay run
 #   CS-191..193 full corpus replay (test/replay)
 

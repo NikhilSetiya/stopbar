@@ -152,9 +152,10 @@ func TestEvaluateOutcomes(t *testing.T) {
 		status  int
 	}{
 		{"action_request.evm_tx.json", model.Allow, 200},
-		{"action_request.evm_tx.json", model.Deny, 200},
+		{"action_request.evm_tx.json", model.Deny, 403},
 		{"action_request.evm_tx.json", model.Escalate, 202},
-		{"action_request.tool_call.json", model.Deny, 200},
+		{"action_request.tool_call.json", model.Deny, 403},
+		{"action_request.tool_call.json", model.Allow, 200},
 	} {
 		t.Run(tt.fixture+"/"+string(tt.outcome), func(t *testing.T) {
 			g := New(Config{Evaluator: decide(tt.outcome)})
@@ -215,7 +216,9 @@ func TestHealthzAndMetrics(t *testing.T) {
 	if res, b := do(t, g, "GET", "/healthz", "", nil); res.StatusCode != 200 || !bytes.Contains(b, []byte(`"ok"`)) {
 		t.Fatalf("healthz: %d %s", res.StatusCode, b)
 	}
-	do(t, g, "POST", "/v1/evaluate", "application/json", fixture(t, "action_request.evm_tx.json"))
+	if res, _ := do(t, g, "POST", "/v1/evaluate", "application/json", fixture(t, "action_request.evm_tx.json")); res.StatusCode != 403 {
+		t.Fatalf("deny status = %d", res.StatusCode)
+	}
 	do(t, g, "POST", "/v1/evaluate", "application/json", []byte("{"))
 	do(t, g, "GET", "/v1/attacker-controlled-path-1", "", nil)
 	do(t, g, "GET", "/v1/attacker-controlled-path-2", "", nil)
@@ -224,7 +227,7 @@ func TestHealthzAndMetrics(t *testing.T) {
 		t.Fatalf("metrics: %d %q", res.StatusCode, res.Header.Get("Content-Type"))
 	}
 	for _, want := range []string{
-		`stopbar_http_requests_total{route="/v1/evaluate",status="200"} 1`,
+		`stopbar_http_requests_total{route="/v1/evaluate",status="403"} 1`,
 		`stopbar_http_requests_total{route="/v1/evaluate",status="400"} 1`,
 		`stopbar_http_requests_total{route="other",status="404"} 2`, // unknown paths share one label
 		`stopbar_gateway_rejections_total{code="MALFORMED_JSON"} 1`,
@@ -236,6 +239,20 @@ func TestHealthzAndMetrics(t *testing.T) {
 	}
 	if bytes.Contains(b, []byte("attacker-controlled")) {
 		t.Error("request paths leaked into metric labels")
+	}
+}
+
+// TestStatusAloneIsSafe: a client that checks only for 200 must never read
+// a non-allow as an allow, and every outcome must have a status.
+func TestStatusAloneIsSafe(t *testing.T) {
+	for _, o := range []model.Outcome{model.Allow, model.Deny, model.Escalate} {
+		s, ok := outcomeStatus[o]
+		if !ok {
+			t.Fatalf("no status for %s", o)
+		}
+		if (s == http.StatusOK) != (o == model.Allow) {
+			t.Errorf("%s -> %d: 200 must mean allow and only allow", o, s)
+		}
 	}
 }
 

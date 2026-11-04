@@ -32,7 +32,7 @@ CS-145,P1,E5 Decoder & intent,Destructive-action flags + salami caps,min_out_zer
 CS-144,P1,E5 Decoder & intent,Decoder fuzzing,Go native fuzz targets on calldata.,24h fuzz run with no panics.,1,CS-141,
 CS-151,P1,E6 Escalation,Approver keys + CLI approvals,Ed25519 approver keys; `stopbar approve/reject <id>` signs over payload_hash.,Wrong hash or key rejected; quorum honoured.,2,CS-104,"FR-ESC-1,2"
 CS-152,P1,E6 Escalation,Escalation lifecycle,"Create, poll (/v1/decisions), timeout -> deny, reject -> deny.",E2E: escalate -> approve -> signed tx returned.,1.5,CS-151,FR-ESC-3
-CS-161,P1,E7 Decision & signer,Decision signer (JWS Ed25519),Sign decisions; JWKS endpoint; local key provider (dev-only guard).,Tokens verify with published JWKS; prod mode refuses local key.,1.5,CS-008,LLD §10
+CS-161,P1,E7 Decision & signer,Decision signer (JWS Ed25519),"Sign decisions; JWKS endpoint; local key provider (dev-only guard). Blocked by CS-102: once Stopbar signs, a replayed request is a replayed signature.",Tokens verify with published JWKS; prod mode refuses local key.,1.5,"CS-008,CS-102",LLD §10
 CS-162,P1,E7 Decision & signer,Gatekeeper local signer adapter,Holds agent keystore; verifies decision token + payload_hash before signing.,Signing without valid token impossible (test).,2,CS-161,FR-INT-3
 CS-163,P1,E7 Decision & signer,AWS KMS signer + decision key,KMS secp256k1 for tx signing; KMS for decision key.,Integration test against KMS (or localstack).,2,CS-162,
 CS-164,P1,E7 Decision & signer,Turnkey adapter,Gatekeeper via Turnkey API key held only by Stopbar.,Sandbox org test passes.,2,CS-162,

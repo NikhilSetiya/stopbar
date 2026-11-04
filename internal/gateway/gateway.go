@@ -165,12 +165,17 @@ func (g *Gateway) evaluate(w http.ResponseWriter, r *http.Request) error {
 		g.log.Error("evaluator returned invalid decision", "request_id", req.ID, "decision_request_id", d.RequestID, "err", verr)
 		return withID(fail(CodeInternal, "evaluation failed"), req.ID)
 	}
-	status := http.StatusOK
-	if d.Outcome == model.Escalate {
-		status = http.StatusAccepted
-	}
 	g.metrics.decision(d.Outcome)
-	return g.writeJSON(w, "/v1/evaluate", status, d)
+	return g.writeJSON(w, "/v1/evaluate", outcomeStatus[d.Outcome], d)
+}
+
+// outcomeStatus makes the status code alone safe to act on: a client that
+// checks only "2xx" can never read a deny as an allow. 200 means allow and
+// nothing else. The decision is in the body for every outcome.
+var outcomeStatus = map[model.Outcome]int{
+	model.Allow:    http.StatusOK,
+	model.Escalate: http.StatusAccepted,
+	model.Deny:     http.StatusForbidden,
 }
 
 func withID(e *apiError, id string) *apiError { e.RequestID = id; return e }

@@ -71,7 +71,7 @@ Sits between the requester (agent, service, UI) and the signer, in a **separate 
 | 3 Code-mode agents | Months 3–9 | Policy on every binding call inside agent sandboxes |
 | 4 Custody grade | Year 2 | Co-signer mode (Safe guard / MPC share), HSM/TEE, deploy correlation |
 
-Windows assume full-time focus. Build the **thin slice** first (23 tasks, ~41 build days, labelled `thin-slice`): the shortest path to a public demo blocking the seed attacks.
+Windows assume full-time focus. Build the **thin slice** first (24 tasks, ~42 build days, labelled `thin-slice`): the shortest path to a public demo blocking the seed attacks.
 
 ## Track work
 

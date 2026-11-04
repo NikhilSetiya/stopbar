@@ -11,8 +11,10 @@ Status is pre-alpha. Implemented so far:
 - `internal/model`: wire types.
 - `internal/canon`: RFC 8785 JCS and hashing.
 - `internal/gateway`: the HTTP API with strict request checks. See LLD §4 for check order and error codes.
+- `internal/engine`: pipeline orchestration with fail-closed mapping and invariants between stages (LLD §2, §12). It consumes components through interfaces; the real ones arrive in CS-111/121/141/161/171.
+- `internal/decision`: the payload binding (`PayloadHash`).
 
-The Cedar spike (`internal/policy`) and the decision-token reference (`internal/decision`) exist only as tests. Every other `internal/*` package is a placeholder `doc.go` whose responsibilities are defined in LLD §1. `cmd/stopbard` serves the gateway on loopback only until auth exists (CS-103). It has no engine until CS-104, so `/v1/evaluate` answers 503.
+The Cedar spike (`internal/policy`) and the decision-token signer/verifier reference exist only as tests. Every other `internal/*` package is a placeholder `doc.go` whose responsibilities are defined in LLD §1. `cmd/stopbard` serves the gateway on loopback only until auth exists (CS-103). It doesn't wire the engine yet: the real components don't exist, and `engine.New` refuses to start without them. So `/v1/evaluate` answers 503.
 
 ## Commands
 
@@ -49,7 +51,9 @@ The pipeline is orchestrated by an `Engine` (LLD §2):
 
 gateway → normalize → decode intent (`decode/evm`) → enrich (price, balance, velocity, provenance) → policy (Cedar) → limiter (reserve/commit caps) → decision signer (JWS / EIP-712) → hash-chained audit log
 
-- **Fail closed everywhere.** Each component returns typed errors. The engine maps any non-domain error or panic to `deny` with `FAIL_CLOSED_<COMPONENT>` (LLD §12), and no decision may go unaudited.
+- **Fail closed everywhere.** Each component returns typed errors. The engine maps any non-domain error, panic or timeout to `deny` with `FAIL_CLOSED_<COMPONENT>` (LLD §12), and no decision may go unaudited.
+- **The HTTP status alone is safe to act on:** 200 is allow and only allow, 202 is escalate, 403 is deny. Every response with a decision carries the full Decision in its body.
+- **CS-102 (nonce/TTL) must land before CS-161 (decision signing).** Once Stopbar signs, a replayed request is a replayed signature.
 - **Policy outcome precedence:** deny > escalate > allow, with default deny.
 - **Limiter** reserves on evaluate and then commits or releases (`Engine.Commit/Release`), so caps hold across concurrent requests.
 - **Enforcement modes** (HLD §3) determine real security. *Advisory* is bypassable. *Gatekeeper* (the Phase 1 default) means Stopbar holds the signer credential. *Co-signer* (Phase 4) means the signer requires Stopbar's signature.
