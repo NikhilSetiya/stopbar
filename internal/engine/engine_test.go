@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -62,32 +64,57 @@ func outcome(o model.Outcome) policyFunc {
 	}
 }
 
+// fakeLimiter models the atomic store: an audit entry is written with the
+// state change, and if the audit write fails, the change does not happen.
 type fakeLimiter struct {
 	mu                          sync.Mutex
+	audit                       *fakeAudit
 	reserveErr                  error
 	reserved, released, commits []string
 }
 
-func (l *fakeLimiter) Reserve(_ context.Context, id string, _ model.EnrichedRequest, _ time.Duration) error {
+func (l *fakeLimiter) record(rec *model.AuditEntry) error {
+	if rec == nil {
+		return nil
+	}
+	if err := l.audit.Append(context.Background(), rec.Type, rec.Body); err != nil {
+		return fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
+	}
+	return nil
+}
+
+func (l *fakeLimiter) Reserve(_ context.Context, id string, _ model.EnrichedRequest, _ time.Duration, rec *model.AuditEntry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.reserveErr != nil {
 		return l.reserveErr
 	}
+	if err := l.record(rec); err != nil {
+		return err
+	}
 	l.reserved = append(l.reserved, id)
 	return nil
 }
-func (l *fakeLimiter) Commit(_ context.Context, id, _ string) error {
+func (l *fakeLimiter) Commit(_ context.Context, id, _ string, rec *model.AuditEntry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if err := l.record(rec); err != nil {
+		return err
+	}
 	l.commits = append(l.commits, id)
 	return nil
 }
-func (l *fakeLimiter) Release(_ context.Context, id string) error {
+
+// Release counts every attempt, but like the real limiter it writes nothing
+// (no audit record) for an ID that holds no reservation.
+func (l *fakeLimiter) Release(_ context.Context, id string, rec *model.AuditEntry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.released = append(l.released, id)
-	return nil
+	if !slices.Contains(l.reserved, id) {
+		return ErrUnknownReservation
+	}
+	return l.record(rec)
 }
 
 type signFunc func(context.Context, model.Decision) (string, error)
@@ -125,7 +152,8 @@ type rig struct {
 }
 
 func newRig() *rig {
-	l, a := &fakeLimiter{}, &fakeAudit{}
+	a := &fakeAudit{}
+	l := &fakeLimiter{audit: a}
 	return &rig{limiter: l, audit: a, cfg: Config{
 		Decoders: []Decoder{fakeDecoder{}}, Policy: outcome(model.Allow), Limiter: l,
 		Signer: goodSigner, Audit: a, StageTimeout: 50 * time.Millisecond,
@@ -226,7 +254,7 @@ func TestFailClosed(t *testing.T) {
 		mutate  func(*rig)
 		req     string
 		code    string
-		release bool // a reservation was made and must be released
+		release bool // a release was attempted (after a reserve that may have landed)
 		audited bool
 	}{
 		{"no payload binding (withdrawal)", nil, "withdrawal", CodeNormalize, false, true},
@@ -296,13 +324,15 @@ func TestFailClosed(t *testing.T) {
 		{"limiter store down", func(r *rig) { r.limiter.reserveErr = errors.New("redis: connection refused") }, "", CodeLimiter, true, true},
 		{"signer error", func(r *rig) {
 			r.cfg.Signer = signFunc(func(context.Context, model.Decision) (string, error) { return "", errors.New("kms throttled") })
-		}, "", CodeSigner, true, true},
+		}, "", CodeSigner, false, true}, // signing happens before reserving: nothing to release
 		{"signer empty token", func(r *rig) {
 			r.cfg.Signer = signFunc(func(context.Context, model.Decision) (string, error) { return "", nil })
-		}, "", CodeSigner, true, true},
+		}, "", CodeSigner, false, true},
 		{"signer panic", func(r *rig) {
 			r.cfg.Signer = signFunc(func(context.Context, model.Decision) (string, error) { panic("boom") })
-		}, "", CodeSigner, true, true},
+		}, "", CodeSigner, false, true},
+		// reserve + record are one write: with the audit down nothing was
+		// reserved, and the engine still attempts the best-effort release
 		{"audit down on allow", func(r *rig) { r.audit.err = errors.New("disk full") }, "", CodeAudit, true, false},
 	}
 	for _, tt := range tests {
@@ -376,6 +406,7 @@ func TestNewRequiresComponents(t *testing.T) {
 func TestCommitAndReleaseAreAudited(t *testing.T) {
 	r := newRig()
 	e := r.engine(t)
+	r.limiter.reserved = []string{"req-1", "req-2", "req-3"}
 	if err := e.Commit(context.Background(), "req-1", "0xabc"); err != nil {
 		t.Fatal(err)
 	}
@@ -448,5 +479,22 @@ func TestThroughGateway(t *testing.T) {
 				t.Fatalf("status %d body %s", res.StatusCode, b)
 			}
 		})
+	}
+}
+
+// Denials that cannot be audited are counted and logged, never silent.
+func TestUnauditedDenialsAreCounted(t *testing.T) {
+	r := newRig()
+	r.audit.err = errors.New("disk full")
+	for _, o := range []model.Outcome{model.Allow, model.Deny} {
+		r.cfg.Policy = outcome(o)
+		e := r.engine(t)
+		d := evaluate(t, e, fixtureRequest(t, "action_request.evm_tx.json"))
+		if d.Outcome != model.Deny || d.Reasons[len(d.Reasons)-1].Code != CodeAudit {
+			t.Fatalf("%s with audit down: %+v", o, d.Reasons)
+		}
+		if got := e.Counters()["stopbar_audit_unavailable_denials_total"]; got == 0 {
+			t.Fatalf("%s: unaudited denial not counted", o)
+		}
 	}
 }

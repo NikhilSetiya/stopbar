@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/NikhilSetiya/stopbar/internal/decision"
@@ -51,10 +52,14 @@ type PolicyResult struct {
 // double-count. The engine releases after any failed or timed-out Reserve in
 // case a late reservation lands, and treats ErrUnknownReservation and
 // ErrReservationExpired from that Release as "nothing held".
+//
+// Each call takes the audit record describing it, and the limiter writes
+// both in one transaction (LLD §11). If the record cannot be written, the
+// state change does not happen and the error wraps ErrAuditUnavailable.
 type Limiter interface {
-	Reserve(ctx context.Context, id string, req model.EnrichedRequest, ttl time.Duration) error
-	Commit(ctx context.Context, id, txRef string) error
-	Release(ctx context.Context, id string) error
+	Reserve(ctx context.Context, id string, req model.EnrichedRequest, ttl time.Duration, rec *model.AuditEntry) error
+	Commit(ctx context.Context, id, txRef string, rec *model.AuditEntry) error
+	Release(ctx context.Context, id string, rec *model.AuditEntry) error
 }
 
 // Domain errors a Limiter returns; anything else is FAIL_CLOSED_LIMITER.
@@ -65,6 +70,9 @@ var (
 	ErrCircuitOpen        = errors.New("limiter: circuit breaker open")
 	ErrUnknownReservation = errors.New("limiter: unknown reservation")
 	ErrReservationExpired = errors.New("limiter: reservation expired")
+	// ErrAuditUnavailable: the audit record (and the state change it
+	// describes) could not be written.
+	ErrAuditUnavailable = errors.New("audit unavailable")
 )
 
 // Signer issues the decision token for an allow (CS-161, decision.Signer).
@@ -110,7 +118,24 @@ type Config struct {
 }
 
 // Engine implements gateway.Evaluator.
-type Engine struct{ cfg Config }
+type Engine struct {
+	cfg Config
+	// unauditedDenials counts denials that could not be audited. Failing
+	// closed is right, but it must never be silent.
+	unauditedDenials atomic.Uint64
+}
+
+// Counters are the engine's metrics, for /metrics.
+func (e *Engine) Counters() map[string]uint64 {
+	return map[string]uint64{"stopbar_audit_unavailable_denials_total": e.unauditedDenials.Load()}
+}
+
+// unaudited records a denial that could not be audited, loudly.
+func (e *Engine) unaudited(requestID string, err error) {
+	e.unauditedDenials.Add(1)
+	e.cfg.Logger.Error("UNAUDITED DENIAL: audit log unavailable; failing closed", "severity", "high",
+		"request_id", requestID, "err", err, "metric", "stopbar_audit_unavailable_denials_total")
+}
 
 // New validates cfg. A missing component is a configuration error, not a
 // silent pass-through.
@@ -202,7 +227,7 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 		if err == nil {
 			return d
 		}
-		e.cfg.Logger.Error("audit append failed", "request_id", req.ID, "outcome", d.Outcome, "err", err)
+		e.unaudited(req.ID, err)
 		return e.deny(req.ID, now, d.PayloadHash, failed(CodeAudit, fmt.Errorf("audit append failed")), d.Reasons...)
 	}
 
@@ -251,31 +276,33 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 		return audit(d, ctxRecord)
 	}
 
-	// limiter
+	// sign first: it changes no state. The token claims reservation_id, and
+	// the reservation is made below, in the same transaction as the
+	// decision's audit record. If that fails, the token never leaves.
 	id := req.ID
-	if err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Reserve(ctx, id, er, e.cfg.DecisionTTL) }); err != nil {
-		e.release(ctx, id) // a timed-out Reserve may still land
-		return audit(e.denyWith(d, limiterFailure(err)), ctxRecord)
-	}
 	d.ReservationID = &id
-
-	// sign
 	var token string
 	if err := e.call(ctx, func(ctx context.Context) (err error) { token, err = e.cfg.Signer.Sign(ctx, req, d); return }); err != nil || token == "" {
 		if err == nil {
 			err = errors.New("signer returned an empty token")
 		}
-		e.release(ctx, id)
+		d.ReservationID = nil
 		return audit(e.denyWith(d, failed(CodeSigner, err)), ctxRecord)
 	}
 	d.Token = token
 
-	// audit: no unaudited allow. On failure the token is discarded.
-	out := audit(d, ctxRecord)
-	if out.Outcome != model.Allow {
-		e.release(ctx, id)
+	// limiter: reserve + audit the allow, atomically.
+	rec := &model.AuditEntry{Type: model.AuditDecision, Body: map[string]any{"request": req, "decision": d, "context": er}}
+	if err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Reserve(ctx, id, er, e.cfg.DecisionTTL, rec) }); err != nil {
+		e.release(ctx, id, "reserve failed or timed out") // a timed-out Reserve may still land
+		if errors.Is(err, ErrAuditUnavailable) {
+			e.unaudited(req.ID, err)
+			out := e.denyWith(d, failed(CodeAudit, err))
+			return audit(out, ctxRecord) // best effort: the store may be back
+		}
+		return audit(e.denyWith(d, limiterFailure(err)), ctxRecord)
 	}
-	return out
+	return d
 }
 
 func (e *Engine) decode(ctx context.Context, a model.Action, payloadHash string) (model.IntentSummary, *stageError) {
@@ -361,8 +388,9 @@ func limiterFailure(err error) *stageError {
 
 // release is best-effort: an unreleased reservation still expires with the
 // decision TTL.
-func (e *Engine) release(ctx context.Context, id string) {
-	err := e.call(context.WithoutCancel(ctx), func(ctx context.Context) error { return e.cfg.Limiter.Release(ctx, id) })
+func (e *Engine) release(ctx context.Context, id, reason string) {
+	rec := &model.AuditEntry{Type: model.AuditRelease, Body: map[string]any{"request_id": id, "reason": reason}}
+	err := e.call(context.WithoutCancel(ctx), func(ctx context.Context) error { return e.cfg.Limiter.Release(ctx, id, rec) })
 	if errors.Is(err, ErrUnknownReservation) || errors.Is(err, ErrReservationExpired) {
 		return // nothing was held
 	}
@@ -405,30 +433,28 @@ func publicMessage(se *stageError) string {
 	}
 }
 
-// Commit records that the allowed action was broadcast (CS-105 wires the
-// endpoint). Errors are returned to the caller.
+// Commit records that the allowed action was broadcast (or, in gatekeeper
+// mode, signed). The commit and its audit record are one transaction.
 func (e *Engine) Commit(ctx context.Context, requestID, txRef string) error {
-	if err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Commit(ctx, requestID, txRef) }); err != nil {
+	rec := &model.AuditEntry{Type: model.AuditCommit, Body: map[string]any{"request_id": requestID, "tx_ref": txRef}}
+	if err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Commit(ctx, requestID, txRef, rec) }); err != nil {
+		if errors.Is(err, ErrAuditUnavailable) {
+			return failed(CodeAudit, err)
+		}
 		return failed(CodeLimiter, err)
-	}
-	if err := e.call(ctx, func(ctx context.Context) error {
-		return e.cfg.Audit.Append(ctx, model.AuditCommit, map[string]any{"request_id": requestID, "tx_ref": txRef})
-	}); err != nil {
-		return failed(CodeAudit, err)
 	}
 	return nil
 }
 
 // Release abandons an allowed action and frees its reservation. The reason
-// (e.g. "client", or why a signer adapter refused) is audited.
+// (e.g. "client", or why a signer adapter refused) is audited with it.
 func (e *Engine) Release(ctx context.Context, requestID, reason string) error {
-	if err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Release(ctx, requestID) }); err != nil {
+	rec := &model.AuditEntry{Type: model.AuditRelease, Body: map[string]any{"request_id": requestID, "reason": reason}}
+	if err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Release(ctx, requestID, rec) }); err != nil {
+		if errors.Is(err, ErrAuditUnavailable) {
+			return failed(CodeAudit, err)
+		}
 		return failed(CodeLimiter, err)
-	}
-	if err := e.call(ctx, func(ctx context.Context) error {
-		return e.cfg.Audit.Append(ctx, model.AuditRelease, map[string]any{"request_id": requestID, "reason": reason})
-	}); err != nil {
-		return failed(CodeAudit, err)
 	}
 	return nil
 }

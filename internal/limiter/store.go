@@ -2,11 +2,16 @@ package limiter
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+
+	"github.com/NikhilSetiya/stopbar/internal/audit"
+	"github.com/NikhilSetiya/stopbar/internal/model"
+	"github.com/NikhilSetiya/stopbar/internal/store"
 )
 
 // Reservation states.
@@ -51,51 +56,63 @@ func fromRecord(r Record) (*entry, error) {
 	return &entry{Record: r, amt: amt}, nil
 }
 
-// Store persists reservation records. Put must be durable when it returns.
+// Store persists reservation records. Put must be durable when it returns,
+// and when entry is non-nil it must write the audit record in the same
+// transaction as r: both durable, or neither.
 type Store interface {
-	Put(r Record) error
+	Put(r Record, entry *model.AuditEntry) error
 	Delete(ids []string) error
 	Load() ([]Record, error)
 }
 
-// MemStore keeps nothing: state lives only in the Limiter (tests, dev).
+// MemStore keeps nothing: state lives only in the Limiter (unit tests). It
+// cannot audit, so it refuses a Put that carries an audit entry rather than
+// silently dropping the record.
 type MemStore struct{}
 
-func (MemStore) Put(Record) error        { return nil }
+func (MemStore) Put(_ Record, entry *model.AuditEntry) error {
+	if entry != nil {
+		return errors.New("limiter: MemStore cannot record audit entries")
+	}
+	return nil
+}
 func (MemStore) Delete([]string) error   { return nil }
 func (MemStore) Load() ([]Record, error) { return nil, nil }
 
 var boltBucket = []byte("limiter_reservations_v1")
 
-// BoltStore persists records in a bbolt file. bbolt takes an exclusive file
-// lock, so two processes cannot share one limiter state by accident (that
-// needs the Redis store, CS-306).
-type BoltStore struct{ db *bolt.DB }
-
-// OpenBolt opens or creates the store at path.
-func OpenBolt(path string) (*BoltStore, error) {
-	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: time.Second})
-	if err != nil {
-		return nil, fmt.Errorf("limiter: open %s: %w", path, err)
-	}
-	if err := db.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(boltBucket)
-		return err
-	}); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return &BoltStore{db: db}, nil
+// BoltStore keeps records in the shared state file next to the audit log.
+type BoltStore struct {
+	db  *store.DB
+	log *audit.Log
 }
 
-func (s *BoltStore) Close() error { return s.db.Close() }
+// NewBoltStore uses db's limiter bucket and appends audit entries to log in
+// the same transaction.
+func NewBoltStore(db *store.DB, log *audit.Log) (*BoltStore, error) {
+	if err := db.Bucket(boltBucket); err != nil {
+		return nil, err
+	}
+	return &BoltStore{db: db, log: log}, nil
+}
 
-func (s *BoltStore) Put(r Record) error {
+func (s *BoltStore) Put(r Record, entry *model.AuditEntry) error {
 	b, err := json.Marshal(r)
 	if err != nil {
 		return err
 	}
-	return s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(boltBucket).Put([]byte(r.ID), b) })
+	if entry != nil && s.log == nil {
+		return errors.New("limiter: no audit log configured")
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket(boltBucket).Put([]byte(r.ID), b); err != nil {
+			return err
+		}
+		if entry != nil {
+			return s.log.AppendTx(tx, *entry)
+		}
+		return nil
+	})
 }
 
 func (s *BoltStore) Delete(ids []string) error {

@@ -2,6 +2,10 @@ package nonce
 
 import (
 	"path/filepath"
+
+	"github.com/NikhilSetiya/stopbar/internal/audit"
+	"github.com/NikhilSetiya/stopbar/internal/model"
+	"github.com/NikhilSetiya/stopbar/internal/store"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -67,12 +71,20 @@ func TestConcurrentConsumeExactlyOne(t *testing.T) {
 
 // A restart inside the retention window must not reopen a replay.
 func TestBoltRestartKeepsNonces(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "nonce.db")
+	path := filepath.Join(t.TempDir(), "state.db")
 	c := newClock()
-	s, err := OpenBolt(path, c.Now)
-	if err != nil {
-		t.Fatal(err)
+	open := func() (*Store, *store.DB) {
+		db, err := store.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := Open(db, "nonces", nil, c.Now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s, db
 	}
+	s, db := open()
 	k := Key("acme", "agent", "n1")
 	if fresh, err := s.Consume(k, c.Now().Add(6*time.Minute)); !fresh || err != nil {
 		t.Fatal(fresh, err)
@@ -80,18 +92,49 @@ func TestBoltRestartKeepsNonces(t *testing.T) {
 	if fresh, _ := s.Consume(Key("acme", "agent", "old"), c.Now().Add(time.Second)); !fresh {
 		t.Fatal("old")
 	}
-	_ = s.Close()
+	_ = db.Close()
 
 	c.Advance(5 * time.Minute)
-	s, err = OpenBolt(path, c.Now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = s.Close() }()
+	s, db = open()
+	defer func() { _ = db.Close() }()
 	if fresh, _ := s.Consume(k, c.Now().Add(time.Minute)); fresh {
 		t.Fatal("restart reopened a replay")
 	}
 	if s.Len() != 1 {
 		t.Fatalf("expired nonce survived restart: %d retained", s.Len())
+	}
+}
+
+// The accepted request is audited if and only if its nonce is spent.
+func TestConsumeWithAuditsAtomically(t *testing.T) {
+	db, err := store.OpenTemp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	lg, err := audit.New(audit.Config{DB: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(db, "nonces", lg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &model.AuditEntry{Type: model.AuditRequest, Body: map[string]any{"request_id": "r1"}}
+	if fresh, err := s.ConsumeWith(Key("t", "a", "n"), time.Now().Add(time.Minute), e); !fresh || err != nil {
+		t.Fatal(fresh, err)
+	}
+	if fresh, _ := s.ConsumeWith(Key("t", "a", "n"), time.Now().Add(time.Minute), e); fresh {
+		t.Fatal("replay")
+	}
+	if recs, _ := audit.Records(db, 1, 0); len(recs) != 1 || recs[0].Type != model.AuditRequest {
+		t.Fatalf("records %+v: a replay must not be recorded as a request", recs)
+	}
+	unaudited, err := Open(db, "other", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unaudited.ConsumeWith(Key("t", "a", "x"), time.Now().Add(time.Minute), e); err == nil {
+		t.Fatal("an audited consume on a store without a log must fail closed")
 	}
 }

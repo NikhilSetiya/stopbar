@@ -109,7 +109,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 
 | ID | Task | Detail | Acceptance criteria | Est | Depends | Refs |
 |---|---|---|---|---|---|---|
-| CS-171 | Hash-chained log | Append-only bbolt bucket; record per event in same tx as state change. Denials that cannot be audited (store down) must not be silent: high-severity log + stopbar_audit_unavailable_denials_total metric. | Tampering one record fails verify. Audit store down -> deny, error log and counter increments (test). | 2d | CS-006 | FR-AUD-1 |
+| CS-171 | Hash-chained log | Append-only bbolt bucket; record per event in same tx as state change. Denials that cannot be audited (store down) must not be silent: high-severity log + stopbar_audit_unavailable_denials_total metric. | Tampering one record fails verify (edit a byte, delete, reorder, re-hash, truncate). Audit store down -> deny, error log and counter increments (test). Record written in the same bbolt tx as the limiter/nonce state change. CI replay ends with audit verify passing over the run's log. | 2d | CS-006 | FR-AUD-1 |
 | CS-172 | Checkpoints + verify CLI | Signed Merkle checkpoints; `stopbar audit verify`. | Verify passes clean log, fails tampered. | 1.5d | CS-171,CS-161 | FR-AUD-2,3 |
 
 ### E9 SDKs & provenance

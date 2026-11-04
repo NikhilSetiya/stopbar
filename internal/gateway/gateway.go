@@ -74,8 +74,10 @@ const ClockSkew = 30 * time.Second
 const NonceRetention = model.MaxTTL + 2*ClockSkew
 
 // NonceStore is an atomic check-and-set of single-use nonces (internal/nonce).
+// The accepted request's audit entry is written in the same transaction as
+// the consumed nonce.
 type NonceStore interface {
-	Consume(key string, until time.Time) (fresh bool, err error)
+	ConsumeWith(key string, until time.Time, entry *model.AuditEntry) (fresh bool, err error)
 }
 
 var codeStatus = map[Code]int{
@@ -118,8 +120,11 @@ type Config struct {
 	Evaluator Evaluator  // nil: /v1/evaluate answers ENGINE_UNAVAILABLE
 	Nonces    NonceStore // nil: an in-memory store (replays reopen on restart)
 	// Keys lists the decision-token keys (active and retired) for /v1/keys.
-	Keys   func() []decision.JWK
-	Logger *slog.Logger
+	Keys func() []decision.JWK
+	// Counters adds components' counters (e.g. the engine's
+	// stopbar_audit_unavailable_denials_total) to /metrics.
+	Counters func() map[string]uint64
+	Logger   *slog.Logger
 	// Clock is for tests. stopbard never sets it: a configurable clock would
 	// be a switch that turns freshness checks off.
 	Clock func() time.Time
@@ -130,6 +135,7 @@ type Gateway struct {
 	eval    Evaluator
 	nonces  NonceStore
 	keys    func() []decision.JWK
+	extra   func() map[string]uint64
 	clock   func() time.Time
 	log     *slog.Logger
 	metrics *metrics
@@ -138,7 +144,7 @@ type Gateway struct {
 
 // New returns a Gateway.
 func New(cfg Config) *Gateway {
-	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, keys: cfg.Keys, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux()}
+	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, keys: cfg.Keys, extra: cfg.Counters, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux()}
 	if g.log == nil {
 		g.log = slog.New(slog.DiscardHandler)
 	}
@@ -233,7 +239,8 @@ func (g *Gateway) checkFresh(req model.ActionRequest) error {
 	case !now.Before(req.IssuedAt.Add(time.Duration(req.TTLSeconds)*time.Second + ClockSkew)):
 		return withID(fail(CodeExpired, "request expired (issued_at + ttl_seconds + %s skew has passed)", ClockSkew), req.ID)
 	}
-	fresh, err := g.nonces.Consume(nonce.Key(req.Tenant, req.Actor.AgentID, req.Nonce), now.Add(NonceRetention))
+	fresh, err := g.nonces.ConsumeWith(nonce.Key(req.Tenant, req.Actor.AgentID, req.Nonce), now.Add(NonceRetention),
+		&model.AuditEntry{Type: model.AuditRequest, Body: req})
 	if err != nil {
 		g.log.Error("nonce store failed; failing closed", "request_id", req.ID, "err", err)
 		return withID(fail(CodeInternal, "replay protection unavailable"), req.ID)
@@ -338,7 +345,11 @@ func (g *Gateway) serveKeys(w http.ResponseWriter, _ *http.Request) error {
 func (g *Gateway) serveMetrics(w http.ResponseWriter, _ *http.Request) error {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	g.metrics.request("/metrics", http.StatusOK)
-	if _, err := w.Write([]byte(g.metrics.render())); err != nil {
+	out := g.metrics.render()
+	if g.extra != nil {
+		out += renderCounters(g.extra())
+	}
+	if _, err := w.Write([]byte(out)); err != nil {
 		g.log.Debug("write metrics", "err", err)
 	}
 	return nil

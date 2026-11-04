@@ -9,8 +9,10 @@ with the rewritten bytes printed. Every step
 before expected.at_step must be allowed (200). The stopping step must have
 the expected outcome as its HTTP status (allow 200 / escalate 202 / deny 403 /
 reject 400, refused by the gateway and never evaluated),
-exactly the expected policy IDs, the expected reason code if one is given,
-and an audit record. stopbard runs in gatekeeper mode: every allowed step must
+exactly the expected policy IDs and the expected reason code if one is
+given. After shutdown, `stopbar audit verify --require-covered` must pass over
+the run's own audit log, the stopping decision must be audited (a reject must
+not reach the engine), and every signed tx must have a commit record. stopbard runs in gatekeeper mode: every allowed step must
 return a signed tx, which `stopbar decode-tx` decodes independently. Its
 recovered sender must equal `from` and its payload hash the decision's.
 Needs: pyyaml.
@@ -68,17 +70,19 @@ for path in sorted(glob.glob("corpus/attacks/*.yaml")):
     setup = dict(entry.get("setup", {}))
     tpl = Templater(setup.pop("issued_at_offset", "0s"))
     with tempfile.TemporaryDirectory() as tmp:
-        world, audit, wallet = (os.path.join(tmp, f) for f in ("world.json", "audit.jsonl", "wallet"))
+        world, wallet, keys, state = (os.path.join(tmp, f) for f in ("world.json", "wallet", "keys.json", "state"))
         json.dump(setup, open(world, "w"))
         with open(os.open(wallet, os.O_CREAT | os.O_WRONLY, 0o600), "w") as f:
             f.write("stopbar-dev-wallet-secp256k1-v1\n" + ANVIL_KEY + "\n")
-        proc = subprocess.Popen([stopbard, "-listen", "127.0.0.1:0", "-dev-world", world, "-dev-audit", audit, "-dev-wallet", wallet],
+        proc = subprocess.Popen([stopbard, "-listen", "127.0.0.1:0", "-dev-world", world, "-dev-wallet", wallet,
+                                 "-state-dir", state, "-audit-checkpoint-every", "2"],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             line = proc.stdout.readline()
             if "listening on" not in line:
                 raise RuntimeError(f"stopbard did not start: {line!r} {proc.stderr.read()}")
             addr = line.rsplit(" ", 1)[1].strip()
+            signed = 0
             for i, body in enumerate(steps[:stop_at]):
                 sent = tpl.render(body)
                 status, d = post(addr, sent)
@@ -86,8 +90,7 @@ for path in sorted(glob.glob("corpus/attacks/*.yaml")):
                     problems.append(f"step {i} should be allowed, got {status} {d.get('reasons')}")
                     continue
                 problems += check_signed(i, sent, d)
-            audit_lines = lambda: [json.loads(l) for l in open(audit)] if os.path.exists(audit) else []
-            before = len(audit_lines())
+                signed += 1
             status, d = post(addr, tpl.render(steps[stop_at]))
             if status == 400:  # gateway error body: normalise to a rejection
                 d = {"outcome": "reject", "reasons": [{"code": d.get("code")}], "request_id": d.get("request_id")}
@@ -99,15 +102,34 @@ for path in sorted(glob.glob("corpus/attacks/*.yaml")):
                 problems.append(f"policy_ids {got_ids}, want {want.get('policy_ids', [])}")
             if want.get("code") and want["code"] not in codes:
                 problems.append(f"reason codes {codes}, want {want['code']}")
-            new = audit_lines()[before:]  # records written by the stopping step only
-            audited = any(r["type"] == "decision" and r["body"]["decision"]["request_id"] == steps[stop_at]["id"] for r in new)
-            if want["outcome"] != "reject" and not audited:
-                problems.append("stopping decision not audited")
-            if want["outcome"] == "reject" and audited:
-                problems.append("a rejected request reached the engine")
+            with urllib.request.urlopen(f"http://{addr}/v1/keys", timeout=5) as r:
+                open(keys, "wb").write(r.read())  # published keys: all verify needs, besides the file
         finally:
             proc.terminate()
             proc.wait(timeout=10)
+        # Offline, after shutdown: the run's own audit log must verify, with
+        # every record covered by a signed checkpoint (one is signed at exit).
+        # A reject at the very first step records nothing: the log is
+        # legitimately empty only then.
+        empty_ok = ["--allow-empty"] if want["outcome"] == "reject" and stop_at == 0 else []
+        v = subprocess.run([stopbar_cli, "audit", "verify", "--state-dir", state, "--keys", keys, "--require-covered", *empty_ok],
+                           capture_output=True, text=True)
+        print("    ", (v.stdout or v.stderr).strip())
+        if v.returncode != 0:
+            problems.append("audit verify failed")
+        else:
+            ex = subprocess.run([stopbar_cli, "audit", "export", "--state-dir", state], capture_output=True, text=True, check=True)
+            recs = [json.loads(l) for l in ex.stdout.splitlines()]
+            stop_id = steps[stop_at]["id"]
+            decisions = sum(1 for r in recs if r["type"] == "decision" and r["body"]["decision"]["request_id"] == stop_id)
+            earlier = sum(1 for st in steps[:stop_at] if st["id"] == stop_id)
+            want_decisions = earlier if want["outcome"] == "reject" else earlier + 1
+            if decisions != want_decisions:
+                problems.append(f"{decisions} audited decisions for {stop_id}, want {want_decisions}"
+                                + (" (a rejected request reached the engine)" if want["outcome"] == "reject" else ""))
+            commits = sum(1 for r in recs if r["type"] == "commit")
+            if commits != signed:
+                problems.append(f"{commits} commit records for {signed} signed transactions")
     failures += bool(problems)
     seq = f" at step {stop_at + 1}/{len(steps)}" if len(steps) > 1 else ""
     print("ok  " if not problems else "FAIL",

@@ -12,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/audit"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/model"
+	"github.com/NikhilSetiya/stopbar/internal/store"
 )
 
 var (
@@ -72,11 +74,11 @@ func TestMaxFeeCountsTowardUSDCaps(t *testing.T) {
 	drain := req(walletA, dest, "0", "0", true) // zero value...
 	big := "0.000001"
 	drain.MaxFeeUSD = &big // ...but any fee at all is over the cap
-	wantErr(t, l.Reserve(bg, "r2", drain, time.Minute), engine.ErrCapExceeded)
+	wantErr(t, l.Reserve(bg, "r2", drain, time.Minute, nil), engine.ErrCapExceeded)
 
 	unpricedFee := req(walletA, dest, "1", "1", true)
 	unpricedFee.MaxFeeUSD = nil // value known, fee price unknown
-	wantErr(t, l.Reserve(bg, "r3", unpricedFee, time.Minute), ErrUnpriced)
+	wantErr(t, l.Reserve(bg, "r3", unpricedFee, time.Minute, nil), ErrUnpriced)
 }
 
 func usd(t testing.TB, l *Limiter, er model.EnrichedRequest, s Scope) string {
@@ -87,7 +89,7 @@ func usd(t testing.TB, l *Limiter, er model.EnrichedRequest, s Scope) string {
 
 func mustReserve(t testing.TB, l *Limiter, id string, er model.EnrichedRequest) {
 	t.Helper()
-	if err := l.Reserve(bg, id, er, time.Minute); err != nil {
+	if err := l.Reserve(bg, id, er, time.Minute, nil); err != nil {
 		t.Fatalf("reserve %s: %v", id, err)
 	}
 }
@@ -110,11 +112,11 @@ func TestCapBoundaryExact(t *testing.T) {
 	if got := usd(t, l, req(walletA, dest, "", "", true), ScopeWallet); got != "100" {
 		t.Fatalf("usage %s", got)
 	}
-	wantErr(t, l.Reserve(bg, "r3", req(walletA, dest, "0.000001", "1", true), time.Minute), engine.ErrCapExceeded)
-	if err := l.Release(bg, "r2"); err != nil {
+	wantErr(t, l.Reserve(bg, "r3", req(walletA, dest, "0.000001", "1", true), time.Minute, nil), engine.ErrCapExceeded)
+	if err := l.Release(bg, "r2", nil); err != nil {
 		t.Fatal(err)
 	}
-	wantErr(t, l.Reserve(bg, "r4", req(walletA, dest, "40.000001", "1", true), time.Minute), engine.ErrCapExceeded)
+	wantErr(t, l.Reserve(bg, "r4", req(walletA, dest, "40.000001", "1", true), time.Minute, nil), engine.ErrCapExceeded)
 	mustReserve(t, l, "r5", req(walletA, dest, "40", "1", true))
 }
 
@@ -127,9 +129,9 @@ func TestAllOrNothingAcrossKeys(t *testing.T) {
 	mustReserve(t, l, "b1", req(walletB, dest, "50", "1", true))
 
 	// Wallet A would exceed its own cap; tenant has room. Nothing may move.
-	wantErr(t, l.Reserve(bg, "a2", req(walletA, dest, "20", "1", true), time.Minute), engine.ErrCapExceeded)
+	wantErr(t, l.Reserve(bg, "a2", req(walletA, dest, "20", "1", true), time.Minute, nil), engine.ErrCapExceeded)
 	// Wallet B has room; tenant would exceed. Wallet B must not move.
-	wantErr(t, l.Reserve(bg, "b2", req(walletB, dest, "20", "1", true), time.Minute), engine.ErrCapExceeded)
+	wantErr(t, l.Reserve(bg, "b2", req(walletB, dest, "20", "1", true), time.Minute, nil), engine.ErrCapExceeded)
 
 	a, b := req(walletA, dest, "", "", true), req(walletB, dest, "", "", true)
 	for _, c := range []struct {
@@ -151,33 +153,33 @@ func TestReserveIsIdempotentByRequestID(t *testing.T) {
 	if got := usd(t, l, er, ScopeWallet); got != "70" {
 		t.Fatalf("double counted: %s", got)
 	}
-	if err := l.Release(bg, "r1"); err != nil {
+	if err := l.Release(bg, "r1", nil); err != nil {
 		t.Fatal(err)
 	}
-	wantErr(t, l.Reserve(bg, "r1", er, time.Minute), ErrDuplicateReservation)
+	wantErr(t, l.Reserve(bg, "r1", er, time.Minute, nil), ErrDuplicateReservation)
 }
 
 func TestTypedErrorsOnCommitAndRelease(t *testing.T) {
 	l := newLimiter(t, newClock(), Rule{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"})
-	wantErr(t, l.Commit(bg, "nope", "0x1"), ErrUnknownReservation)
-	wantErr(t, l.Release(bg, "nope"), ErrUnknownReservation)
+	wantErr(t, l.Commit(bg, "nope", "0x1", nil), ErrUnknownReservation)
+	wantErr(t, l.Release(bg, "nope", nil), ErrUnknownReservation)
 
 	mustReserve(t, l, "r1", req(walletA, dest, "10", "1", true))
-	if err := l.Release(bg, "r1"); err != nil {
+	if err := l.Release(bg, "r1", nil); err != nil {
 		t.Fatal(err)
 	}
-	wantErr(t, l.Release(bg, "r1"), ErrUnknownReservation)
-	wantErr(t, l.Commit(bg, "r1", "0x1"), ErrUnknownReservation)
+	wantErr(t, l.Release(bg, "r1", nil), ErrUnknownReservation)
+	wantErr(t, l.Commit(bg, "r1", "0x1", nil), ErrUnknownReservation)
 
 	mustReserve(t, l, "r2", req(walletA, dest, "10", "1", true))
-	if err := l.Commit(bg, "r2", "0xabc"); err != nil {
+	if err := l.Commit(bg, "r2", "0xabc", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.Commit(bg, "r2", "0xabc"); err != nil {
+	if err := l.Commit(bg, "r2", "0xabc", nil); err != nil {
 		t.Fatalf("repeat commit with the same tx: %v", err)
 	}
-	wantErr(t, l.Commit(bg, "r2", "0xother"), ErrAlreadyCommitted)
-	wantErr(t, l.Release(bg, "r2"), ErrAlreadyCommitted)
+	wantErr(t, l.Commit(bg, "r2", "0xother", nil), ErrAlreadyCommitted)
+	wantErr(t, l.Release(bg, "r2", nil), ErrAlreadyCommitted)
 }
 
 // A reservation counts until exactly its expiry, then frees its capacity.
@@ -186,10 +188,10 @@ func TestExpiryReleasesAtTheEdge(t *testing.T) {
 	l := newLimiter(t, c, Rule{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"})
 	mustReserve(t, l, "r1", req(walletA, dest, "100", "1", true)) // ttl 1m
 	c.Advance(time.Minute - time.Nanosecond)
-	wantErr(t, l.Reserve(bg, "r2", req(walletA, dest, "0.000001", "1", true), time.Minute), engine.ErrCapExceeded)
+	wantErr(t, l.Reserve(bg, "r2", req(walletA, dest, "0.000001", "1", true), time.Minute, nil), engine.ErrCapExceeded)
 	c.Advance(time.Nanosecond)
 	mustReserve(t, l, "r3", req(walletA, dest, "100", "1", true))
-	wantErr(t, l.Release(bg, "r1"), ErrReservationExpired)
+	wantErr(t, l.Release(bg, "r1", nil), ErrReservationExpired)
 }
 
 // A late commit still records the spend: loss bounding counts what happened.
@@ -201,7 +203,7 @@ func TestLateCommitRecordsSpend(t *testing.T) {
 	if got := usd(t, l, req(walletA, dest, "", "", true), ScopeWallet); got != "0" {
 		t.Fatalf("lapsed reservation still counted: %s", got)
 	}
-	wantErr(t, l.Commit(bg, "r1", "0xlate"), ErrReservationExpired)
+	wantErr(t, l.Commit(bg, "r1", "0xlate", nil), ErrReservationExpired)
 	if got := usd(t, l, req(walletA, dest, "", "", true), ScopeWallet); got != "80" {
 		t.Fatalf("late commit not counted: %s", got)
 	}
@@ -212,14 +214,14 @@ func TestWindowRollover(t *testing.T) {
 	c := newClock()
 	l := newLimiter(t, c, Rule{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"}, Rule{Scope: ScopeWallet, Window: "24h", MaxUSD: "250"})
 	mustReserve(t, l, "r1", req(walletA, dest, "100", "1", true))
-	if err := l.Commit(bg, "r1", "0x1"); err != nil {
+	if err := l.Commit(bg, "r1", "0x1", nil); err != nil {
 		t.Fatal(err)
 	}
 	c.Advance(time.Hour + time.Minute - time.Nanosecond)
-	wantErr(t, l.Reserve(bg, "r2", req(walletA, dest, "0.000001", "1", true), time.Minute), engine.ErrCapExceeded)
+	wantErr(t, l.Reserve(bg, "r2", req(walletA, dest, "0.000001", "1", true), time.Minute, nil), engine.ErrCapExceeded)
 	c.Advance(time.Nanosecond)
 	mustReserve(t, l, "r3", req(walletA, dest, "100", "1", true))
-	if err := l.Commit(bg, "r3", "0x3"); err != nil {
+	if err := l.Commit(bg, "r3", "0x3", nil); err != nil {
 		t.Fatal(err)
 	}
 	// Both spends are still inside 24h: counted once each, no double count.
@@ -227,7 +229,7 @@ func TestWindowRollover(t *testing.T) {
 	if microToDecimal(v) != "200" || n != 2 {
 		t.Fatalf("24h usage %s / %d", microToDecimal(v), n)
 	}
-	wantErr(t, l.Reserve(bg, "r4", req(walletA, dest, "50.000001", "1", true), time.Minute), engine.ErrCapExceeded)
+	wantErr(t, l.Reserve(bg, "r4", req(walletA, dest, "50.000001", "1", true), time.Minute, nil), engine.ErrCapExceeded)
 	c.Advance(24*time.Hour + 24*time.Minute)
 	if v, n, _ := l.Usage(req(walletA, dest, "", "", true), ScopeWallet, 24*time.Hour); v.Sign() != 0 || n != 0 {
 		t.Fatalf("spend not dropped after 24h: %s / %d", v, n)
@@ -237,23 +239,23 @@ func TestWindowRollover(t *testing.T) {
 // With no price, USD caps fail closed and unit/count caps still bound loss.
 func TestUnpricedRequests(t *testing.T) {
 	l := newLimiter(t, newClock(), Rule{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"})
-	wantErr(t, l.Reserve(bg, "r1", req(walletA, dest, "", "5", true), time.Minute), ErrUnpriced)
+	wantErr(t, l.Reserve(bg, "r1", req(walletA, dest, "", "5", true), time.Minute, nil), ErrUnpriced)
 
 	l = newLimiter(t, newClock(),
 		Rule{Scope: ScopeWalletAsset, Window: "1h", MaxUnits: "1000"},
 		Rule{Scope: ScopeWallet, Window: "1h", MaxCount: 3})
 	mustReserve(t, l, "r1", req(walletA, dest, "", "600", true))
-	wantErr(t, l.Reserve(bg, "r2", req(walletA, dest, "", "401", true), time.Minute), engine.ErrCapExceeded)
+	wantErr(t, l.Reserve(bg, "r2", req(walletA, dest, "", "401", true), time.Minute, nil), engine.ErrCapExceeded)
 	mustReserve(t, l, "r3", req(walletA, dest, "", "400", true))
 	mustReserve(t, l, "r4", req(walletA, dest, "", "0", true))
-	wantErr(t, l.Reserve(bg, "r5", req(walletA, dest, "", "0", true), time.Minute), engine.ErrCapExceeded) // 4th tx
+	wantErr(t, l.Reserve(bg, "r5", req(walletA, dest, "", "0", true), time.Minute, nil), engine.ErrCapExceeded) // 4th tx
 }
 
 func TestUnknownDestinationCountCap(t *testing.T) {
 	l := newLimiter(t, newClock(), Rule{Scope: ScopeDestination, Window: "24h", MaxCount: 2, UnknownDestinationsOnly: true})
 	mustReserve(t, l, "u1", req(walletA, dest, "1", "1", false))
 	mustReserve(t, l, "u2", req(walletA, dest, "1", "1", false))
-	wantErr(t, l.Reserve(bg, "u3", req(walletA, dest, "1", "1", false), time.Minute), engine.ErrCapExceeded)
+	wantErr(t, l.Reserve(bg, "u3", req(walletA, dest, "1", "1", false), time.Minute, nil), engine.ErrCapExceeded)
 	for i := range 5 {
 		mustReserve(t, l, fmt.Sprintf("k%d", i), req(walletA, "0xknown", "1", "1", true))
 	}
@@ -313,14 +315,14 @@ func TestParseUSDRoundsAmountsUp(t *testing.T) {
 
 type failingStore struct{ MemStore }
 
-func (failingStore) Put(Record) error { return errors.New("disk full") }
+func (failingStore) Put(Record, *model.AuditEntry) error { return errors.New("disk full") }
 
 func TestStoreFailureChangesNothing(t *testing.T) {
 	l, err := New(Config{Rules: []Rule{{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"}}, Store: failingStore{}, Clock: newClock().Now})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := l.Reserve(bg, "r1", req(walletA, dest, "10", "1", true), time.Minute); err == nil || errors.Is(err, engine.ErrCapExceeded) {
+	if err := l.Reserve(bg, "r1", req(walletA, dest, "10", "1", true), time.Minute, nil); err == nil || errors.Is(err, engine.ErrCapExceeded) {
 		t.Fatalf("err = %v, want a persistence error", err)
 	}
 	if got := usd(t, l, req(walletA, dest, "", "", true), ScopeWallet); got != "0" {
@@ -329,11 +331,19 @@ func TestStoreFailureChangesNothing(t *testing.T) {
 }
 
 func TestBoltRestartKeepsCaps(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "limiter.db")
+	path := filepath.Join(t.TempDir(), "state.db")
 	c := newClock()
 	rules := []Rule{{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"}}
-	open := func() (*Limiter, *BoltStore) {
-		s, err := OpenBolt(path)
+	open := func() (*Limiter, *store.DB, *audit.Log) {
+		db, err := store.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lg, err := audit.New(audit.Config{DB: db})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := NewBoltStore(db, lg)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -341,26 +351,59 @@ func TestBoltRestartKeepsCaps(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return l, s
+		return l, db, lg
 	}
-	l, s := open()
-	mustReserve(t, l, "r1", req(walletA, dest, "60", "1", true))
-	if err := l.Commit(bg, "r1", "0x1"); err != nil {
+	l, db, _ := open()
+	entry := &model.AuditEntry{Type: model.AuditDecision, Body: map[string]any{"request_id": "r1"}}
+	if err := l.Reserve(bg, "r1", req(walletA, dest, "60", "1", true), time.Minute, entry); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Commit(bg, "r1", "0x1", &model.AuditEntry{Type: model.AuditCommit, Body: map[string]any{"request_id": "r1"}}); err != nil {
 		t.Fatal(err)
 	}
 	mustReserve(t, l, "r2", req(walletA, dest, "30", "1", true)) // live
-	_ = s.Close()
+	_ = db.Close()
 
-	l, s = open() // "crash" and restart
-	defer func() { _ = s.Close() }()
+	l, db, _ = open() // "crash" and restart
+	defer func() { _ = db.Close() }()
 	if got := usd(t, l, req(walletA, dest, "", "", true), ScopeWallet); got != "90" {
 		t.Fatalf("restart reset usage: %s", got)
 	}
-	wantErr(t, l.Reserve(bg, "r3", req(walletA, dest, "10.000001", "1", true), time.Minute), engine.ErrCapExceeded)
-	wantErr(t, l.Reserve(bg, "r1", req(walletA, dest, "1", "1", true), time.Minute), ErrDuplicateReservation)
+	wantErr(t, l.Reserve(bg, "r3", req(walletA, dest, "10.000001", "1", true), time.Minute, nil), engine.ErrCapExceeded)
+	wantErr(t, l.Reserve(bg, "r1", req(walletA, dest, "1", "1", true), time.Minute, nil), ErrDuplicateReservation)
 	c.Advance(time.Minute) // r2 lapses
 	if got := usd(t, l, req(walletA, dest, "", "", true), ScopeWallet); got != "60" {
 		t.Fatalf("after r2 lapsed: %s", got)
+	}
+	recs, err := audit.Records(db, 1, 0)
+	if err != nil || len(recs) != 2 || recs[0].Type != model.AuditDecision || recs[1].Type != model.AuditCommit {
+		t.Fatalf("audit records %+v %v", recs, err)
+	}
+}
+
+// The reservation and its audit record are one transaction: if the record
+// cannot be written, the reservation does not exist either.
+func TestReserveAndAuditAreAtomic(t *testing.T) {
+	db, err := store.OpenTemp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	s, err := NewBoltStore(db, nil) // no audit log: every audited write must fail
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := New(Config{Rules: []Rule{{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"}}, Store: s, Clock: newClock().Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = l.Reserve(bg, "r1", req(walletA, dest, "10", "1", true), time.Minute, &model.AuditEntry{Type: model.AuditDecision, Body: 1})
+	wantErr(t, err, engine.ErrAuditUnavailable)
+	if got := usd(t, l, req(walletA, dest, "", "", true), ScopeWallet); got != "0" {
+		t.Fatalf("unaudited reservation exists: %s", got)
+	}
+	if MemStore.Put(MemStore{}, Record{}, &model.AuditEntry{}) == nil {
+		t.Fatal("MemStore silently dropped an audit entry")
 	}
 }
 
@@ -448,7 +491,7 @@ func TestConcurrentReservationsNeverExceedCaps(t *testing.T) {
 				amt := fmt.Sprintf("%d.%02d", cents/100, cents%100)
 				id := fmt.Sprintf("req-%d-%d", i, op)
 				ttl := time.Duration(30+rng.IntN(90)) * time.Second
-				if err := l.Reserve(bg, id, req(wallet, dest, amt, fmt.Sprint(rng.IntN(400)), true), ttl); err != nil {
+				if err := l.Reserve(bg, id, req(wallet, dest, amt, fmt.Sprint(rng.IntN(400)), true), ttl, nil); err != nil {
 					if !errors.Is(err, engine.ErrCapExceeded) {
 						t.Errorf("reserve: %v", err)
 					}
@@ -457,7 +500,7 @@ func TestConcurrentReservationsNeverExceedCaps(t *testing.T) {
 				o := &outcome{wallet: wallet, usd: mustUSD(amt), state: StateReserved}
 				switch p := rng.IntN(20); {
 				case p < 2: // 10% commit; the rest release or lapse, so capacity recycles
-					err := l.Commit(bg, id, "0x"+id)
+					err := l.Commit(bg, id, "0x"+id, nil)
 					switch {
 					case err == nil, errors.Is(err, ErrReservationExpired): // late commit still records spend
 						o.state = StateCommitted
@@ -465,7 +508,7 @@ func TestConcurrentReservationsNeverExceedCaps(t *testing.T) {
 						t.Errorf("commit: %v", err)
 					}
 				case p < 11:
-					err := l.Release(bg, id)
+					err := l.Release(bg, id, nil)
 					switch {
 					case err == nil:
 						o.state = StateReleased

@@ -301,7 +301,7 @@ func amountOf(er model.EnrichedRequest) (amount, error) {
 
 // Reserve implements engine.Limiter: all caps checked on all keys, then all
 // keys updated, or nothing.
-func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest, ttl time.Duration) error {
+func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest, ttl time.Duration, ae *model.AuditEntry) error {
 	if ttl <= 0 {
 		return errors.New("limiter: ttl must be positive")
 	}
@@ -352,8 +352,8 @@ func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest
 	if amt.usd != nil {
 		rec.USDMicro = amt.usd.String()
 	}
-	if err := l.store.Put(rec); err != nil {
-		return fmt.Errorf("limiter: persist reserve: %w", err)
+	if err := l.persist(rec, ae); err != nil {
+		return err
 	}
 	e := &entry{Record: rec, amt: amt}
 	l.track(e)
@@ -364,7 +364,7 @@ func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest
 // Commit records that the action was broadcast. Committing after expiry
 // still records the spend (loss bounding must count what happened) and
 // returns ErrReservationExpired.
-func (l *Limiter) Commit(_ context.Context, id, txRef string) error {
+func (l *Limiter) Commit(_ context.Context, id, txRef string, ae *model.AuditEntry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.clock()
@@ -384,8 +384,8 @@ func (l *Limiter) Commit(_ context.Context, id, txRef string) error {
 	rec.State, rec.TxRef = StateCommitted, txRef
 	t := now
 	rec.CommittedAt = &t
-	if err := l.store.Put(rec); err != nil {
-		return fmt.Errorf("limiter: persist commit: %w", err)
+	if err := l.persist(rec, ae); err != nil {
+		return err
 	}
 	e.Record = rec
 	if late {
@@ -396,7 +396,7 @@ func (l *Limiter) Commit(_ context.Context, id, txRef string) error {
 }
 
 // Release frees a live reservation.
-func (l *Limiter) Release(_ context.Context, id string) error {
+func (l *Limiter) Release(_ context.Context, id string, ae *model.AuditEntry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.clock()
@@ -412,11 +412,25 @@ func (l *Limiter) Release(_ context.Context, id string) error {
 	}
 	rec := e.Record
 	rec.State = StateReleased
-	if err := l.store.Put(rec); err != nil {
-		return fmt.Errorf("limiter: persist release: %w", err)
+	if err := l.persist(rec, ae); err != nil {
+		return err
 	}
 	e.Record = rec
 	l.subtract(e)
+	return nil
+}
+
+// persist writes rec (and its audit entry, in the same transaction). With an
+// entry, a failure means the state change AND its record are both absent:
+// reported as engine.ErrAuditUnavailable, because the decision cannot be
+// recorded.
+func (l *Limiter) persist(rec Record, ae *model.AuditEntry) error {
+	if err := l.store.Put(rec, ae); err != nil {
+		if ae != nil {
+			return fmt.Errorf("%w: limiter %s not recorded: %v", engine.ErrAuditUnavailable, rec.State, err)
+		}
+		return fmt.Errorf("limiter: persist %s: %w", rec.State, err)
+	}
 	return nil
 }
 

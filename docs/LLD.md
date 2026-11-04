@@ -63,9 +63,11 @@ type Policy interface {
     Evaluate(ctx, req model.EnrichedRequest) (PolicyResult, error) // {Outcome, Reasons, BundleHash}
 }
 type Limiter interface { // derives its own keys/amounts from the enriched request
-    Reserve(ctx, id string, req model.EnrichedRequest, ttl time.Duration) error // ErrCapExceeded, ErrCircuitOpen
-    Commit(ctx, id, txRef string) error
-    Release(ctx, id string) error // idempotent; no-op for unknown id
+    // Each call carries the audit record describing it, written in the SAME
+    // transaction as the state change (failure wraps ErrAuditUnavailable).
+    Reserve(ctx, id string, req model.EnrichedRequest, ttl time.Duration, rec *model.AuditEntry) error // ErrCapExceeded, ErrCircuitOpen
+    Commit(ctx, id, txRef string, rec *model.AuditEntry) error
+    Release(ctx, id string, rec *model.AuditEntry) error // ErrUnknownReservation / ErrReservationExpired: nothing held
 }
 type Signer interface { // decision.Signer: Ed25519, stdlib, compact JWS hand-rolled (no JOSE library)
     Sign(ctx, req model.ActionRequest, d model.Decision) (token string, err error) // spec/decision-token-v1.md
@@ -77,7 +79,7 @@ type AuditLog interface {
 }
 ```
 
-Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decode** (first decoder that `Supports`) → **enrich** → **policy** → **limiter** (allow only) → **sign** (allow only) → **audit** (every decision).
+Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decode** (first decoder that `Supports`) → **enrich** → **policy** → **sign** (allow only; changes no state) → **reserve + audit** (allow: one transaction) or **audit** (deny/escalate).
 
 - Every component call runs with a stage timeout (default 1 s) and panic recovery. A component that ignores `ctx` is abandoned, and its partial output is never read.
 - The engine enforces invariants between stages:
@@ -85,7 +87,7 @@ Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decod
   - Enrichers may not change the action or intent, and may not remove a provenance label from `taint`.
   - The policy result must have a known outcome, reasons for deny or escalate, and a valid bundle hash.
 - Only allow reserves limiter capacity and gets a token. Escalations do not reserve: approval (CS-151) re-runs the limiter, so pending escalations cannot tie up caps.
-- If anything fails after the reservation, the reservation is released. If the audit append fails, an allow becomes a deny and the token is discarded.
+- An allow's reservation and its audit record are **one transaction**, so an allow exists only if it is recorded. If that write fails, nothing is reserved, the token never leaves, and the caller gets a deny with `FAIL_CLOSED_AUDIT`. Denials that can't be audited increment `stopbar_audit_unavailable_denials_total` and log at high severity.
 - Deny reasons carry a code and a fixed public message. Component errors are logged, never returned.
 
 ## 3. Data model
@@ -507,10 +509,22 @@ domain: {name: "Stopbar", version: "1", chainId, verifyingContract: guard}
 
 ## 11. Audit log
 
-- Store: append-only table/bucket keyed by `seq`. No update/delete paths in code; DB role has INSERT/SELECT only.
-- Every request, decision, approval, policy change, commit, release, override appended in the same transaction as the state change it records (outbox pattern for Redis-backed limiter).
-- Checkpoint every N=1,000 records or 5 minutes: Merkle root over the range signed by the decision key; optional upload to Rekor.
-- `stopbar audit verify --from X --to Y` recomputes hashes and validates checkpoint signatures.
+Implemented in `internal/audit` (CS-171/172), per `spec/audit-hash-v1.md`.
+
+- **One state file** (`internal/store`, bbolt, `-state-dir/state.db`) holds the limiter, nonce, spent-token and audit buckets. Each audit record is written **in the same transaction as the state change it describes**, so both are durable or neither is:
+
+  | Record | Written with |
+  |---|---|
+  | `request` | the consumed nonce (gateway) |
+  | `decision` (allow) | its reservation |
+  | `commit` / `release` | the limiter commit or release |
+  | `decision` (deny/escalate) | nothing, so its own transaction |
+
+- **Append-only.** Records are keyed by big-endian `seq`, and `hash = sha256(JCS({v, seq, ts, type, body, prev_hash}))` via `canon.RecordHash`. No code path updates or deletes a record.
+- **Checkpoints.** Every N records (`-audit-checkpoint-every`, default 1000) and at shutdown, the head `{v, seq, hash, ts}` is signed with the decision key. The signature is over `"stopbar-audit-checkpoint-v1\n" + JCS`, which can never be a token's signing input. (The original sketch used a Merkle root over the range. The chain already commits to every earlier record, so signing the head is enough; Merkle inclusion proofs can be added later without changing records.)
+- **`stopbar audit verify --state-dir DIR --keys keys.json [--from --to] [--require-covered]`** works offline, from the file plus saved `/v1/keys` output (each `kid` is recomputed from its key). It recomputes every hash and link and checks every checkpoint against the chain. It detects an edited byte, a deleted record (a gap in `seq`), reordered records (the key and the record's `seq` disagree, and the chain breaks), a re-hashed forgery (the next link breaks) and tail truncation (a checkpoint covers a missing record, or uncovered records with `--require-covered`). `stopbar audit export` prints records as JSON lines.
+- **Unaudited denials are never silent:** `stopbar_audit_unavailable_denials_total` on `/metrics`, plus a high-severity log entry.
+- Still to come: optional Rekor upload and Merkle inclusion proofs.
 
 ## 12. Error handling (fail closed)
 

@@ -30,11 +30,11 @@ func TestLocalKeyProvidersAreDevOnly(t *testing.T) {
 		"decision key without -dev-world": {decisionKey: "k"},
 		"wallet without -dev-world":       {wallet: "w"},
 	} {
-		if _, _, err := devEngine(o, slog.New(slog.DiscardHandler)); err == nil {
+		if _, err := devEngine(o, slog.New(slog.DiscardHandler)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if _, _, err := devEngine(devOpts{world: "x.json", decisionKey: "same", wallet: "same"}, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "different files") {
+	if _, err := devEngine(devOpts{world: "x.json", decisionKey: "same", wallet: "same"}, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "different files") {
 		t.Errorf("same file for decision and wallet key: %v", err)
 	}
 }
