@@ -2,45 +2,163 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Stopbar attack corpus entry (v1)",
   "type": "object",
-  "required": ["id", "title", "category", "target", "expected"],
-  "oneOf": [{"required": ["request"]}, {"required": ["requests"]}],
+  "required": [
+    "id",
+    "title",
+    "category",
+    "target",
+    "expected"
+  ],
+  "oneOf": [
+    {
+      "required": [
+        "request"
+      ]
+    },
+    {
+      "required": [
+        "requests"
+      ]
+    }
+  ],
   "additionalProperties": false,
   "properties": {
-    "id": {"type": "string", "pattern": "^CS-[0-9]{4}-[0-9]{4}$"},
-    "title": {"type": "string", "maxLength": 140},
+    "id": {
+      "type": "string",
+      "pattern": "^CS-[0-9]{4}-[0-9]{4}$"
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 140
+    },
     "category": {
       "type": "string",
       "enum": [
-        "prompt_injection.direct", "prompt_injection.indirect", "prompt_injection.encoded",
-        "agent_error", "approval_abuse", "blind_signing", "proxy_upgrade",
-        "address_poisoning", "velocity_drain", "oracle_manipulation",
-        "hidden_call", "compromised_service", "code_mode.exfiltration", "code_mode.loop_abuse"
+        "prompt_injection.direct",
+        "prompt_injection.indirect",
+        "prompt_injection.encoded",
+        "agent_error",
+        "approval_abuse",
+        "blind_signing",
+        "proxy_upgrade",
+        "address_poisoning",
+        "velocity_drain",
+        "oracle_manipulation",
+        "hidden_call",
+        "compromised_service",
+        "code_mode.exfiltration",
+        "code_mode.loop_abuse"
       ]
     },
-    "target": {"type": "string", "enum": ["agent_wallet.evm", "agent_wallet.solana", "code_mode", "custody.hot_wallet"]},
-    "description": {"type": "string"},
-    "references": {"type": "array", "items": {"type": "string", "format": "uri"}},
+    "target": {
+      "type": "string",
+      "enum": [
+        "agent_wallet.evm",
+        "agent_wallet.solana",
+        "code_mode",
+        "custody.hot_wallet"
+      ]
+    },
+    "description": {
+      "type": "string"
+    },
+    "references": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "format": "uri"
+      }
+    },
     "setup": {
       "type": "object",
       "properties": {
-        "known_destinations": {"type": "array", "items": {"type": "string"}},
-        "balances": {"type": "object", "additionalProperties": {"type": "string"}},
-        "prices_usd": {"type": "object", "additionalProperties": {"type": "string"}},
-        "prior_outflow_usd_1h": {"type": "string"},
-        "price_stale": {"type": "boolean"}
+        "known_destinations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "balances": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "prices_usd": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "prior_outflow_usd_1h": {
+          "type": "string"
+        },
+        "price_stale": {
+          "type": "boolean"
+        },
+        "tokens": {
+          "description": "ERC-20 contracts referenced by the request: lower-case contract address -> symbol and decimals. Balances and prices are keyed by symbol; the native asset is ETH with 18 decimals.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "symbol",
+              "decimals"
+            ],
+            "properties": {
+              "symbol": {
+                "type": "string"
+              },
+              "decimals": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 36
+              }
+            }
+          }
+        }
       }
     },
-    "request": {"type": "object", "description": "ActionRequest fixture (spec/action-request-v1.json)"},
-    "requests": {"type": "array", "description": "Sequence for multi-step attacks (e.g. velocity drain)", "items": {"type": "object"}},
+    "request": {
+      "type": "object",
+      "description": "ActionRequest fixture (spec/action-request-v1.json)"
+    },
+    "requests": {
+      "type": "array",
+      "description": "Sequence for multi-step attacks (e.g. velocity drain)",
+      "items": {
+        "type": "object"
+      }
+    },
     "expected": {
       "type": "object",
-      "required": ["outcome"],
+      "required": [
+        "outcome"
+      ],
       "properties": {
-        "outcome": {"type": "string", "enum": ["deny", "escalate"]},
-        "policy_ids": {"type": "array", "items": {"type": "string"}},
-        "at_step": {"type": "integer", "minimum": 0, "description": "For sequences: index of the request that must be stopped"}
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "escalate"
+          ]
+        },
+        "policy_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "at_step": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "For sequences: index of the request that must be stopped"
+        }
       }
     },
-    "contributor": {"type": "string"}
+    "contributor": {
+      "type": "string"
+    }
   }
 }

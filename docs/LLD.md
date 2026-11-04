@@ -142,7 +142,7 @@ Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decod
 
 | Field | Type | Source |
 |---|---|---|
-| `amount_usd` | decimal | price oracle; `null` + `price_stale=true` if stale |
+| `amount_usd` | decimal | price oracle; `null` + `price_stale=true` if stale. **Note:** the schema requires `amount_usd`, so today a stale price fails closed (deny via `FAIL_CLOSED_POLICY`) rather than reaching the `stale-price` escalate policy. CS-131 decides between making it optional (`context has amount_usd`) and keeping the stricter deny. |
 | `pct_of_balance` | decimal | balance provider |
 | `velocity.{1m,1h,24h}.usd` / `.count` | decimal/int | limiter snapshot |
 | `destination.known` | bool | destination registry |
@@ -282,6 +282,13 @@ Cedar natively yields permit/forbid. Stopbar layers **escalate** via annotations
 
 Combination: `deny > escalate > allow`. Evaluate escalate-annotated policies as a separate Cedar policy set so "forbid" in that set means escalate.
 
+Loader rules (`internal/policy`, CS-111). Every violation is reported with `file:line`, and the whole bundle is rejected.
+
+- Every policy needs a unique `@id`, which becomes its PolicyID. The only annotations allowed are `@id`, `@outcome` and `@message` (the human text used in the decision reason).
+- `@outcome` is allowed only on `forbid` and must be `deny` or `escalate`. An unannotated `forbid` denies.
+- Every policy is validated against the bundle's single `.cedarschema` (strict mode).
+- When no `permit` matches, the deny reason has code `DEFAULT_DENY` and no `policy_id`. Reasons list only the policies of the winning set, sorted by ID.
+
 Engine rules from the Cedar spike ([ADR 0001](adr/0001-cedar.md)):
 
 - **Any `Diagnostic.Errors` in either set → `deny` / `FAIL_CLOSED_POLICY`.** cedar-go skips policies whose condition errors, so an erroring `forbid` would otherwise not fire (fail open).
@@ -318,7 +325,7 @@ forbid (principal, action, resource) when { context.price_stale };
 
 ### 5.4 Bundles
 
-- A bundle = policies + schema + limiter config + allowlists. Identified by `sha256` over a sorted tar.
+- A bundle = policies + schema + limiter config + allowlists. Its hash is `sha256(JCS({"v":1,"files":[{"name","sha256"}…]}))`, with files sorted by name and hashed over their exact source bytes (ADR 0001 condition 3). Stdlib only, and independent of file order and of cedar-go's re-serialisation.
 - Activation requires: valid schema, replay suite passes, M-of-N signed approval (configurable; default 1-of-1 in dev).
 - **Cooling-off:** changes that *loosen* caps take effect after a configurable delay (default 24h) — defeats "raise the cap, then attack".
 

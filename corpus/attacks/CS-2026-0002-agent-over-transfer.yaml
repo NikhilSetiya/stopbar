@@ -7,6 +7,7 @@ setup:
   known_destinations: ["0x4444444444444444444444444444444444444444"]
   balances: {LOBSTAR: "52430000"}
   prices_usd: {LOBSTAR: "0.00477"}
+  tokens: {"0x6666666666666666666666666666666666666666": {symbol: LOBSTAR, decimals: 18}}
 request:
   id: req_fixture_0002
   tenant: test
