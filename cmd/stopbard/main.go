@@ -157,7 +157,10 @@ func devEngine(o devOpts, log *slog.Logger) (gateway.Evaluator, func() []decisio
 		if err != nil {
 			return nil, nil, err
 		}
-		ad, err := signer.New(&decision.Verifier{Keys: ring.PublicKeys, Iss: devIssuer, Aud: devAudience, Tenant: o.tenant, Spent: spent}, keys)
+		// Dev mode only (this whole function requires -dev-world): the corpus
+		// signs with Anvil's public account 0.
+		ad, err := signer.New(&decision.Verifier{Keys: ring.PublicKeys, Iss: devIssuer, Aud: devAudience, Tenant: o.tenant, Spent: spent}, keys,
+			signer.Options{AllowWellKnownTestKeys: true})
 		if err != nil {
 			return nil, nil, err
 		}
