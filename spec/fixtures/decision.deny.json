@@ -1,7 +1,7 @@
 {
   "request_id": "req_01JD0000000000000000000001",
   "outcome": "deny",
-  "reasons": [{"policy_id": "taint-unknown-destination", "message": "Untrusted on-chain content in context; destination not allowlisted"}],
+  "reasons": [{"code": "POLICY", "policy_id": "taint-unknown-destination", "message": "Untrusted on-chain content in context; destination not allowlisted"}],
   "policy_bundle_hash": "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
   "payload_hash": "sha256:b5bca7463fe403a7a02e44efb34dfc683f3c0701edd97cf8f6cb42f9487e17a7",
   "approvals": [],

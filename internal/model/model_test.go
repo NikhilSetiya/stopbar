@@ -146,6 +146,11 @@ func TestDecisionValidate(t *testing.T) {
 		t.Error("non-sha256 payload_hash accepted")
 	}
 	d = base
+	d.Outcome, d.Reasons, d.Token = Deny, []Reason{{PolicyID: "p", Message: "m"}}, "a.b.c"
+	if d.Validate() == nil {
+		t.Error("deny with a token accepted")
+	}
+	d = base
 	d.Outcome = "maybe"
 	if !errors.Is(d.Validate(), ErrInvalidOutcome) {
 		t.Error("unknown outcome accepted")

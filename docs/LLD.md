@@ -17,6 +17,7 @@ stopbar/
 │   └── stopbar/         # CLI
 ├── internal/
 │   ├── gateway/             # HTTP API, authN, nonce/TTL
+│   ├── engine/              # pipeline orchestration, fail-closed mapping (CS-104)
 │   ├── model/               # ActionRequest, Decision, IntentSummary, AuditRecord
 │   ├── normalize/           # raw → ActionRequest
 │   ├── decode/evm/          # ABI decode, risk flags
@@ -43,45 +44,47 @@ stopbar/
 
 ## 2. Core interfaces (Go)
 
+As implemented in `internal/engine` (CS-104). Components are consumed through these interfaces, and each component package (CS-111, CS-121, CS-141, CS-161, CS-171) implements one.
+
 ```go
-type Engine interface {
-    Evaluate(ctx context.Context, req model.ActionRequest) (model.Decision, error)
-    Commit(ctx context.Context, requestID string, txRef string) error
-    Release(ctx context.Context, requestID string) error
-}
+// engine.Engine implements gateway.Evaluator. Evaluate always returns a decision.
+Evaluate(ctx, model.ActionRequest) (model.Decision, error)
+Commit(ctx, requestID, txRef string) error
+Release(ctx, requestID string) error
 
 type Decoder interface {
     Supports(a model.Action) bool
-    Decode(ctx context.Context, a model.Action) (model.IntentSummary, error)
+    Decode(ctx, a model.Action) (model.IntentSummary, error)
 }
-
 type Enricher interface {
-    Enrich(ctx context.Context, req *model.EnrichedRequest) error // must set staleness markers
+    Enrich(ctx, req *model.EnrichedRequest) error // must set staleness markers; may only ADD taint
 }
-
-type Limiter interface {
-    Snapshot(ctx context.Context, keys []limiter.Key) (limiter.Counters, error)
-    Reserve(ctx context.Context, id string, keys []limiter.Key, amt limiter.Amount, ttl time.Duration) error // ErrCapExceeded
-    Commit(ctx context.Context, id string) error
-    Release(ctx context.Context, id string) error
+type Policy interface {
+    Evaluate(ctx, req model.EnrichedRequest) (PolicyResult, error) // {Outcome, Reasons, BundleHash}
 }
-
-type DecisionSigner interface {
-    Sign(ctx context.Context, d model.Decision) (model.SignedDecision, error)
-    PublicKeys() []jose.JSONWebKey
+type Limiter interface { // derives its own keys/amounts from the enriched request
+    Reserve(ctx, id string, req model.EnrichedRequest, ttl time.Duration) error // ErrCapExceeded, ErrCircuitOpen
+    Commit(ctx, id, txRef string) error
+    Release(ctx, id string) error // idempotent; no-op for unknown id
 }
-
-type SignerAdapter interface {        // gatekeeper mode
-    SignTx(ctx context.Context, sd model.SignedDecision, tx []byte) ([]byte, error) // must verify sd first
+type Signer interface {
+    Sign(ctx, d model.Decision) (token string, err error) // spec/decision-token-v1.md
 }
-
 type AuditLog interface {
-    Append(ctx context.Context, rec model.AuditRecord) (model.AuditReceipt, error)
-    Verify(ctx context.Context, from, to uint64) error
+    Append(ctx, typ model.AuditRecordType, body any) error
 }
 ```
 
-Every component returns typed errors; the engine maps any non-domain error to `deny` with `FAIL_CLOSED_<component>` (§12).
+Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decode** (first decoder that `Supports`) → **enrich** → **policy** → **limiter** (allow only) → **sign** (allow only) → **audit** (every decision).
+
+- Every component call runs with a stage timeout (default 1 s) and panic recovery. A component that ignores `ctx` is abandoned, and its partial output is never read.
+- The engine enforces invariants between stages:
+  - The decoder may not render a payload other than the bound one.
+  - Enrichers may not change the action or intent, and may not remove a provenance label from `taint`.
+  - The policy result must have a known outcome, reasons for deny or escalate, and a valid bundle hash.
+- Only allow reserves limiter capacity and gets a token. Escalations do not reserve: approval (CS-151) re-runs the limiter, so pending escalations cannot tie up caps.
+- If anything fails after the reservation, the reservation is released. If the audit append fails, an allow becomes a deny and the token is discarded.
+- Deny reasons carry a code and a fixed public message. Component errors are logged, never returned.
 
 ## 3. Data model
 
@@ -154,15 +157,18 @@ Every component returns typed errors; the engine maps any non-domain error to `d
 {
   "request_id": "req_…",
   "outcome": "deny",                       // allow | deny | escalate
-  "reasons": [{"policy_id": "taint-unknown-destination", "message": "Untrusted on-chain content in context; destination not allowlisted"}],
+  "reasons": [{"code": "POLICY", "policy_id": "taint-unknown-destination", "message": "Untrusted on-chain content in context; destination not allowlisted"}],
   "policy_bundle_hash": "sha256:…",
   "payload_hash": "sha256:…",
   "approvals": [],
   "reservation_id": null,
   "issued_at": "…",
-  "expires_at": "…"                         // = issued_at + 60s default
+  "expires_at": "…",                        // = issued_at + 60s default
+  "token": "…"                              // allow only: decision token (spec/decision-token-v1.md)
 }
 ```
+
+Each reason has a `code`: `POLICY` for a matched policy (with `policy_id`), otherwise an engine code from §12.
 
 ### 3.5 AuditRecord
 
@@ -457,11 +463,14 @@ domain: {name: "Stopbar", version: "1", chainId, verifyingContract: guard}
 
 | Code | When | Outcome |
 |---|---|---|
-| `FAIL_CLOSED_DECODER` | Decoder panic/error | deny |
-| `FAIL_CLOSED_ENRICH` | Enricher timeout | deny (or escalate if configured for price staleness) |
+| `FAIL_CLOSED_NORMALIZE` | Action has no payload binding (withdrawal, contract creation) or cannot be canonicalised | deny |
+| `FAIL_CLOSED_DECODER` | No decoder supports the action, decoder error/panic/timeout, or decoder rendered a different payload | deny |
+| `FAIL_CLOSED_ENRICH` | Enricher error/panic/timeout, or it removed taint or modified the action | deny (price staleness is not an error: the enricher sets `price_stale` and policy escalates) |
 | `FAIL_CLOSED_LIMITER` | Store unavailable | deny |
-| `FAIL_CLOSED_POLICY` | No active bundle / eval error | deny |
+| `FAIL_CLOSED_POLICY` | No active bundle, eval error, or malformed result | deny |
+| `FAIL_CLOSED_SIGNER` | Signer error, panic, timeout or empty token | deny |
 | `FAIL_CLOSED_AUDIT` | Audit append fails | deny (no unaudited decisions) |
+| `FAIL_CLOSED_ENGINE` | Panic outside any component | deny |
 | `CAP_EXCEEDED` | Reserve failed | deny |
 | `CIRCUIT_OPEN` | Breaker tripped | deny |
 | `NONCE_REPLAYED` / `EXPIRED` | Gateway | 400 |

@@ -38,6 +38,9 @@
           "message"
         ],
         "properties": {
+          "code": {
+            "type": "string"
+          },
           "policy_id": {
             "type": "string"
           },
@@ -79,6 +82,11 @@
     "expires_at": {
       "type": "string",
       "format": "date-time"
+    },
+    "token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
+      "description": "Decision token (spec/decision-token-v1.md); allow only."
     }
   },
   "if": {

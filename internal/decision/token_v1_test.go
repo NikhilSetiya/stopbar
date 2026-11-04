@@ -1,7 +1,8 @@
 package decision
 
-// Reference implementation of spec/decision-token-v1.md, used only to
-// generate and check spec/vectors/decision-token-v1.json. CS-161 (signer) and
+// Reference token signer/verifier for spec/decision-token-v1.md, used to
+// generate and check spec/vectors/decision-token-v1.json. The payload
+// binding it relies on is production code (payload.go). CS-161 (signer) and
 // CS-162 (adapter verifier) implement against these vectors.
 //
 // Regenerate: go test ./internal/decision -run TestDecisionTokenVectors -update
@@ -13,10 +14,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
-	"math/big"
 	"os"
 	"sort"
 	"strings"
@@ -34,51 +33,9 @@ const (
 	tokenType   = "stopbar-decision+jws"
 	maxTokenTTL = 300 // seconds, = model.MaxTTL
 	clockSkew   = 5   // seconds
-	maxSafeInt  = 1 << 53
 )
 
 var b64 = base64.RawURLEncoding.Strict()
-
-// ---- payload binding (spec §2) ----
-
-func canonicalAction(a model.Action) ([]byte, error) {
-	var obj map[string]any
-	switch a.Kind {
-	case model.KindEVMTx:
-		if a.ChainID == nil || *a.ChainID == 0 || *a.ChainID >= maxSafeInt {
-			return nil, errors.New("evm_tx: chain_id must be in [1, 2^53)")
-		}
-		v, ok := new(big.Int).SetString(a.ValueWei, 10)
-		if !ok || v.Sign() < 0 {
-			return nil, errors.New("evm_tx: value_wei must be a non-negative decimal string")
-		}
-		obj = map[string]any{
-			"v": 1, "kind": "evm_tx", "chain_id": *a.ChainID,
-			"from": strings.ToLower(a.From), "to": strings.ToLower(a.To),
-			"value_wei": v.String(), "data": strings.ToLower(a.Data),
-		}
-	case model.KindToolCall:
-		if a.Tool == nil || *a.Tool == "" {
-			return nil, errors.New("tool_call: tool required")
-		}
-		args := a.Args
-		if args == nil {
-			args = map[string]any{}
-		}
-		obj = map[string]any{"v": 1, "kind": "tool_call", "tool": *a.Tool, "args": args}
-	default:
-		return nil, fmt.Errorf("%s: no payload binding in v1", a.Kind)
-	}
-	return canon.Marshal(obj)
-}
-
-func payloadHash(a model.Action) (string, error) {
-	c, err := canonicalAction(a)
-	if err != nil {
-		return "", err
-	}
-	return canon.Digest(c), nil
-}
 
 // ---- token (spec §3) ----
 
@@ -218,7 +175,7 @@ func (v *verifier) verify(tok string, action model.Action, now int64) error {
 		return tokenError("NOT_ALLOWED")
 	}
 	// 10. Bound to exactly the action about to be signed.
-	ph, err := payloadHash(action)
+	ph, err := PayloadHash(action)
 	if err != nil || ph != c.PayloadHash {
 		return tokenError("PAYLOAD_MISMATCH")
 	}
@@ -323,7 +280,7 @@ func buildVectors(t *testing.T) vectorFile {
 	}
 	sort.Strings(names)
 	for _, n := range names {
-		c, err := canonicalAction(actions[n])
+		c, err := CanonicalAction(actions[n])
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -333,7 +290,7 @@ func buildVectors(t *testing.T) vectorFile {
 	iat := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC).Unix()
 	now := iat + 10
 	base := func(a model.Action) claims {
-		ph, err := payloadHash(a)
+		ph, err := PayloadHash(a)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -445,7 +402,7 @@ func TestDecisionTokenVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, p := range file.Payloads {
-		c, err := canonicalAction(file.Actions[p.Action])
+		c, err := CanonicalAction(file.Actions[p.Action])
 		if err != nil || string(c) != p.Canonical || canon.Digest(c) != p.PayloadHash {
 			t.Errorf("payload %s: canonical/hash mismatch (%v)", p.Action, err)
 		}
@@ -477,12 +434,13 @@ func TestPayloadHashRejectsUnbindable(t *testing.T) {
 	for name, a := range map[string]model.Action{
 		"withdrawal":        {Kind: model.KindWithdrawal},
 		"evm no chain":      {Kind: model.KindEVMTx, ValueWei: "0"},
+		"evm no to":         {Kind: model.KindEVMTx, ChainID: ptr(uint64(1)), ValueWei: "0"},
 		"evm chain >= 2^53": {Kind: model.KindEVMTx, ChainID: &big, ValueWei: "0"},
 		"evm negative":      {Kind: model.KindEVMTx, ChainID: ptr(uint64(1)), ValueWei: "-1"},
 		"evm hex value":     {Kind: model.KindEVMTx, ChainID: ptr(uint64(1)), ValueWei: "0x10"},
 		"tool no name":      {Kind: model.KindToolCall},
 	} {
-		if _, err := payloadHash(a); err == nil {
+		if _, err := PayloadHash(a); err == nil {
 			t.Errorf("%s: expected error", name)
 		}
 	}
