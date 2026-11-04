@@ -47,9 +47,10 @@ type PolicyResult struct {
 }
 
 // Limiter holds value/velocity capacity (CS-121/122). It derives its own keys
-// and amounts from the enriched request. Release must be idempotent and a
-// no-op for an unknown id: the engine releases after any failed or timed-out
-// Reserve, in case a late reservation lands.
+// and amounts from the enriched request. Reserving the same id twice must not
+// double-count. The engine releases after any failed or timed-out Reserve in
+// case a late reservation lands, and treats ErrUnknownReservation and
+// ErrReservationExpired from that Release as "nothing held".
 type Limiter interface {
 	Reserve(ctx context.Context, id string, req model.EnrichedRequest, ttl time.Duration) error
 	Commit(ctx context.Context, id, txRef string) error
@@ -57,9 +58,13 @@ type Limiter interface {
 }
 
 // Domain errors a Limiter returns; anything else is FAIL_CLOSED_LIMITER.
+// Commit and Release return ErrUnknownReservation or ErrReservationExpired
+// for an ID with nothing to act on.
 var (
-	ErrCapExceeded = errors.New("limiter: cap exceeded")
-	ErrCircuitOpen = errors.New("limiter: circuit breaker open")
+	ErrCapExceeded        = errors.New("limiter: cap exceeded")
+	ErrCircuitOpen        = errors.New("limiter: circuit breaker open")
+	ErrUnknownReservation = errors.New("limiter: unknown reservation")
+	ErrReservationExpired = errors.New("limiter: reservation expired")
 )
 
 // Signer issues the decision token for an allow (CS-161).
@@ -356,7 +361,11 @@ func limiterFailure(err error) *stageError {
 // release is best-effort: an unreleased reservation still expires with the
 // decision TTL.
 func (e *Engine) release(ctx context.Context, id string) {
-	if err := e.call(context.WithoutCancel(ctx), func(ctx context.Context) error { return e.cfg.Limiter.Release(ctx, id) }); err != nil {
+	err := e.call(context.WithoutCancel(ctx), func(ctx context.Context) error { return e.cfg.Limiter.Release(ctx, id) })
+	if errors.Is(err, ErrUnknownReservation) || errors.Is(err, ErrReservationExpired) {
+		return // nothing was held
+	}
+	if err != nil {
 		e.cfg.Logger.Warn("release after failed allow path", "request_id", id, "err", err)
 	}
 }

@@ -14,9 +14,10 @@ Status is pre-alpha. Implemented so far:
 - `internal/engine`: pipeline orchestration with fail-closed mapping and invariants between stages (LLD §2, §12). It consumes components through interfaces; the real ones arrive in CS-111/121/141/161/171.
 - `internal/decision`: the payload binding (`PayloadHash`).
 - `internal/policy`: Cedar bundle loader and outcome combiner (CS-111/112, LLD §5). The spike tests stay as a regression gate on cedar-go behaviour.
-- `internal/devstub`: **dev-only** stand-ins for the decoder, enrichers, limiter, signer and audit log. Each one names the task that replaces it. Its signer issues tokens that every verifier rejects.
+- `internal/limiter`: sliding-window caps with reserve/commit/release, written to bbolt before being applied (CS-121/122, LLD §7.3a). Its property test is the acceptance bar.
+- `internal/devstub`: **dev-only** stand-ins for the decoder, price/balance enricher, signer and audit log. Each one names the task that replaces it. Its signer issues tokens that every verifier rejects.
 
-The Cedar spike (`internal/policy`) and the decision-token signer/verifier reference exist only as tests. Every other `internal/*` package is a placeholder `doc.go` whose responsibilities are defined in LLD §1. `cmd/stopbard` serves the gateway on loopback only until auth exists (CS-103). Without flags it has no engine, and `/v1/evaluate` answers 503. `stopbard -dev-world <setup.json>` runs the real gateway, engine and policy bundle on devstub components, seeded from a corpus-style `setup`. `make e2e` replays every corpus attack through it over HTTP (`scripts/e2e_corpus.py`) and requires the expected status and policy IDs.
+The Cedar spike (`internal/policy`) and the decision-token signer/verifier reference exist only as tests. Every other `internal/*` package is a placeholder `doc.go` whose responsibilities are defined in LLD §1. `cmd/stopbard` serves the gateway on loopback only until auth exists (CS-103). Without flags it has no engine, and `/v1/evaluate` answers 503. `stopbard -dev-world <setup.json>` runs the real gateway, engine, limiter and policy bundle, with devstub components seeded from a corpus-style `setup` (which may set `limits`). Corpus entries may be `requests` sequences with `expected.at_step`. `make e2e` replays every corpus attack through it over HTTP (`scripts/e2e_corpus.py`) and requires the expected status and policy IDs.
 
 ## Commands
 

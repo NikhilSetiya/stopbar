@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/NikhilSetiya/stopbar/internal/canon"
+	"github.com/NikhilSetiya/stopbar/internal/limiter"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
 
@@ -84,17 +85,27 @@ func (Decoder) Decode(_ context.Context, a model.Action) (model.IntentSummary, e
 	}, nil
 }
 
-// ---- enricher (replaced by CS-131/132/133 and the limiter snapshot) ----
+// ---- enricher (replaced by CS-131/132/133) ----
 
 // World is a static view of prices, balances and known destinations, in the
-// shape of a corpus entry's `setup` (corpus/schema.json).
+// shape of a corpus entry's `setup` (corpus/schema.json). Velocity comes from
+// the real limiter, which is configured from Limits.
 type World struct {
 	KnownDestinations []string          `json:"known_destinations"`
 	Balances          map[string]string `json:"balances"`   // symbol -> whole tokens
 	PricesUSD         map[string]string `json:"prices_usd"` // symbol -> USD
 	Tokens            map[string]Token  `json:"tokens"`     // contract address -> token
-	PriorOutflowUSD1h string            `json:"prior_outflow_usd_1h"`
 	PriceStale        bool              `json:"price_stale"`
+	Limits            []limiter.Rule    `json:"limits"` // empty: DefaultLimits
+	// PriorOutflowUSD1h is rejected: prior spend must be real reservations
+	// (a corpus `requests` sequence), not a number the enricher invents.
+	PriorOutflowUSD1h string `json:"prior_outflow_usd_1h"`
+}
+
+// DefaultLimits are LLD §17's example caps, used when a world sets none.
+var DefaultLimits = []limiter.Rule{
+	{Scope: limiter.ScopeWallet, Window: "1h", MaxUSD: "5000", MaxCount: 50},
+	{Scope: limiter.ScopeTenant, Window: "1h", MaxUSD: "20000"},
 }
 
 // Token describes an ERC-20 contract. The native asset is symbol "ETH", 18 decimals.
@@ -115,10 +126,16 @@ func LoadWorld(path string) (*World, error) {
 	if err := dec.Decode(&w); err != nil {
 		return nil, fmt.Errorf("devstub: world %s: %w", path, err)
 	}
+	if w.PriorOutflowUSD1h != "" {
+		return nil, fmt.Errorf("devstub: world %s: prior_outflow_usd_1h is not supported; model prior spend as a `requests` sequence", path)
+	}
+	if len(w.Limits) == 0 {
+		w.Limits = DefaultLimits
+	}
 	return &w, nil
 }
 
-// Enrich fills amount, balance share, velocity and destination facts. A
+// Enrich fills amount, balance share and destination facts. A
 // missing price or balance is left unset (and the price marked stale), so the
 // policy layer fails closed rather than evaluating a guess.
 func (w *World) Enrich(_ context.Context, er *model.EnrichedRequest) error {
@@ -145,13 +162,6 @@ func (w *World) Enrich(_ context.Context, er *model.EnrichedRequest) error {
 	if bal, ok := ratOf(w.Balances[symbol]); ok && bal.Sign() > 0 {
 		er.PctOfBalance = decimalString(new(big.Rat).Quo(tokens, bal))
 	}
-	prior := w.PriorOutflowUSD1h
-	if prior == "" {
-		prior = "0"
-	}
-	er.Velocity["1h"] = model.Velocity{USD: prior}
-	er.Velocity["24h"] = model.Velocity{USD: prior}
-
 	dest := strings.ToLower(er.Intent.Destination)
 	for _, k := range w.KnownDestinations {
 		k = strings.ToLower(k)
@@ -187,42 +197,6 @@ func decimalString(r *big.Rat) *string {
 		s += "." + frac
 	}
 	return &s
-}
-
-// ---- limiter (replaced by CS-121/122) ----
-
-// Limiter reserves without caps. It exists to exercise the reserve/commit
-// lifecycle, not to limit anything.
-type Limiter struct {
-	mu   sync.Mutex
-	held map[string]bool
-}
-
-func (l *Limiter) Reserve(_ context.Context, id string, _ model.EnrichedRequest, _ time.Duration) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.held == nil {
-		l.held = map[string]bool{}
-	}
-	l.held[id] = true
-	return nil
-}
-
-func (l *Limiter) Commit(_ context.Context, id, _ string) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if !l.held[id] {
-		return fmt.Errorf("devstub: no reservation %q", id)
-	}
-	delete(l.held, id)
-	return nil
-}
-
-func (l *Limiter) Release(_ context.Context, id string) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.held, id) // idempotent, no-op for unknown ids
-	return nil
 }
 
 // ---- signer (replaced by CS-161) ----

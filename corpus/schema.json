@@ -91,7 +91,8 @@
           }
         },
         "prior_outflow_usd_1h": {
-          "type": "string"
+          "type": "string",
+          "description": "Deprecated: model prior spend as a `requests` sequence. Rejected by the replay."
         },
         "price_stale": {
           "type": "boolean"
@@ -117,6 +118,51 @@
               }
             }
           }
+        },
+        "limits": {
+          "description": "Limiter caps for this scenario (internal/limiter Rule). Omitted: the dev defaults from LLD \u00a717.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "window"
+            ],
+            "properties": {
+              "scope": {
+                "enum": [
+                  "tenant",
+                  "agent",
+                  "wallet",
+                  "wallet+asset",
+                  "destination"
+                ]
+              },
+              "window": {
+                "enum": [
+                  "1m",
+                  "1h",
+                  "24h"
+                ]
+              },
+              "max_usd": {
+                "type": "string",
+                "pattern": "^[0-9]+(\\.[0-9]{1,6})?$"
+              },
+              "max_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "max_units": {
+                "type": "string",
+                "pattern": "^[0-9]+$"
+              },
+              "unknown_destinations_only": {
+                "type": "boolean"
+              }
+            }
+          }
         }
       }
     },
@@ -126,7 +172,7 @@
     },
     "requests": {
       "type": "array",
-      "description": "Sequence for multi-step attacks (e.g. velocity drain)",
+      "description": "Sequence for multi-step attacks (e.g. velocity drain). Every request before expected.at_step must be allowed; the one at at_step must match expected.",
       "items": {
         "type": "object"
       }
@@ -154,6 +200,10 @@
           "type": "integer",
           "minimum": 0,
           "description": "For sequences: index of the request that must be stopped"
+        },
+        "code": {
+          "type": "string",
+          "description": "Reason code the stopping decision must carry, e.g. CAP_EXCEEDED (LLD \u00a712)."
         }
       }
     },

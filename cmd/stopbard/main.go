@@ -3,8 +3,9 @@
 // Until authentication lands (CS-103) it only listens on loopback. Without
 // -dev-world it runs no engine and /v1/evaluate answers ENGINE_UNAVAILABLE.
 // With -dev-world it runs the real engine and policy bundle on stub
-// components (internal/devstub): decisions are real, tokens are deliberately
-// unverifiable, so nothing it returns can authorise a signature.
+// components (internal/devstub) and the real limiter: decisions are real,
+// tokens are deliberately unverifiable, so nothing it returns can authorise
+// a signature.
 package main
 
 import (
@@ -24,6 +25,7 @@ import (
 	"github.com/NikhilSetiya/stopbar/internal/devstub"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/gateway"
+	"github.com/NikhilSetiya/stopbar/internal/limiter"
 	"github.com/NikhilSetiya/stopbar/internal/policy"
 	"github.com/NikhilSetiya/stopbar/internal/version"
 )
@@ -34,13 +36,14 @@ func main() {
 	devWorld := flag.String("dev-world", "", "DEV ONLY: run the engine on stub components seeded from this world JSON (corpus setup shape)")
 	policies := flag.String("policies", "examples/policies", "policy bundle directory (with -dev-world)")
 	devAudit := flag.String("dev-audit", "", "DEV ONLY: append the stub audit chain to this file (default stderr)")
+	limiterDB := flag.String("limiter-db", "", "persist limiter state in this bbolt file (default: in memory, reset on restart)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("stopbard", version.Version)
 		return
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	eval, err := devEngine(*devWorld, *policies, *devAudit, log)
+	eval, err := devEngine(*devWorld, *policies, *devAudit, *limiterDB, log)
 	if err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
@@ -53,7 +56,7 @@ func main() {
 
 // devEngine wires the real engine and policy bundle to devstub components.
 // It returns nil (no engine) when world is empty.
-func devEngine(world, policies, auditPath string, log *slog.Logger) (gateway.Evaluator, error) {
+func devEngine(world, policies, auditPath, limiterDB string, log *slog.Logger) (gateway.Evaluator, error) {
 	if world == "" {
 		return nil, nil
 	}
@@ -73,11 +76,23 @@ func devEngine(world, policies, auditPath string, log *slog.Logger) (gateway.Eva
 		}
 		aw = f // closed at process exit
 	}
+	var store limiter.Store
+	if limiterDB != "" {
+		bs, err := limiter.OpenBolt(limiterDB)
+		if err != nil {
+			return nil, err
+		}
+		store = bs // closed at process exit
+	}
+	lim, err := limiter.New(limiter.Config{Rules: w.Limits, Store: store})
+	if err != nil {
+		return nil, err
+	}
 	e, err := engine.New(engine.Config{
 		Decoders:  []engine.Decoder{devstub.Decoder{}},
-		Enrichers: []engine.Enricher{w},
+		Enrichers: []engine.Enricher{w, lim}, // lim supplies velocity
 		Policy:    b,
-		Limiter:   &devstub.Limiter{},
+		Limiter:   lim,
 		Signer:    devstub.UnsignedSigner{},
 		Audit:     &devstub.Audit{W: aw},
 		Logger:    log,
@@ -85,7 +100,7 @@ func devEngine(world, policies, auditPath string, log *slog.Logger) (gateway.Eva
 	if err != nil {
 		return nil, err
 	}
-	log.Warn("DEV STUBS ENABLED: decoder, enricher, limiter, signer and audit are stand-ins; tokens are unsigned. Not for production.",
+	log.Warn("DEV STUBS ENABLED: decoder, price/balance enricher, signer and audit are stand-ins; tokens are unsigned. Not for production.",
 		"world", world, "policies", policies, "bundle_hash", b.Hash())
 	return e, nil
 }

@@ -17,7 +17,6 @@ import (
 var (
 	_ engine.Decoder  = Decoder{}
 	_ engine.Enricher = (*World)(nil)
-	_ engine.Limiter  = (*Limiter)(nil)
 	_ engine.Signer   = UnsignedSigner{}
 	_ engine.AuditLog = (*Audit)(nil)
 )
@@ -72,7 +71,7 @@ func TestWorldEnrich(t *testing.T) {
 	if err := w.Enrich(context.Background(), er); err != nil {
 		t.Fatal(err)
 	}
-	if *er.AmountUSD != "174000" || *er.PctOfBalance != "1" || er.PriceStale || er.Destination.Known || er.Velocity["1h"].USD != "0" {
+	if *er.AmountUSD != "174000" || *er.PctOfBalance != "1" || er.PriceStale || er.Destination.Known {
 		t.Fatalf("got amount=%v pct=%v %+v", *er.AmountUSD, *er.PctOfBalance, er)
 	}
 
