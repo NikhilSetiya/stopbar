@@ -43,7 +43,9 @@ check("metrics", "GET", "/metrics", None, 200, ctype=None)
 
 requests = {f: open(f, "rb").read() for f in sorted(glob.glob("spec/fixtures/action_request.*.json"))}
 for f in sorted(glob.glob("corpus/attacks/*.yaml")):
-    requests[f] = json.dumps(yaml.safe_load(open(f))["request"]).encode()
+    entry = yaml.safe_load(open(f))
+    for i, r in enumerate(entry.get("requests") or [entry["request"]]):
+        requests[f if "request" in entry else f"{f}#{i}"] = json.dumps(r).encode()
 for name, body in requests.items():
     check(f"valid request passes gateway: {name}", "POST", "/v1/evaluate", body, 503, "ENGINE_UNAVAILABLE")
 

@@ -387,9 +387,27 @@ Amount is two-dimensional `{usd, count}`; caps can be set on either. Token-count
 
 `tenant` scope with a hard outflow cap per 1h. On breach: all subsequent `evaluate` → deny `CIRCUIT_OPEN` until M-of-N reset. Emits high-severity alert.
 
+### 7.3a Implementation (`internal/limiter`, CS-121/122)
+
+- **One process, one mutex.** `Reserve`, `Commit` and `Release` are serialised. All caps are checked on all five scope keys before anything changes, so a reserve is all-or-nothing.
+- **Numbers:**
+  - USD is integer micro-dollars (`big.Int`). Amounts round **up** from decimal strings, and caps must be exact (at most 6 decimal places).
+  - Token amounts are raw units (`big.Int`). `max_units` (wallet+asset scope) bounds loss even with no price.
+  - A USD cap that applies to a request with no price is a typed `ErrUnpriced`, which fails closed.
+- **Durability:** each change is written to the store (bbolt, `-limiter-db`) **before** it is applied in memory. On restart, state is rebuilt from the records, so restarting does not reset caps. Expiry is derived from the clock and needs no write. bbolt's file lock prevents two processes from sharing one state file. Multi-instance deployments need the Redis store (CS-306).
+- **Windows:** 60 sub-buckets each, counted conservatively. A spend stays counted for up to one sub-bucket (window/60) longer than the window, never shorter.
+- **Lifecycle:**
+  - Reserving the same request ID while it is live is a no-op, and re-using a finished ID is `ErrDuplicateReservation`.
+  - Commit or release of an unknown ID returns `ErrUnknownReservation`, and of a lapsed one `ErrReservationExpired`.
+  - **A late commit still records the spend**, so loss bounding counts what actually happened.
+  - The engine treats unknown or expired IDs on its own best-effort release as "nothing held".
+- **Keys** quote each component, so requester-chosen tenant or agent IDs can't collide. Agent and tenant scopes are only as strong as authentication (CS-103), while wallet scopes are bound to the signing address.
+- **Velocity:** the limiter is also an `Enricher`. It supplies `velocity.{1m,1h,24h}` (committed + reserved, wallet scope) to policy.
+- **Sweeping costs O(lapsed):** an expiry heap plus a creation-ordered queue for retention (24h + one sub-bucket + max TTL).
+
 ### 7.4 Properties to test
 
-- No interleaving of concurrent `Reserve` exceeds any cap (property test with 1,000 goroutines).
+- No interleaving of concurrent `Reserve` exceeds any cap. Property test: 1,000 goroutines × 20 operations. The invariant is checked under the lock after **every** state change and by 8 concurrent observers, and final usage is reconciled exactly against an independent ledger. A mutation check confirms the test fails if the cap check ignores the request's own amount.
 - Expired reservations always released.
 - Window rollover never double-counts or drops.
 
@@ -556,9 +574,11 @@ tenant: acme
 listen: 127.0.0.1:7777
 store: {kind: bbolt, path: ./data/cs.db}
 policy: {bundle: ./policies, cooling_off_loosen: 24h, activation_quorum: 1}
-limits:
-  - {scope: wallet, window: 1h, max_usd: 5000, max_count: 50}
-  - {scope: tenant, window: 1h, max_usd: 20000, circuit_breaker: true}
+limits:                     # internal/limiter Rule; window ∈ 1m | 1h | 24h
+  - {scope: wallet, window: 1h, max_usd: "5000", max_count: 50}
+  - {scope: wallet+asset, window: 24h, max_units: "1000000000000000000000000"}   # raw units; holds with no price
+  - {scope: destination, window: 24h, max_count: 5, unknown_destinations_only: true}
+  - {scope: tenant, window: 1h, max_usd: "20000", circuit_breaker: true}
 prices: {sources: [chainlink, coingecko], staleness: 15s}
 decision_key: {provider: local, path: ./keys/decision.ed25519}
 signer: {adapter: local, keystore: ./keys/agent-wallet.json}
