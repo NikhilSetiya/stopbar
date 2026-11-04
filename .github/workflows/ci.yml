@@ -22,6 +22,8 @@ jobs:
         run: go test -race -count=1 ./...
       - name: fuzz smoke (canonicaliser)
         run: go test -run='^$' -fuzz=FuzzTransformIdempotent -fuzztime=30s ./internal/canon/
+      - name: fuzz smoke (gateway)
+        run: go test -run='^$' -fuzz=FuzzEvaluate -fuzztime=30s ./internal/gateway/
       - name: govulncheck
         run: GOTOOLCHAIN=local go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
   lint:

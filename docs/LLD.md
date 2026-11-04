@@ -183,7 +183,15 @@ Canonicalisation: RFC 8785 (JCS).
 
 - Transport: HTTP/1.1 + JSON v1; gRPC later.
 - AuthN: mTLS (service mode) with SPIFFE IDs; API key (sidecar/dev only).
-- Checks in order: auth → JSON schema → `issued_at` within ±30s clock skew → TTL ≤ 300s → nonce unseen (nonce store TTL = max TTL) → body size ≤ 64 KB.
+- Checks in order. Each one rejects with the typed code shown in §4.2. Body size comes first so oversized input is never parsed.
+  1. method → `Content-Type: application/json` → body ≤ 64 KB
+  2. auth (CS-103)
+  3. well-formed JSON via RFC 8785. This also rejects invalid UTF-8, duplicate members and trailing data.
+  4. no integer beyond ±2^53 (decision-token-v1 §2.2)
+  5. **exact-case keys**. `encoding/json` matches keys case-insensitively, so `"To"` next to `"to"` would otherwise be a parser differential.
+  6. strict decode with unknown fields rejected → `ActionRequest.Validate()`
+  7. `issued_at` within ±30 s clock skew → TTL ≤ 300 s → nonce unseen, with nonce store TTL = max TTL (CS-102)
+- There is no JSON-schema library in the request path. `spec/schemas/*.json` are for non-Go clients and CI, and `internal/model` is authoritative.
 - Per-requester API rate limit (token bucket) protects availability, separate from value limiter.
 
 ### 4.1 API
@@ -200,7 +208,25 @@ Canonicalisation: RFC 8785 (JCS).
 | GET | `/v1/keys` | JWKS of decision-signing keys |
 | GET | `/healthz`, `/metrics` | Ops |
 
-Error body: `{"code": "NONCE_REPLAYED", "message": "…", "request_id": "…"}`.
+Error body: `{"code": "NONCE_REPLAYED", "message": "…", "request_id": "…", "problems": ["…"]}`. `request_id` appears once it is known, and `problems` only for `INVALID_REQUEST`, listing every problem at once.
+
+### 4.2 Gateway error codes
+
+| Code | Status | When |
+|---|---|---|
+| `NOT_FOUND` / `METHOD_NOT_ALLOWED` | 404 / 405 | Unknown route, or wrong method (`Allow` header set) |
+| `UNSUPPORTED_MEDIA_TYPE` | 415 | Not `application/json` |
+| `BODY_TOO_LARGE` | 413 | Body > 64 KB |
+| `MALFORMED_JSON` | 400 | Not a single well-formed JSON value |
+| `DUPLICATE_KEY` | 400 | Same member twice in an object |
+| `NUMBER_PRECISION` | 400 | Integer beyond ±2^53 (send it as a decimal string) |
+| `UNKNOWN_FIELD` | 400 | Unknown member, or a known one with different case |
+| `INVALID_REQUEST` | 400 | Wrong type, or fails `ActionRequest.Validate()` |
+| `NONCE_REPLAYED` / `EXPIRED` | 400 | CS-102 |
+| `ENGINE_UNAVAILABLE` | 503 | No engine configured |
+| `INTERNAL` | 500 | Engine error or panic, or the engine returned an invalid decision or one for a different request |
+
+Only 200 (allow/deny) and 202 (escalate) carry a decision. Clients treat any other response as *not allowed*.
 
 ## 5. Policy engine
 
