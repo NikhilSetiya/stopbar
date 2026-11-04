@@ -1,0 +1,33 @@
+id: CS-2026-0006
+title: Request issued in the future (pre-signed or clock-skewed request)
+category: freshness.future
+target: agent_wallet.evm
+description: >
+  A request issued two minutes in the future. Accepting it would let a request be prepared now and
+  stay valid for longer than its TTL. The freshness window is two-sided: beyond 30 seconds of skew
+  ahead of the gateway clock is rejected, not just too old.
+setup:
+  known_destinations: ["0x4444444444444444444444444444444444444444"]
+  balances: {LOBSTAR: "52430000"}
+  prices_usd: {LOBSTAR: "0.00477"}
+  tokens: {"0x6666666666666666666666666666666666666666": {symbol: LOBSTAR, decimals: 18}}
+  issued_at_offset: "+120s"
+request:
+  id: req_fixture_0006
+  tenant: test
+  nonce: ZnV0dXJlLW5vbmNlLTAwMDY
+  issued_at: "2026-02-10T09:00:00Z"   # template: the replay sets it to now + issued_at_offset
+  ttl_seconds: 60
+  actor: {agent_id: defi-agent}
+  action:
+    kind: evm_tx
+    chain_id: 8453
+    from: "0x5555555555555555555555555555555555555555"
+    to: "0x6666666666666666666666666666666666666666"
+    value_wei: "0"
+    # transfer(0x4444…4444, 524,300e18) = 1% of balance, ~$2,501: allowed on its own
+    data: "0xa9059cbb0000000000000000000000004444444444444444444444444444444444444444000000000000000000000000000000000000000000006f065c25cb8bd8b00000"
+  provenance: {labels: [trusted_user]}
+expected:
+  outcome: reject
+  code: ISSUED_IN_FUTURE

@@ -17,7 +17,7 @@ Status is pre-alpha. Implemented so far:
 - `internal/limiter`: sliding-window caps with reserve/commit/release, written to bbolt before being applied (CS-121/122, LLD §7.3a). Its property test is the acceptance bar.
 - `internal/devstub`: **dev-only** stand-ins for the decoder, price/balance enricher, signer and audit log. Each one names the task that replaces it. Its signer issues tokens that every verifier rejects.
 
-The Cedar spike (`internal/policy`) and the decision-token signer/verifier reference exist only as tests. Every other `internal/*` package is a placeholder `doc.go` whose responsibilities are defined in LLD §1. `cmd/stopbard` serves the gateway on loopback only until auth exists (CS-103). Without flags it has no engine, and `/v1/evaluate` answers 503. `stopbard -dev-world <setup.json>` runs the real gateway, engine, limiter and policy bundle, with devstub components seeded from a corpus-style `setup` (which may set `limits`). Corpus entries may be `requests` sequences with `expected.at_step`. `make e2e` replays every corpus attack through it over HTTP (`scripts/e2e_corpus.py`) and requires the expected status and policy IDs.
+The Cedar spike (`internal/policy`) and the decision-token signer/verifier reference exist only as tests. Every other `internal/*` package is a placeholder `doc.go` whose responsibilities are defined in LLD §1. `cmd/stopbard` serves the gateway on loopback only until auth exists (CS-103). Without flags it has no engine, and `/v1/evaluate` answers 503. `-state-dir` makes nonces and limiter state durable. `stopbard -dev-world <setup.json>` runs the real gateway, engine, limiter and policy bundle, with devstub components seeded from a corpus-style `setup` (which may set `limits`). Corpus entries may be `requests` sequences with `expected.at_step`. `make e2e` replays every corpus attack through it over HTTP (`scripts/e2e_corpus.py`) and requires the expected status and policy IDs.
 
 ## Commands
 
@@ -56,7 +56,8 @@ gateway → normalize → decode intent (`decode/evm`) → enrich (price, balanc
 
 - **Fail closed everywhere.** Each component returns typed errors. The engine maps any non-domain error, panic or timeout to `deny` with `FAIL_CLOSED_<COMPONENT>` (LLD §12), and no decision may go unaudited.
 - **The HTTP status alone is safe to act on:** 200 is allow and only allow, 202 is escalate, 403 is deny. Every response with a decision carries the full Decision in its body.
-- **CS-102 (nonce/TTL) must land before CS-161 (decision signing).** Once Stopbar signs, a replayed request is a replayed signature.
+- **Freshness:** the nonce is consumed before evaluation. **Never add a clock override to `stopbard`**, because a settable clock turns TTL checks off. Injected clocks belong in unit tests only, and the corpus replay rewrites `issued_at`/nonce per run (`scripts/corpus_template.py`).
+- **CS-103 (auth) is a hard gate before `stopbard` listens on any non-loopback address.** Agent and tenant caps can be spoofed until then. Wallet caps can't, because they're bound to the signing address.
 - **Policy outcome precedence:** deny > escalate > allow, with default deny.
 - **Limiter** reserves on evaluate and then commits or releases (`Engine.Commit/Release`), so caps hold across concurrent requests.
 - **Enforcement modes** (HLD §3) determine real security. *Advisory* is bypassable. *Gatekeeper* (the Phase 1 default) means Stopbar holds the signer credential. *Co-signer* (Phase 4) means the signer requires Stopbar's signature.

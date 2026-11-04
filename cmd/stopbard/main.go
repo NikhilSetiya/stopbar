@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/gateway"
 	"github.com/NikhilSetiya/stopbar/internal/limiter"
+	"github.com/NikhilSetiya/stopbar/internal/nonce"
 	"github.com/NikhilSetiya/stopbar/internal/policy"
 	"github.com/NikhilSetiya/stopbar/internal/version"
 )
@@ -36,19 +38,31 @@ func main() {
 	devWorld := flag.String("dev-world", "", "DEV ONLY: run the engine on stub components seeded from this world JSON (corpus setup shape)")
 	policies := flag.String("policies", "examples/policies", "policy bundle directory (with -dev-world)")
 	devAudit := flag.String("dev-audit", "", "DEV ONLY: append the stub audit chain to this file (default stderr)")
-	limiterDB := flag.String("limiter-db", "", "persist limiter state in this bbolt file (default: in memory, reset on restart)")
+	stateDir := flag.String("state-dir", "", "directory for durable state (limiter.db, nonces.db); default in memory, lost on restart")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("stopbard", version.Version)
 		return
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	eval, err := devEngine(*devWorld, *policies, *devAudit, *limiterDB, log)
+	nonces, err := openNonces(*stateDir)
 	if err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
 	}
-	if err := run(*listen, eval, log); err != nil {
+	limiterDB := ""
+	if *stateDir != "" {
+		limiterDB = filepath.Join(*stateDir, "limiter.db")
+	}
+	eval, err := devEngine(*devWorld, *policies, *devAudit, limiterDB, log)
+	if err != nil {
+		log.Error("stopbard exiting", "err", err)
+		os.Exit(1)
+	}
+	if *stateDir == "" {
+		log.Warn("no -state-dir: nonces and limiter state are in memory; a restart reopens replay windows and resets caps")
+	}
+	if err := run(*listen, eval, nonces, log); err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
 	}
@@ -105,7 +119,19 @@ func devEngine(world, policies, auditPath, limiterDB string, log *slog.Logger) (
 	return e, nil
 }
 
-func run(addr string, eval gateway.Evaluator, log *slog.Logger) error {
+// openNonces returns the replay-protection store: durable under stateDir,
+// in memory otherwise.
+func openNonces(stateDir string) (*nonce.Store, error) {
+	if stateDir == "" {
+		return nonce.NewMemory(nil), nil
+	}
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return nil, err
+	}
+	return nonce.OpenBolt(filepath.Join(stateDir, "nonces.db"), nil)
+}
+
+func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, log *slog.Logger) error {
 	if err := requireLoopback(addr); err != nil {
 		return err
 	}
@@ -114,7 +140,7 @@ func run(addr string, eval gateway.Evaluator, log *slog.Logger) error {
 		return err
 	}
 	srv := &http.Server{
-		Handler:           gateway.New(gateway.Config{Evaluator: eval, Logger: log}),
+		Handler:           gateway.New(gateway.Config{Evaluator: eval, Nonces: nonces, Logger: log}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,

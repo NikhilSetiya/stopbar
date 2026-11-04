@@ -10,11 +10,30 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
+
+// fixtureTime is just after the fixtures' issued_at, so they are fresh.
+var fixtureTime = time.Date(2026, 11, 2, 10, 0, 10, 0, time.UTC)
+
+// newGW builds a gateway whose clock is pinned to the fixtures (tests only;
+// stopbard has no clock setting).
+func newGW(cfg Config) *Gateway {
+	if cfg.Clock == nil {
+		cfg.Clock = func() time.Time { return fixtureTime }
+	}
+	return New(cfg)
+}
+
+// alwaysFresh lets the fuzzer reach the evaluator with repeated nonces.
+type alwaysFresh struct{}
+
+func (alwaysFresh) Consume(string, time.Time) (bool, error) { return true, nil }
 
 func fixture(t testing.TB, name string) []byte {
 	t.Helper()
@@ -85,7 +104,7 @@ func mutate(t testing.TB, f func(m map[string]any)) []byte {
 
 func TestEvaluateRejects(t *testing.T) {
 	evm := fixture(t, "action_request.evm_tx.json")
-	g := New(Config{Evaluator: decide(model.Allow)})
+	g := newGW(Config{Evaluator: decide(model.Allow)})
 	tests := []struct {
 		name   string
 		method string
@@ -134,7 +153,7 @@ func TestEvaluateRejects(t *testing.T) {
 }
 
 func TestValidationReportsAllProblems(t *testing.T) {
-	g := New(Config{Evaluator: decide(model.Allow)})
+	g := newGW(Config{Evaluator: decide(model.Allow)})
 	_, b := do(t, g, "POST", "/v1/evaluate", "application/json", []byte(`{"id":"r1","action":{"kind":"evm_tx"}}`))
 	var e ErrorBody
 	if err := json.Unmarshal(b, &e); err != nil {
@@ -158,7 +177,7 @@ func TestEvaluateOutcomes(t *testing.T) {
 		{"action_request.tool_call.json", model.Allow, 200},
 	} {
 		t.Run(tt.fixture+"/"+string(tt.outcome), func(t *testing.T) {
-			g := New(Config{Evaluator: decide(tt.outcome)})
+			g := newGW(Config{Evaluator: decide(tt.outcome)})
 			res, b := do(t, g, "POST", "/v1/evaluate", "application/json; charset=utf-8", fixture(t, tt.fixture))
 			if res.StatusCode != tt.status {
 				t.Fatalf("status = %d, want %d (%s)", res.StatusCode, tt.status, b)
@@ -199,7 +218,7 @@ func TestFailClosed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := New(Config{Evaluator: tt.eval})
+			g := newGW(Config{Evaluator: tt.eval})
 			res, b := do(t, g, "POST", "/v1/evaluate", "application/json", evm)
 			if res.StatusCode != tt.status || errCode(t, b) != tt.code {
 				t.Fatalf("got %d %s, want %d %s", res.StatusCode, b, tt.status, tt.code)
@@ -212,7 +231,7 @@ func TestFailClosed(t *testing.T) {
 }
 
 func TestHealthzAndMetrics(t *testing.T) {
-	g := New(Config{Evaluator: decide(model.Deny)})
+	g := newGW(Config{Evaluator: decide(model.Deny)})
 	if res, b := do(t, g, "GET", "/healthz", "", nil); res.StatusCode != 200 || !bytes.Contains(b, []byte(`"ok"`)) {
 		t.Fatalf("healthz: %d %s", res.StatusCode, b)
 	}
@@ -277,7 +296,7 @@ func FuzzEvaluate(f *testing.F) {
 	f.Add([]byte(`{"id":"a","id":"b"}`))
 	f.Add([]byte(`{"ID":"x"}`))
 	f.Add([]byte(`{"ttl_seconds":1e20}`))
-	g := New(Config{Evaluator: decide(model.Allow)})
+	g := newGW(Config{Evaluator: decide(model.Allow), Nonces: alwaysFresh{}})
 	f.Fuzz(func(t *testing.T, body []byte) {
 		res, b := do(t, g, "POST", "/v1/evaluate", "application/json", body)
 		switch res.StatusCode {
@@ -294,4 +313,125 @@ func FuzzEvaluate(f *testing.F) {
 			t.Fatalf("unexpected status %d for %q", res.StatusCode, body)
 		}
 	})
+}
+
+// ---- CS-102: freshness and replay ----
+
+// The window is two-sided: [issued_at - skew, issued_at + ttl + skew).
+// The evm fixture has issued_at 10:00:00 and ttl 60s.
+func TestFreshnessWindowEdges(t *testing.T) {
+	base := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name string
+		now  time.Time
+		want int
+		code Code
+	}{
+		{"30s early is within skew", base.Add(-ClockSkew), 200, ""},
+		{"30s+1ns early is in the future", base.Add(-ClockSkew - time.Nanosecond), 400, CodeIssuedInFuture},
+		{"last instant before expiry", base.Add(60*time.Second + ClockSkew - time.Nanosecond), 200, ""},
+		{"expired at ttl + skew", base.Add(60*time.Second + ClockSkew), 400, CodeExpired},
+		{"long expired", base.Add(time.Hour), 400, CodeExpired},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			now := tt.now
+			g := newGW(Config{Evaluator: decide(model.Allow), Clock: func() time.Time { return now }})
+			res, b := do(t, g, "POST", "/v1/evaluate", "application/json", fixture(t, "action_request.evm_tx.json"))
+			if res.StatusCode != tt.want || (tt.code != "" && errCode(t, b) != tt.code) {
+				t.Fatalf("got %d %s", res.StatusCode, b)
+			}
+		})
+	}
+}
+
+// A nonce is spent before evaluation: replaying a denied request is
+// rejected as a replay, not re-evaluated.
+func TestNonceSpentEvenOnDeny(t *testing.T) {
+	var evaluations atomic.Int64
+	g := newGW(Config{Evaluator: evalFunc(func(ctx context.Context, r model.ActionRequest) (model.Decision, error) {
+		evaluations.Add(1)
+		return decide(model.Deny)(ctx, r)
+	})})
+	body := fixture(t, "action_request.evm_tx.json")
+	if res, _ := do(t, g, "POST", "/v1/evaluate", "application/json", body); res.StatusCode != 403 {
+		t.Fatalf("first: %d", res.StatusCode)
+	}
+	res, b := do(t, g, "POST", "/v1/evaluate", "application/json", body)
+	if res.StatusCode != 400 || errCode(t, b) != CodeNonceReplayed || evaluations.Load() != 1 {
+		t.Fatalf("replay: %d %s, evaluations=%d", res.StatusCode, b, evaluations.Load())
+	}
+	// Engine unavailable still spends the nonce.
+	g = newGW(Config{})
+	do(t, g, "POST", "/v1/evaluate", "application/json", body)
+	if _, b := do(t, g, "POST", "/v1/evaluate", "application/json", body); errCode(t, b) != CodeNonceReplayed {
+		t.Fatalf("nonce not spent when no engine: %s", b)
+	}
+}
+
+func TestNonceScopedByTenantAndAgent(t *testing.T) {
+	g := newGW(Config{Evaluator: decide(model.Allow)})
+	post := func(tenant, agent string) int {
+		res, _ := do(t, g, "POST", "/v1/evaluate", "application/json", mutate(t, func(m map[string]any) {
+			m["tenant"] = tenant
+			m["actor"].(map[string]any)["agent_id"] = agent
+		}))
+		return res.StatusCode
+	}
+	if post("acme", "a") != 200 || post("globex", "a") != 200 || post("acme", "b") != 200 {
+		t.Fatal("the same nonce must be independent across tenants and agents")
+	}
+	if post("acme", "a") != 400 {
+		t.Fatal("replay within (tenant, agent) accepted")
+	}
+}
+
+// N concurrent identical requests: exactly one is evaluated.
+func TestConcurrentReplayExactlyOneWins(t *testing.T) {
+	const n = 200
+	var evaluations atomic.Int64
+	g := newGW(Config{Evaluator: evalFunc(func(ctx context.Context, r model.ActionRequest) (model.Decision, error) {
+		evaluations.Add(1)
+		return decide(model.Allow)(ctx, r)
+	})})
+	body := fixture(t, "action_request.evm_tx.json")
+	var ok, replayed atomic.Int64
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			res, b := do(t, g, "POST", "/v1/evaluate", "application/json", body)
+			switch {
+			case res.StatusCode == 200:
+				ok.Add(1)
+			case res.StatusCode == 400 && errCode(t, b) == CodeNonceReplayed:
+				replayed.Add(1)
+			default:
+				t.Errorf("unexpected %d %s", res.StatusCode, b)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if ok.Load() != 1 || replayed.Load() != n-1 || evaluations.Load() != 1 {
+		t.Fatalf("ok=%d replayed=%d evaluations=%d", ok.Load(), replayed.Load(), evaluations.Load())
+	}
+}
+
+type brokenNonces struct{}
+
+func (brokenNonces) Consume(string, time.Time) (bool, error) { return false, errors.New("disk full") }
+
+func TestNonceStoreFailureFailsClosed(t *testing.T) {
+	var evaluations atomic.Int64
+	g := newGW(Config{Nonces: brokenNonces{}, Evaluator: evalFunc(func(ctx context.Context, r model.ActionRequest) (model.Decision, error) {
+		evaluations.Add(1)
+		return decide(model.Allow)(ctx, r)
+	})})
+	res, b := do(t, g, "POST", "/v1/evaluate", "application/json", fixture(t, "action_request.evm_tx.json"))
+	if res.StatusCode != 500 || errCode(t, b) != CodeInternal || evaluations.Load() != 0 {
+		t.Fatalf("got %d %s, evaluations=%d", res.StatusCode, b, evaluations.Load())
+	}
 }
