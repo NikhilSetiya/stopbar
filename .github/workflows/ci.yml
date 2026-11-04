@@ -26,6 +26,16 @@ jobs:
         run: go test -run='^$' -fuzz=FuzzEvaluate -fuzztime=30s ./internal/gateway/
       - name: govulncheck
         run: GOTOOLCHAIN=local go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      # Every corpus attack through a live stopbard over HTTP: expected status,
+      # exact policy IDs, audit record. A step in this required job, so a PR
+      # that stops blocking an attack cannot merge.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with: {python-version: "3.12"}
+      - name: corpus replay over HTTP
+        run: |
+          pip install pyyaml
+          go build -o "$RUNNER_TEMP/stopbard" ./cmd/stopbard
+          python3 scripts/e2e_corpus.py "$RUNNER_TEMP/stopbard"
   lint:
     runs-on: ubuntu-latest
     steps:

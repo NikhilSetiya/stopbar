@@ -75,7 +75,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 
 | ID | Task | Detail | Acceptance criteria | Est | Depends | Refs |
 |---|---|---|---|---|---|---|
-| CS-131 | Price oracle client | Chainlink + CoinGecko with staleness bound and cache. | Stale -> price_stale=true; tests with fake clock. | 2d | CS-104 | FR-LIM-5 |
+| CS-131 | Price oracle client | Chainlink + CoinGecko with staleness bound and cache. Make amount_usd optional in the schema (amount_usd?) so a stale price reaches the stale-price escalate policy instead of failing closed; policies must guard with `context has amount_usd` (unguarded reads error, and errors deny). Rendered intent says "price unavailable", never $0. | Stale -> price_stale=true, amount_usd absent, starter pack escalates (stale-price); tests with fake clock; rendering shows "price unavailable". | 2d | CS-104 | FR-LIM-5 |
 | CS-132 | Balance provider | RPC balance reads (native + ERC-20) with cache. | Anvil test returns correct balances. | 1d | CS-104 |  |
 | CS-133 | Destination registry | Known destinations per tenant; similarity check (prefix/suffix). | Poisoned address flagged similar_to_known. | 1.5d | CS-104 | FR-IR-2 |
 
@@ -93,7 +93,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 
 | ID | Task | Detail | Acceptance criteria | Est | Depends | Refs |
 |---|---|---|---|---|---|---|
-| CS-151 | Approver keys + CLI approvals | Ed25519 approver keys; `stopbar approve/reject <id>` signs over payload_hash. | Wrong hash or key rejected; quorum honoured. | 2d | CS-104 | FR-ESC-1,2 |
+| CS-151 | Approver keys + CLI approvals | Ed25519 approver keys; `stopbar approve/reject <id>` signs over payload_hash. On quorum, re-run enrich -> policy -> limiter -> sign against current state with approvals as policy context (LLD §9 step 5); never replay the escalated decision. | Wrong hash or key rejected; quorum honoured. Approval after the cap filled or price moved yields deny/escalate, not allow (test). | 2d | CS-104 | FR-ESC-1,2 |
 | CS-152 | Escalation lifecycle | Create, poll (/v1/decisions), timeout -> deny, reject -> deny. | E2E: escalate -> approve -> signed tx returned. | 1.5d | CS-151 | FR-ESC-3 |
 
 ### E7 Decision & signer
@@ -109,7 +109,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 
 | ID | Task | Detail | Acceptance criteria | Est | Depends | Refs |
 |---|---|---|---|---|---|---|
-| CS-171 | Hash-chained log | Append-only bbolt bucket; record per event in same tx as state change. | Tampering one record fails verify. | 2d | CS-006 | FR-AUD-1 |
+| CS-171 | Hash-chained log | Append-only bbolt bucket; record per event in same tx as state change. Denials that cannot be audited (store down) must not be silent: high-severity log + stopbar_audit_unavailable_denials_total metric. | Tampering one record fails verify. Audit store down -> deny, error log and counter increments (test). | 2d | CS-006 | FR-AUD-1 |
 | CS-172 | Checkpoints + verify CLI | Signed Merkle checkpoints; `stopbar audit verify`. | Verify passes clean log, fails tampered. | 1.5d | CS-171,CS-161 | FR-AUD-2,3 |
 
 ### E9 SDKs & provenance

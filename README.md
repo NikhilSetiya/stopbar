@@ -2,11 +2,25 @@
 
 **An open-source intent firewall for signers.** Nothing gets signed — by an AI agent, a hot wallet, or an enterprise system — unless an independent policy engine clears it first. Like a runway stop bar: lit by default, and nothing crosses without clearance from an authority the requester does not control.
 
-> Status: pre-alpha. Foundations in progress — Go module, CI, core data model and RFC 8785 canonical hashing are in (CS-002/003/005/006). See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
+An AI agent with a wallet reads an encoded instruction planted in on-chain content (the [Grok/Bankr pattern](corpus/attacks/CS-2026-0001-encoded-onchain-injection.yaml)) and asks to move 3,000,000 tokens to an address it has never paid. Stopbar answers:
+
+```console
+$ curl -i -X POST localhost:7777/v1/evaluate -H 'Content-Type: application/json' --data @CS-2026-0001.json
+HTTP/1.1 403 Forbidden
+
+{"request_id":"req_fixture_0001","outcome":"deny",
+ "reasons":[{"code":"POLICY","policy_id":"taint-unknown-destination",
+   "message":"Untrusted content is in the agent's context and the destination is not allowlisted"}],
+ "policy_bundle_hash":"sha256:…","payload_hash":"sha256:b5bca746…", …}
+```
+
+Every attack in the [corpus](corpus/) is replayed like this, over real HTTP, on every PR. Today the engine and Cedar policy are real, and the decoder, price/balance data, limiter and signer are [dev stubs](internal/devstub/) that are being replaced task by task.
+
+> Status: pre-alpha. The gateway, engine and Cedar policy layer are in, and the seed attacks are blocked end to end. See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
 
 ```bash
+make e2e     # everything CI runs, plus corpus replay against a live stopbard
 make check   # vet + race tests
-make fuzz    # fuzz the canonicaliser
 ```
 
 ---

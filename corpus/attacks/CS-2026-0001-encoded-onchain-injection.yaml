@@ -9,6 +9,7 @@ setup:
   known_destinations: ["0x1111111111111111111111111111111111111111"]
   balances: {DRB: "3000000"}
   prices_usd: {DRB: "0.058"}
+  tokens: {"0x3333333333333333333333333333333333333333": {symbol: DRB, decimals: 18}}
 request:
   id: req_fixture_0001
   tenant: test

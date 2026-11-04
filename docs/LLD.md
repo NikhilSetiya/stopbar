@@ -142,7 +142,7 @@ Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decod
 
 | Field | Type | Source |
 |---|---|---|
-| `amount_usd` | decimal | price oracle; `null` + `price_stale=true` if stale |
+| `amount_usd` | decimal | price oracle; `null` + `price_stale=true` if stale. **Decided (CS-131):** `amount_usd` becomes optional in the schema (`amount_usd?`), so a stale price reaches the `stale-price` escalate policy. This is safe: a policy that reads it without `context has amount_usd` errors, and errors deny. Token-count caps still apply without a price. The rendered intent must say "price unavailable", never $0. Until CS-131 the schema requires it, so a stale price currently denies. |
 | `pct_of_balance` | decimal | balance provider |
 | `velocity.{1m,1h,24h}.usd` / `.count` | decimal/int | limiter snapshot |
 | `destination.known` | bool | destination registry |
@@ -282,6 +282,13 @@ Cedar natively yields permit/forbid. Stopbar layers **escalate** via annotations
 
 Combination: `deny > escalate > allow`. Evaluate escalate-annotated policies as a separate Cedar policy set so "forbid" in that set means escalate.
 
+Loader rules (`internal/policy`, CS-111). Every violation is reported with `file:line`, and the whole bundle is rejected.
+
+- Every policy needs a unique `@id`, which becomes its PolicyID. The only annotations allowed are `@id`, `@outcome` and `@message` (the human text used in the decision reason).
+- `@outcome` is allowed only on `forbid` and must be `deny` or `escalate`. An unannotated `forbid` denies.
+- Every policy is validated against the bundle's single `.cedarschema` (strict mode).
+- When no `permit` matches, the deny reason has code `DEFAULT_DENY` and no `policy_id`. Reasons list only the policies of the winning set, sorted by ID.
+
 Engine rules from the Cedar spike ([ADR 0001](adr/0001-cedar.md)):
 
 - **Any `Diagnostic.Errors` in either set → `deny` / `FAIL_CLOSED_POLICY`.** cedar-go skips policies whose condition errors, so an erroring `forbid` would otherwise not fire (fail open).
@@ -318,7 +325,7 @@ forbid (principal, action, resource) when { context.price_stale };
 
 ### 5.4 Bundles
 
-- A bundle = policies + schema + limiter config + allowlists. Identified by `sha256` over a sorted tar.
+- A bundle = policies + schema + limiter config + allowlists. Its hash is `sha256(JCS({"v":1,"files":[{"name","sha256"}…]}))`, with files sorted by name and hashed over their exact source bytes (ADR 0001 condition 3). Stdlib only, and independent of file order and of cedar-go's re-serialisation.
 - Activation requires: valid schema, replay suite passes, M-of-N signed approval (configurable; default 1-of-1 in dev).
 - **Cooling-off:** changes that *loosen* caps take effect after a configurable delay (default 24h) — defeats "raise the cap, then attack".
 
@@ -427,6 +434,7 @@ Rules:
 2. Channel adapters push the rendered intent. Phase 1: CLI (`stopbar approve <id>`) signing with an Ed25519 approver key; Phase 2: Slack/Telegram with deep link to a signing page; Phase 4: WebAuthn passkeys.
 3. Approval payload = `{escalation_id, payload_hash, decision: approve|reject, ts}` signed by approver key. Engine verifies signer ∈ approvers, payload_hash matches, not expired, no duplicates.
 4. Any `reject` → deny. Timeout (default 15m) → deny.
+5. **Approval re-evaluates against current state.** It does not replay the old decision. When quorum is reached, the engine re-runs **enrich → policy → limiter → sign** for the same request and `payload_hash`, with the verified approvals as a policy input (`context.approvals`: count and approver IDs). An escalation can wait up to 15 minutes, and in that time prices move, velocity windows fill and the circuit breaker can trip. A human approves the world as it was, but the system signs into the world as it is. The re-run can therefore still deny (for example `CAP_EXCEEDED`, or a deny policy that now matches) or escalate again. Policies decide what an approval satisfies: an escalate policy is written as `forbid … when { … && context.approvals.count < 1 }`, while deny policies ignore approvals. The resulting decision gets a fresh `iat`/`exp` and is audited as its own record, linked to the escalation.
 
 ## 10. Decision tokens and countersignatures
 

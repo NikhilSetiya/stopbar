@@ -54,7 +54,7 @@ t("CS-123","P1",E,"Per-tx and % balance caps","Absolute and pct_of_balance caps 
 t("CS-124","P1",E,"Circuit breaker","Tenant outflow breaker; M-of-N reset via CLI.","Breach -> CIRCUIT_OPEN until reset; alert metric emitted.",1.5,"CS-122","FR-LIM-3")
 
 E = "E4 Enrichment"
-t("CS-131","P1",E,"Price oracle client","Chainlink + CoinGecko with staleness bound and cache.","Stale -> price_stale=true; tests with fake clock.",2,"CS-104","FR-LIM-5")
+t("CS-131","P1",E,"Price oracle client","Chainlink + CoinGecko with staleness bound and cache. Make amount_usd optional in the schema (amount_usd?) so a stale price reaches the stale-price escalate policy instead of failing closed; policies must guard with `context has amount_usd` (unguarded reads error, and errors deny). Rendered intent says \"price unavailable\", never $0.","Stale -> price_stale=true, amount_usd absent, starter pack escalates (stale-price); tests with fake clock; rendering shows \"price unavailable\".",2,"CS-104","FR-LIM-5")
 t("CS-132","P1",E,"Balance provider","RPC balance reads (native + ERC-20) with cache.","Anvil test returns correct balances.",1,"CS-104")
 t("CS-133","P1",E,"Destination registry","Known destinations per tenant; similarity check (prefix/suffix).","Poisoned address flagged similar_to_known.",1.5,"CS-104","FR-IR-2")
 
@@ -66,7 +66,7 @@ t("CS-145","P1",E,"Destructive-action flags + salami caps","min_out_zero and exc
 t("CS-144","P1",E,"Decoder fuzzing","Go native fuzz targets on calldata.","24h fuzz run with no panics.",1,"CS-141")
 
 E = "E6 Escalation"
-t("CS-151","P1",E,"Approver keys + CLI approvals","Ed25519 approver keys; `stopbar approve/reject <id>` signs over payload_hash.","Wrong hash or key rejected; quorum honoured.",2,"CS-104","FR-ESC-1,2")
+t("CS-151","P1",E,"Approver keys + CLI approvals","Ed25519 approver keys; `stopbar approve/reject <id>` signs over payload_hash. On quorum, re-run enrich -> policy -> limiter -> sign against current state with approvals as policy context (LLD §9 step 5); never replay the escalated decision.","Wrong hash or key rejected; quorum honoured. Approval after the cap filled or price moved yields deny/escalate, not allow (test).",2,"CS-104","FR-ESC-1,2")
 t("CS-152","P1",E,"Escalation lifecycle","Create, poll (/v1/decisions), timeout -> deny, reject -> deny.","E2E: escalate -> approve -> signed tx returned.",1.5,"CS-151","FR-ESC-3")
 
 E = "E7 Decision & signer"
@@ -76,7 +76,7 @@ t("CS-163","P1",E,"AWS KMS signer + decision key","KMS secp256k1 for tx signing;
 t("CS-164","P1",E,"Turnkey adapter","Gatekeeper via Turnkey API key held only by Stopbar.","Sandbox org test passes.",2,"CS-162")
 
 E = "E8 Audit"
-t("CS-171","P1",E,"Hash-chained log","Append-only bbolt bucket; record per event in same tx as state change.","Tampering one record fails verify.",2,"CS-006","FR-AUD-1")
+t("CS-171","P1",E,"Hash-chained log","Append-only bbolt bucket; record per event in same tx as state change. Denials that cannot be audited (store down) must not be silent: high-severity log + stopbar_audit_unavailable_denials_total metric.","Tampering one record fails verify. Audit store down -> deny, error log and counter increments (test).",2,"CS-006","FR-AUD-1")
 t("CS-172","P1",E,"Checkpoints + verify CLI","Signed Merkle checkpoints; `stopbar audit verify`.","Verify passes clean log, fails tampered.",1.5,"CS-171,CS-161","FR-AUD-2,3")
 
 E = "E9 SDKs & provenance"

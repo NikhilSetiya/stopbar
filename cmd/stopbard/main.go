@@ -1,8 +1,10 @@
 // Command stopbard is the Stopbar policy service / sidecar.
 //
-// Until authentication lands (CS-103) it only listens on loopback, and until
-// the engine lands (CS-104) /v1/evaluate answers ENGINE_UNAVAILABLE: nothing
-// it returns can authorise a signature.
+// Until authentication lands (CS-103) it only listens on loopback. Without
+// -dev-world it runs no engine and /v1/evaluate answers ENGINE_UNAVAILABLE.
+// With -dev-world it runs the real engine and policy bundle on stub
+// components (internal/devstub): decisions are real, tokens are deliberately
+// unverifiable, so nothing it returns can authorise a signature.
 package main
 
 import (
@@ -10,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -18,26 +21,76 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/devstub"
+	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/gateway"
+	"github.com/NikhilSetiya/stopbar/internal/policy"
 	"github.com/NikhilSetiya/stopbar/internal/version"
 )
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:7777", "address to listen on (loopback only until CS-103 adds auth)")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	devWorld := flag.String("dev-world", "", "DEV ONLY: run the engine on stub components seeded from this world JSON (corpus setup shape)")
+	policies := flag.String("policies", "examples/policies", "policy bundle directory (with -dev-world)")
+	devAudit := flag.String("dev-audit", "", "DEV ONLY: append the stub audit chain to this file (default stderr)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("stopbard", version.Version)
 		return
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	if err := run(*listen, log); err != nil {
+	eval, err := devEngine(*devWorld, *policies, *devAudit, log)
+	if err != nil {
+		log.Error("stopbard exiting", "err", err)
+		os.Exit(1)
+	}
+	if err := run(*listen, eval, log); err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(addr string, log *slog.Logger) error {
+// devEngine wires the real engine and policy bundle to devstub components.
+// It returns nil (no engine) when world is empty.
+func devEngine(world, policies, auditPath string, log *slog.Logger) (gateway.Evaluator, error) {
+	if world == "" {
+		return nil, nil
+	}
+	w, err := devstub.LoadWorld(world)
+	if err != nil {
+		return nil, err
+	}
+	b, err := policy.Load(policies)
+	if err != nil {
+		return nil, err
+	}
+	var aw io.Writer = os.Stderr
+	if auditPath != "" {
+		f, err := os.OpenFile(auditPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		aw = f // closed at process exit
+	}
+	e, err := engine.New(engine.Config{
+		Decoders:  []engine.Decoder{devstub.Decoder{}},
+		Enrichers: []engine.Enricher{w},
+		Policy:    b,
+		Limiter:   &devstub.Limiter{},
+		Signer:    devstub.UnsignedSigner{},
+		Audit:     &devstub.Audit{W: aw},
+		Logger:    log,
+	})
+	if err != nil {
+		return nil, err
+	}
+	log.Warn("DEV STUBS ENABLED: decoder, enricher, limiter, signer and audit are stand-ins; tokens are unsigned. Not for production.",
+		"world", world, "policies", policies, "bundle_hash", b.Hash())
+	return e, nil
+}
+
+func run(addr string, eval gateway.Evaluator, log *slog.Logger) error {
 	if err := requireLoopback(addr); err != nil {
 		return err
 	}
@@ -46,7 +99,7 @@ func run(addr string, log *slog.Logger) error {
 		return err
 	}
 	srv := &http.Server{
-		Handler:           gateway.New(gateway.Config{Logger: log}),
+		Handler:           gateway.New(gateway.Config{Evaluator: eval, Logger: log}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -56,7 +109,7 @@ func run(addr string, log *slog.Logger) error {
 	}
 	// The resolved address goes to stdout so callers using :0 can find it.
 	fmt.Printf("stopbard %s listening on %s\n", version.Version, ln.Addr())
-	log.Info("listening", "addr", ln.Addr().String(), "version", version.Version, "engine", "none (CS-104)")
+	log.Info("listening", "addr", ln.Addr().String(), "version", version.Version, "engine", eval != nil)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

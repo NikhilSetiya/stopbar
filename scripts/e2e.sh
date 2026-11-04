@@ -58,6 +58,9 @@ python3 scripts/e2e_gateway.py "http://$ADDR"
 kill -TERM "$PID"; wait "$PID" && echo "ok   graceful shutdown on SIGTERM (exit 0)"
 PID=
 
+step "corpus attacks through live stopbard: real engine + policy, dev stubs (CS-111/112)"
+python3 scripts/e2e_corpus.py "$BIN/stopbard"
+
 # Tool pins; keep in step with .github/workflows/ci.yml.
 GOLANGCI_LINT=v2.15.0
 GOVULNCHECK=v1.9.0
@@ -77,7 +80,7 @@ fi
 
 # Pending stages, enabled as they land:
 #   CS-161/162  real signer + adapter verifier pass spec/vectors/decision-token-v1.json
-#   CS-111..    stopbard wires the real engine; corpus requests assert expected outcome, not 503
+#   CS-121+     replace dev stubs with real limiter/enrichers; replay stays green
 #   CS-171      audit chain verify over the replay run
 #   CS-191..193 full corpus replay (test/replay)
 
