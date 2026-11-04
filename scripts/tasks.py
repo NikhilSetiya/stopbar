@@ -46,6 +46,7 @@ t("CS-112","P1",E,"Outcome combiner","Deny/escalate/allow via @outcome annotatio
 t("CS-113","P1",E,"Starter policy pack","examples/policies/agent-wallet.cedar per LLD §5.3.","All seed corpus attacks get expected outcome.",1,"CS-112")
 t("CS-114","P1",E,"Policy dry-run","`stopbar policy test` against corpus + recorded requests.","Diff of outcomes printed; non-zero exit on regression.",1.5,"CS-112,CS-192","FR-POL-4")
 t("CS-115","P1",E,"Activation + cooling-off","Signed activation; loosening caps delayed by configurable period.","Loosening change inactive until delay passes; audited.",2,"CS-111,CS-151","FR-POL-5")
+t("CS-117","P1",E,"Tool-call starter policy pack (product)","Tool-call starter pack + trust map for agent tool use: session-taint deny on state-changing tools, and escalate credential/identity changes (account-identity-change) even in clean sessions. Removed from the AgentDojo pilot bundle (PILOT Amendment 2) because it can't add security under taint and would confound the decision rule; it belongs in the product.","Pack validates; identity changes escalate in a clean session; tainted state changes deny.",1,"CS-502","LLD §18.4")
 
 E = "E3 Limiter"
 t("CS-121","P1",E,"Sliding-window counters","Sub-bucket windows for {usd,count} per scope key (bbolt impl).","Rollover tests pass; no double count.",2,"CS-005","FR-LIM-2")

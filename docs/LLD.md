@@ -657,7 +657,7 @@ AgentDojo lets a defence intercept every tool call before execution. The adapter
 
 ### 18.4 Tool-call policy pack
 
-`examples/policies/agentdojo.cedar`. Context adds `tool: String`, `recipient_external: Bool`, `amount: decimal?`, `taint: Set<String>`. Starter rules: deny state-changing tools (`send_email`, `send_money`, `update_password`, `share_file`, …) to non-allowlisted recipients while untrusted taint is present; escalate any money movement above the suite's per-task cap. Policy written **before** looking at injection tasks; frozen bundle hash recorded per run.
+Tool-call bundles (CS-502) carry a `tool-trust.json`, hashed with the policies, that classifies every tool as read-only or state-changing and marks untrusted-output and account-identity tools. Undeclared tools fail closed. Cedar sees principal `Agent`, action `tool_call`, resource `Tool::<name>` and context `{state_changing, account_identity, taint}`. **Session taint is computed by Stopbar** (`policy.SessionTaint`, keyed by tenant, agent and `actor.session_id`, which is required) from the same file: a session is tainted once it evaluates a call to an untrusted-output tool. The pilot pack lives in `research/agentdojo/policies/banking/`. Originally proposed: `examples/policies/agentdojo.cedar`, with context adding `tool: String`, `recipient_external: Bool`, `amount: decimal?`, `taint: Set<String>`. Starter rules: deny state-changing tools (`send_email`, `send_money`, `update_password`, `share_file`, …) to non-allowlisted recipients while untrusted taint is present; escalate any money movement above the suite's per-task cap. Policy written **before** looking at injection tasks; frozen bundle hash recorded per run.
 
 ### 18.5 Shadow log (JSONL, one line per tool call)
 

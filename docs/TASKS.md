@@ -9,7 +9,7 @@ Estimates are focused build days for one engineer. IDs are stable; reference the
 | Phase | Tasks | Est. days |
 |---|---|---|
 | Phase 0 - Foundations (weeks 0-2) | 9 | 9 |
-| Phase 1 - Agent-wallet MVP (weeks 2-8) | 41 | 71 |
+| Phase 1 - Agent-wallet MVP (weeks 2-8) | 42 | 72 |
 | Phase 1R - Research track (parallel, weeks 4-10) | 11 | 21.5 |
 | Phase 2 - Corpus & community (weeks 8-12) | 6 | 12.5 |
 | Phase 3 - Code-mode agents (months 3-9) | 7 | 35 |
@@ -61,6 +61,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 | CS-113 | Starter policy pack | examples/policies/agent-wallet.cedar per LLD §5.3. | All seed corpus attacks get expected outcome. | 1d | CS-112 |  |
 | CS-114 | Policy dry-run | `stopbar policy test` against corpus + recorded requests. | Diff of outcomes printed; non-zero exit on regression. | 1.5d | CS-112,CS-192 | FR-POL-4 |
 | CS-115 | Activation + cooling-off | Signed activation; loosening caps delayed by configurable period. | Loosening change inactive until delay passes; audited. | 2d | CS-111,CS-151 | FR-POL-5 |
+| CS-117 | Tool-call starter policy pack (product) | Tool-call starter pack + trust map for agent tool use: session-taint deny on state-changing tools, and escalate credential/identity changes (account-identity-change) even in clean sessions. Removed from the AgentDojo pilot bundle (PILOT Amendment 2) because it can't add security under taint and would confound the decision rule; it belongs in the product. | Pack validates; identity changes escalate in a clean session; tainted state changes deny. | 1d | CS-502 | LLD §18.4 |
 
 ### E3 Limiter
 

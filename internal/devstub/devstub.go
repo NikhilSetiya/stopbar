@@ -125,6 +125,10 @@ type World struct {
 	Tokens            map[string]Token  `json:"tokens"`     // contract address -> token
 	PriceStale        bool              `json:"price_stale"`
 	Limits            []limiter.Rule    `json:"limits"` // empty: DefaultLimits
+	// LimitsDisabled runs the limiter with no caps (velocity is still
+	// tracked). For experiments where the limiter is not under test, such as
+	// the AgentDojo pilot, whose pre-registered arm is policy only.
+	LimitsDisabled bool `json:"limits_disabled"`
 	// PriorOutflowUSD1h is rejected: prior spend must be real reservations
 	// (a corpus `requests` sequence), not a number the enricher invents.
 	PriorOutflowUSD1h string `json:"prior_outflow_usd_1h"`
@@ -157,7 +161,10 @@ func LoadWorld(path string) (*World, error) {
 	if w.PriorOutflowUSD1h != "" {
 		return nil, fmt.Errorf("devstub: world %s: prior_outflow_usd_1h is not supported; model prior spend as a `requests` sequence", path)
 	}
-	if len(w.Limits) == 0 {
+	if w.LimitsDisabled && len(w.Limits) > 0 {
+		return nil, fmt.Errorf("devstub: world %s sets both limits and limits_disabled", path)
+	}
+	if len(w.Limits) == 0 && !w.LimitsDisabled {
 		w.Limits = DefaultLimits
 	}
 	return &w, nil
@@ -167,6 +174,9 @@ func LoadWorld(path string) (*World, error) {
 // missing price or balance is left unset (and the price marked stale), so the
 // policy layer fails closed rather than evaluating a guess.
 func (w *World) Enrich(_ context.Context, er *model.EnrichedRequest) error {
+	if er.Request.Action.Kind == model.KindToolCall {
+		return nil // no prices or balances for tool calls; taint comes from policy.SessionTaint
+	}
 	symbol, decimals := "ETH", 18
 	if er.Intent.Asset != nil {
 		t, ok := w.Tokens[strings.ToLower(er.Intent.Asset.Address)]

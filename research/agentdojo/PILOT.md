@@ -125,6 +125,30 @@ Assumptions:
    - The spend cap and the frozen-hash check.
 3. **Runs and report (~1 d):** a results page with every number, the CIs, the decision under §1, and the §3.2 disclosure.
 
+## 6a. Amendment 1 (2026-11-04, before any run, made during CS-502)
+
+1. **Every results folder records exactly what was run:**
+   - the **exact model ID** as sent to the API and as reported back in the response's `model` field (an alias can change underneath)
+   - the **run date and time** (UTC)
+   - the AgentDojo version, its sha256 and the benchmark version
+   - the Stopbar commit and the bundle hash
+
+   The harness writes these to `run.json` before the first episode and refuses to start if any of them is missing.
+2. **Attack success is AgentDojo's own security check, unmodified,** in the same way the attack is unmodified. An attack succeeded if the injection task's own check returns true on the post-episode environment. We don't reinterpret it, and we don't count a block as anything other than what that check reports.
+3. **Taint is computed by Stopbar, not the harness.** `stopbard` derives session taint from the frozen `tool-trust.json`: a session is tainted once it has evaluated a call to an untrusted-output tool. The harness only supplies `actor.session_id`, so the runner can't change what counts as untrusted.
+
+## 6b. Amendment 2 (2026-11-04, before any run and before the freeze, from the pack review)
+
+1. **The untrusted classification follows one general rule,** recorded in `tool-trust.json` as `principle`: *any tool output containing content not written by a trusted input during this session is untrusted.* When a definition doesn't establish who wrote a field, the output is untrusted. This is "absence of taint is never proof of safety" applied to classification, and it's the rule a real deployment would need. Under it, `get_scheduled_transactions` stays **untrusted**: the definition doesn't establish who wrote its free-text `subject`. The reviewer deliberately didn't use any memory of where AgentDojo places its injections. Applying the principle consistently matters more than the gap it produces.
+2. **`account-identity-change` is removed from the pilot bundle.** §3.4's escalation of `update_password` and `update_user_info` in clean sessions is dropped. It can't add security in this experiment:
+   - In an injected session, the injection arrives through untrusted output, so the session is already tainted, and `tainted-state-change` blocks those tools anyway (both are state-changing).
+   - In a clean session, the rule only blocks benign tasks.
+
+   So in the pilot it can only lower usefulness, and that loss would land in the **headline** gap the §1 decision rule reads. The kill criterion could then fire because of a rule that has nothing to do with taint, and separate accounting wouldn't fix that, because the decision is taken on the total. Escalating identity changes stays a sound **product** rule. It's kept for the product's tool-call starter pack (backlog: CS-117), outside this experiment.
+
+   **The pilot bundle is now one blocking rule, `tainted-state-change`, on top of default deny for undeclared tools.**
+3. These amendments supersede the corresponding wording in §3.3 and §3.4, which is left as originally written. They were made before any data existed, and they're frozen by the bundle hash in `policies/banking/FREEZE.md`.
+
 ## 7. Results (to be filled in only after the runs)
 
 *Empty by design.*

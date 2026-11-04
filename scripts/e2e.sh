@@ -66,6 +66,9 @@ python3 scripts/e2e_gateway.py "http://$ADDR"
 kill -TERM "$PID"; wait "$PID" && echo "ok   graceful shutdown on SIGTERM (exit 0)"
 PID=
 
+step "tool calls through live stopbard: session taint from the frozen trust map (CS-502)"
+python3 scripts/e2e_toolcall.py "$BIN/stopbard" research/agentdojo/policies/banking
+
 step "corpus attacks through live stopbard: real engine + policy, dev stubs (CS-111/112)"
 python3 scripts/e2e_corpus.py "$BIN/stopbard" "$BIN/stopbar"
 
