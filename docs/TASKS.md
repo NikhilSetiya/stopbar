@@ -93,7 +93,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 
 | ID | Task | Detail | Acceptance criteria | Est | Depends | Refs |
 |---|---|---|---|---|---|---|
-| CS-151 | Approver keys + CLI approvals | Ed25519 approver keys; `stopbar approve/reject <id>` signs over payload_hash. | Wrong hash or key rejected; quorum honoured. | 2d | CS-104 | FR-ESC-1,2 |
+| CS-151 | Approver keys + CLI approvals | Ed25519 approver keys; `stopbar approve/reject <id>` signs over payload_hash. On quorum, re-run enrich -> policy -> limiter -> sign against current state with approvals as policy context (LLD §9 step 5); never replay the escalated decision. | Wrong hash or key rejected; quorum honoured. Approval after the cap filled or price moved yields deny/escalate, not allow (test). | 2d | CS-104 | FR-ESC-1,2 |
 | CS-152 | Escalation lifecycle | Create, poll (/v1/decisions), timeout -> deny, reject -> deny. | E2E: escalate -> approve -> signed tx returned. | 1.5d | CS-151 | FR-ESC-3 |
 
 ### E7 Decision & signer
@@ -109,7 +109,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 
 | ID | Task | Detail | Acceptance criteria | Est | Depends | Refs |
 |---|---|---|---|---|---|---|
-| CS-171 | Hash-chained log | Append-only bbolt bucket; record per event in same tx as state change. | Tampering one record fails verify. | 2d | CS-006 | FR-AUD-1 |
+| CS-171 | Hash-chained log | Append-only bbolt bucket; record per event in same tx as state change. Denials that cannot be audited (store down) must not be silent: high-severity log + stopbar_audit_unavailable_denials_total metric. | Tampering one record fails verify. Audit store down -> deny, error log and counter increments (test). | 2d | CS-006 | FR-AUD-1 |
 | CS-172 | Checkpoints + verify CLI | Signed Merkle checkpoints; `stopbar audit verify`. | Verify passes clean log, fails tampered. | 1.5d | CS-171,CS-161 | FR-AUD-2,3 |
 
 ### E9 SDKs & provenance

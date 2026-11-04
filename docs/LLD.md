@@ -427,6 +427,7 @@ Rules:
 2. Channel adapters push the rendered intent. Phase 1: CLI (`stopbar approve <id>`) signing with an Ed25519 approver key; Phase 2: Slack/Telegram with deep link to a signing page; Phase 4: WebAuthn passkeys.
 3. Approval payload = `{escalation_id, payload_hash, decision: approve|reject, ts}` signed by approver key. Engine verifies signer ∈ approvers, payload_hash matches, not expired, no duplicates.
 4. Any `reject` → deny. Timeout (default 15m) → deny.
+5. **Approval re-evaluates against current state.** It does not replay the old decision. When quorum is reached, the engine re-runs **enrich → policy → limiter → sign** for the same request and `payload_hash`, with the verified approvals as a policy input (`context.approvals`: count and approver IDs). An escalation can wait up to 15 minutes, and in that time prices move, velocity windows fill and the circuit breaker can trip. A human approves the world as it was, but the system signs into the world as it is. The re-run can therefore still deny (for example `CAP_EXCEEDED`, or a deny policy that now matches) or escalate again. Policies decide what an approval satisfies: an escalate policy is written as `forbid … when { … && context.approvals.count < 1 }`, while deny policies ignore approvals. The resulting decision gets a fresh `iat`/`exp` and is audited as its own record, linked to the escalation.
 
 ## 10. Decision tokens and countersignatures
 
