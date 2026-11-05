@@ -24,6 +24,8 @@ jobs:
         run: go test -run='^$' -fuzz=FuzzTransformIdempotent -fuzztime=30s ./internal/canon/
       - name: fuzz smoke (gateway)
         run: go test -run='^$' -fuzz=FuzzEvaluate -fuzztime=30s ./internal/gateway/
+      - name: fuzz smoke (EVM decoder)
+        run: go test -run='^$' -fuzz=FuzzDecode -fuzztime=30s ./internal/decode/evm/
       - name: govulncheck
         run: GOTOOLCHAIN=local go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       # Every corpus attack through a live stopbard over HTTP: expected status,

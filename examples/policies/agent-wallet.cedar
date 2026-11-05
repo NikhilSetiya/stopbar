@@ -8,9 +8,17 @@ permit (principal, action in [Stopbar::Action::"transfer", Stopbar::Action::"con
 forbid (principal, action, resource)
 when { context.taint.containsAny(["untrusted_web","untrusted_onchain","untrusted_email"]) && !context.dest_known };
 
+// Flags are the union over every nested call, so these rules match whatever
+// the top-level action is: an approval inside a multicall is still caught.
 @id("unlimited-approval") @message("Unlimited token approval") @outcome("deny")
-forbid (principal, action == Stopbar::Action::"approve", resource)
+forbid (principal, action, resource)
 when { context.flags.contains("unlimited_approval") };
+
+@id("min-out-zero") @message("Swap accepts any output at all (no slippage protection)") @outcome("deny")
+forbid (principal, action, resource) when { context.flags.contains("min_out_zero") };
+
+@id("wallet-admin") @message("Changes who controls the wallet (owners, threshold, modules or guard)") @outcome("escalate")
+forbid (principal, action, resource) when { context.flags.contains("wallet_admin") };
 
 @id("delegatecall") @message("delegatecall hands control of the wallet to another contract") @outcome("deny")
 forbid (principal, action, resource) when { context.flags.contains("delegatecall") };

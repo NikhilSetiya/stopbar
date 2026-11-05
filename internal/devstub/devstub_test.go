@@ -3,16 +3,14 @@ package devstub
 import (
 	"context"
 	"math/big"
-	"slices"
-	"strings"
 	"testing"
 
+	evmdec "github.com/NikhilSetiya/stopbar/internal/decode/evm"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
 
 var (
-	_ engine.Decoder  = Decoder{}
 	_ engine.Enricher = (*World)(nil)
 )
 
@@ -22,61 +20,6 @@ func evm(data string) model.Action {
 		TxType: &two, TxNonce: "0", GasLimit: "100000", MaxFeePerGas: "2000000000", MaxPriorityFeePerGas: "1000000000"}
 }
 
-func TestExcessiveFeeFlag(t *testing.T) {
-	for name, tt := range map[string]struct {
-		gas, fee string
-		flagged  bool
-	}{
-		"normal":                {"100000", "2000000000", false},
-		"30M gas x 5000 gwei":   {"30000000", "5000000000000", true},
-		"huge per-gas fee":      {"21000", "2000000000000", true},
-		"huge gas limit":        {"20000000", "1", true},
-		"0.05 ETH max fee edge": {"50000", "1000000000000", false},
-	} {
-		t.Run(name, func(t *testing.T) {
-			a := evm("")
-			a.GasLimit, a.MaxFeePerGas = tt.gas, tt.fee
-			in, err := Decoder{}.Decode(context.Background(), a)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := slices.Contains(in.Flags, "excessive_fee"); got != tt.flagged {
-				t.Fatalf("flags %v", in.Flags)
-			}
-		})
-	}
-}
-
-func TestDecoder(t *testing.T) {
-	transfer := "0xa9059cbb0000000000000000000000009f30000000000000000000000000000000000c21000000000000000000000000000000000000000000027b46536c66c8e3000000"
-	approveMax := "0x095ea7b3000000000000000000000000" + strings.Repeat("ab", 20) + strings.Repeat("f", 64)
-	for name, tt := range map[string]struct {
-		data, kind, dest string
-		flags            []string
-		err              bool
-	}{
-		"erc20 transfer":    {transfer, "transfer", "0x9f30000000000000000000000000000000000c21", nil, false},
-		"native":            {"", "transfer", "0x3333333333333333333333333333333333333333", nil, false},
-		"unlimited approve": {approveMax, "approve", "0x" + strings.Repeat("ab", 20), []string{"unlimited_approval"}, false},
-		"unknown selector":  {"0xdeadbeef", "contract_call", "0x3333333333333333333333333333333333333333", []string{"unknown_call"}, false},
-		"truncated":         {transfer[:70], "", "", nil, true},
-		"dirty address":     {"0xa9059cbb" + strings.Repeat("1", 64) + strings.Repeat("0", 64), "", "", nil, true},
-	} {
-		t.Run(name, func(t *testing.T) {
-			in, err := Decoder{}.Decode(context.Background(), evm(tt.data))
-			if (err != nil) != tt.err {
-				t.Fatalf("err = %v", err)
-			}
-			if tt.err {
-				return
-			}
-			if in.Kind != tt.kind || in.Destination != tt.dest || strings.Join(in.Flags, ",") != strings.Join(tt.flags, ",") {
-				t.Fatalf("got %+v", in)
-			}
-		})
-	}
-}
-
 func TestWorldEnrich(t *testing.T) {
 	w := &World{
 		KnownDestinations: []string{"0x1111111111111111111111111111111111111111"},
@@ -84,7 +27,7 @@ func TestWorldEnrich(t *testing.T) {
 		PricesUSD:         map[string]string{"DRB": "0.058", "ETH": "3500"},
 		Tokens:            map[string]Token{"0x3333333333333333333333333333333333333333": {Symbol: "DRB", Decimals: 18}},
 	}
-	in, err := Decoder{}.Decode(context.Background(), evm("0xa9059cbb0000000000000000000000009f30000000000000000000000000000000000c21000000000000000000000000000000000000000000027b46536c66c8e3000000"))
+	in, err := evmdec.Decoder{}.Decode(context.Background(), evm("0xa9059cbb0000000000000000000000009f30000000000000000000000000000000000c21000000000000000000000000000000000000000000027b46536c66c8e3000000"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,5 +60,24 @@ func TestDecimalStringRoundsUp(t *testing.T) {
 	r, _ := new(big.Rat).SetString("1/3")
 	if got := *decimalString(r); got != "0.333333333333333334" {
 		t.Fatalf("1/3 -> %s", got)
+	}
+}
+
+// A batch with several outflows has no single amount. Reading that as $0
+// would slip it under every cap, so it fails closed until CS-131 prices
+// outflows; an approval moves no funds when made, so it is $0 of spend.
+func TestBatchesAndApprovalsArePricedSafely(t *testing.T) {
+	w := &World{PricesUSD: map[string]string{"ETH": "3500", "DRB": "1"},
+		Tokens: map[string]Token{"0x3333333333333333333333333333333333333333": {Symbol: "DRB", Decimals: 18}}}
+	er := &model.EnrichedRequest{Request: model.ActionRequest{Action: evm("")}, Velocity: map[string]model.Velocity{},
+		Intent: model.IntentSummary{Kind: "contract_call", Flags: []string{"multi_transfer"}}}
+	if err := w.Enrich(context.Background(), er); err == nil {
+		t.Fatal("multi_transfer batch was priced; must fail closed")
+	}
+	max := "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+	er = &model.EnrichedRequest{Request: model.ActionRequest{Action: evm("")}, Velocity: map[string]model.Velocity{},
+		Intent: model.IntentSummary{Kind: "approve", Asset: &model.Asset{ChainID: 8453, Address: "0x3333333333333333333333333333333333333333"}, Amount: max, Flags: []string{"unlimited_approval"}}}
+	if err := w.Enrich(context.Background(), er); err != nil || er.AmountUSD == nil || *er.AmountUSD != "0" {
+		t.Fatalf("approval priced as spend: %v %v", er.AmountUSD, err)
 	}
 }

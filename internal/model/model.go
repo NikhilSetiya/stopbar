@@ -97,14 +97,25 @@ type SDKInfo struct {
 }
 
 // IntentSummary is the decoder's independent, human-readable rendering (LLD §3.2).
+//
+// Kind is the policy action (transfer, approve, contract_call). Op names the
+// exact operation (e.g. erc20_transfer, swap_exact_in, safe_exec). For a call
+// that contains calls (multicall, Safe, MultiSend, Universal Router), Calls
+// holds each inner intent, and Flags is the union of every flag found at any
+// depth, so a flag can't hide inside a batch. Asset, Amount and Destination
+// describe the single value-moving effect when there is exactly one; with
+// several, they are empty and Flags has multi_transfer.
 type IntentSummary struct {
-	Kind        string   `json:"kind"`
-	Asset       *Asset   `json:"asset,omitempty"`
-	Amount      string   `json:"amount,omitempty"`
-	Destination string   `json:"destination,omitempty"`
-	Flags       []string `json:"flags"`
-	Human       string   `json:"human"`
-	PayloadHash string   `json:"payload_hash"`
+	Kind        string          `json:"kind"`
+	Op          string          `json:"op,omitempty"`
+	Target      string          `json:"target,omitempty"` // contract called, for inner calls
+	Asset       *Asset          `json:"asset,omitempty"`
+	Amount      string          `json:"amount,omitempty"`
+	Destination string          `json:"destination,omitempty"`
+	Flags       []string        `json:"flags"`
+	Human       string          `json:"human"`
+	Calls       []IntentSummary `json:"calls,omitempty"`
+	PayloadHash string          `json:"payload_hash"`
 }
 
 // Asset is a token on a chain.

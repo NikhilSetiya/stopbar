@@ -346,24 +346,45 @@ forbid (principal, action, resource) when { context.price_stale };
 
 ### 6.1 Pipeline
 
-1. Native value transfer if `data` empty.
-2. Selector lookup: built-in table (ERC-20/721/1155, Permit2, Safe `execTransaction`, multicall variants) → local 4byte DB fallback.
-3. Recursive decode for multicall / Safe inner txs (max depth 4; deeper → flag `opaque`).
-4. Unknown selector → flag `unknown_call` (policy decides; default escalate).
+Implemented in `internal/decode/evm` (CS-141/142). It is stdlib-only, like the trusted core, because it decides what the policy sees. Its selector table is cross-checked against keccak-256 in `internal/signer`, where go-ethereum is allowed.
+
+1. **Native transfer** if `data` is empty.
+2. **Selector lookup** in the built-in table:
+   - ERC-20: transfer, transferFrom, approve, increaseAllowance, EIP-2612 permit
+   - ERC-721 and ERC-1155 transfers, setApprovalForAll
+   - Permit2: approve, permit single and batch, transferFrom
+   - Uniswap V2 router, V3 SwapRouter and SwapRouter02 swaps
+   - Universal Router `execute`: V2/V3 swaps, Permit2 permit and transfer, sweep, pay-portion, wrap and unwrap. Other commands are `opaque`.
+   - Safe `execTransaction`, MultiSend, and owner/module/guard changes
+   - Proxy upgrades
+   - Multicall: Uniswap `multicall` variants, Multicall3 `aggregate*`
+
+   A local 4byte fallback, and 1inch/0x routers, aren't implemented yet. Those calls are `unknown_call`.
+3. **Recursion** into multicall, Safe and MultiSend inner calls, and Universal Router commands, up to depth 4. Anything deeper is `opaque`.
+   - `IntentSummary.calls` holds the inner intents.
+   - **The top-level `flags` are the union over every depth**, so a flag can't hide inside a batch, and policies match flags whatever the top-level action is.
+   - If exactly one inner call moves value, its asset, amount and destination are lifted to the top. With several, the top has none and is flagged `multi_transfer` (enrichment fails closed until CS-131 prices each outflow).
+   - Native value attached to a call that doesn't account for it is shown as its own outflow.
+4. **Errors and unknowns:**
+   - A malformed call to a known selector is a decode error (`FAIL_CLOSED_DECODER`), never a guess.
+   - An unknown selector is flagged `unknown_call` (the policy decides; the default is escalate).
+5. **Fee terms** are checked against per-chain limits (`evm.Chains`: max fee per gas, gas limit, total max fee). A transaction for an unlisted chain is a decode error, since fee sanity can't be judged without the chain.
 
 ### 6.2 Risk flags
 
 | Flag | Rule |
 |---|---|
-| `unlimited_approval` | approve/permit amount ≥ 2^255 or ≥ 10× balance |
-| `delegatecall` | Safe op = 1, or known delegatecall patterns |
-| `proxy_upgrade` | `upgradeTo*`, `changeMasterCopy`, implementation slot writes |
-| `new_destination` | destination absent from tenant registry |
-| `similar_destination` | same first 4 + last 4 hex chars as a known destination but different address |
-| `first_time_contract` | contract never interacted with by this wallet |
-| `opaque` | nesting > depth or undecodable inner call |
-| `min_out_zero` | known swap selector (Uniswap V2/V3 routers, Universal Router, 1inch, 0x) with `amountOutMin` / `minReturn` = 0 |
-| `excessive_slippage` | swap minimum output below quoted output × (1 − tenant max slippage, default 3%) |
+| `unlimited_approval` | ERC-20 approve/increaseAllowance/permit amount ≥ 2^255; Permit2 amount ≥ 2^159; `setApprovalForAll(_, true)`. ("≥ 10× balance" needs the balance, so it belongs to the enricher.) |
+| `delegatecall` | Safe `operation = 1` to anything other than a canonical MultiSend carrying `multiSend`; any MultiSend entry with `operation = 1` |
+| `proxy_upgrade` | `upgradeTo`, `upgradeToAndCall`, Safe `changeMasterCopy`, `setFallbackHandler` |
+| `wallet_admin` | Safe owner, threshold, module or guard change |
+| `third_party_from` | `transferFrom`-style move whose source isn't the sender (e.g. spending someone's allowance) |
+| `multi_transfer` | more than one outflow in one transaction |
+| `new_destination` / `similar_destination` / `first_time_contract` | need the tenant's registry, so they're added by the enricher (CS-133), not the decoder |
+| `opaque` | nesting > depth, or a Universal Router command that isn't decoded |
+| `min_out_zero` | exact-in swap with minimum output 0 (Uniswap V2/V3 routers, SwapRouter02, Universal Router) |
+| `excessive_slippage` | swap minimum output below quoted output × (1 − tenant max slippage, default 3%). Needs a quote, so it's not implemented yet. |
+| `excessive_fee` | fee terms above the chain's limits (`evm.Chains`) |
 | `unknown_call` | selector unknown |
 
 ### 6.3 Human rendering

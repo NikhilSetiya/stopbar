@@ -13,35 +13,16 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/NikhilSetiya/stopbar/internal/limiter"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
 
-// ---- decoder (replaced by CS-141/142) ----
-
-// Decoder decodes the calldata shapes the seed corpus needs: ERC-20
-// transfer and approve, and plain native transfers. Anything else is a
-// contract_call flagged unknown_call, so the starter policy escalates it.
-type Decoder struct{}
-
-const (
-	selTransfer = "a9059cbb"
-	selApprove  = "095ea7b3"
-)
-
-var maxUint256 = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
-
-// Fee-drain thresholds (dev values; CS-141 makes them per chain). A zero-value
-// transaction with an absurd fee burns ETH while passing value caps.
-var (
-	maxSaneFeeWei    = big.NewInt(50_000_000_000_000_000) // 0.05 ETH total max fee
-	maxSaneFeePerGas = big.NewInt(1_000_000_000_000)      // 1,000 gwei
-	maxSaneGasLimit  = big.NewInt(15_000_000)
-)
-
 // MaxFeeWei is gas_limit × max_fee_per_gas: the most the tx can pay in fees.
+// (The decoder stub that lived here was replaced by internal/decode/evm,
+// CS-141/142.)
 func MaxFeeWei(a model.Action) *big.Int {
 	g, _ := new(big.Int).SetString(a.GasLimit, 10)
 	f, _ := new(big.Int).SetString(a.MaxFeePerGas, 10)
@@ -49,68 +30,6 @@ func MaxFeeWei(a model.Action) *big.Int {
 		return nil
 	}
 	return g.Mul(g, f)
-}
-
-func (Decoder) Supports(a model.Action) bool { return a.Kind == model.KindEVMTx }
-
-// Decode renders the intent and adds excessive_fee when the fee terms are
-// out of line, whatever the call itself is.
-func (d Decoder) Decode(ctx context.Context, a model.Action) (model.IntentSummary, error) {
-	in, err := d.decode(ctx, a)
-	if err != nil {
-		return in, err
-	}
-	g, _ := new(big.Int).SetString(a.GasLimit, 10)
-	f, _ := new(big.Int).SetString(a.MaxFeePerGas, 10)
-	if fee := MaxFeeWei(a); fee == nil || fee.Cmp(maxSaneFeeWei) > 0 || f.Cmp(maxSaneFeePerGas) > 0 || g.Cmp(maxSaneGasLimit) > 0 {
-		in.Flags = append(in.Flags, "excessive_fee")
-		in.Human += fmt.Sprintf(" (max fee %s wei: excessive)", MaxFeeWei(a))
-	}
-	return in, nil
-}
-
-func (Decoder) decode(_ context.Context, a model.Action) (model.IntentSummary, error) {
-	data := strings.ToLower(strings.TrimPrefix(a.Data, "0x"))
-	to := strings.ToLower(a.To)
-	if data == "" {
-		return model.IntentSummary{
-			Kind: "transfer", Amount: a.ValueWei, Destination: to, Flags: []string{},
-			Human: fmt.Sprintf("Send %s wei (native) to %s", a.ValueWei, to),
-		}, nil
-	}
-	if len(data) >= 8 && (data[:8] == selTransfer || data[:8] == selApprove) {
-		if len(data) != 8+64+64 {
-			return model.IntentSummary{}, fmt.Errorf("devstub: %s calldata has %d hex chars, want 136", data[:8], len(data))
-		}
-		word1, word2 := data[8:72], data[72:136]
-		if strings.Trim(word1[:24], "0") != "" {
-			return model.IntentSummary{}, errors.New("devstub: address argument has non-zero high bytes")
-		}
-		dest := "0x" + word1[24:]
-		amt, ok := new(big.Int).SetString(word2, 16)
-		if !ok {
-			return model.IntentSummary{}, errors.New("devstub: bad amount word")
-		}
-		asset := &model.Asset{ChainID: *a.ChainID, Address: to}
-		if data[:8] == selTransfer {
-			return model.IntentSummary{
-				Kind: "transfer", Asset: asset, Amount: amt.String(), Destination: dest, Flags: []string{},
-				Human: fmt.Sprintf("Transfer %s units of token %s to %s", amt, to, dest),
-			}, nil
-		}
-		flags := []string{}
-		if amt.Cmp(maxUint256) == 0 {
-			flags = append(flags, "unlimited_approval")
-		}
-		return model.IntentSummary{
-			Kind: "approve", Asset: asset, Amount: amt.String(), Destination: dest, Flags: flags,
-			Human: fmt.Sprintf("Approve %s to spend %s units of token %s", dest, amt, to),
-		}, nil
-	}
-	return model.IntentSummary{
-		Kind: "contract_call", Destination: to, Flags: []string{"unknown_call"},
-		Human: fmt.Sprintf("Call contract %s with undecoded calldata", to),
-	}, nil
 }
 
 // ---- enricher (replaced by CS-131/132/133) ----
@@ -177,6 +96,12 @@ func (w *World) Enrich(_ context.Context, er *model.EnrichedRequest) error {
 	if er.Request.Action.Kind == model.KindToolCall {
 		return nil // no prices or balances for tool calls; taint comes from policy.SessionTaint
 	}
+	// Several outflows (a batch moving more than one asset or amount) can't be
+	// priced as one amount; reading the empty amount as $0 would slip under
+	// every cap. CS-131 prices each outflow and sums them.
+	if slices.Contains(er.Intent.Flags, "multi_transfer") {
+		return errors.New("devstub: several outflows in one transaction can't be priced yet (CS-131)")
+	}
 	symbol, decimals := "ETH", 18
 	if er.Intent.Asset != nil {
 		t, ok := w.Tokens[strings.ToLower(er.Intent.Asset.Address)]
@@ -186,8 +111,11 @@ func (w *World) Enrich(_ context.Context, er *model.EnrichedRequest) error {
 		symbol, decimals = t.Symbol, t.Decimals
 	}
 	raw, ok := new(big.Rat).SetString(er.Intent.Amount)
-	if !ok {
-		raw = new(big.Rat) // contract calls carry no amount
+	if !ok || er.Intent.Kind == "approve" {
+		// Contract calls carry no amount, and an approval moves no funds when
+		// it is made: its risk is in the decoder's flags (unlimited_approval),
+		// not in spend.
+		raw = new(big.Rat)
 	}
 	tokens := new(big.Rat).Quo(raw, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)))
 
