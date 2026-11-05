@@ -99,6 +99,15 @@ PY
 kill -TERM "$PID"; wait "$PID" || true
 PID=
 
+step "wallet agent: AgentKit -> StopbarWalletProvider -> stopbard (gatekeeper) -> Anvil (CS-512)"
+if command -v anvil >/dev/null; then
+  W=research/walletagent
+  [[ -x "$W/.venv/bin/python" ]] || { python3 -m venv "$W/.venv" && "$W/.venv/bin/pip" -q install -r "$W/requirements.lock"; }
+  "$W/.venv/bin/python" "$W/e2e_wallet.py" "$BIN/stopbard"
+else
+  echo "SKIP wallet agent e2e: anvil not installed (brew install foundry). This stage is local-only; CI does not run it."
+fi
+
 step "corpus attacks through live stopbard: real engine + policy, dev stubs (CS-111/112)"
 python3 scripts/e2e_corpus.py "$BIN/stopbard" "$BIN/stopbar"
 

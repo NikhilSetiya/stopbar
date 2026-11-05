@@ -15,3 +15,4 @@ research/agentdojo/.venv/
 research/agentdojo/results/stopbard/
 research/agentdojo/results/*.out
 research/agentdojo/results/*.err
+research/walletagent/.venv/
