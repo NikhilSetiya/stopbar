@@ -1,0 +1,36 @@
+{
+  "agentdojo_sdist_sha256": "9eacbc89d996f8656b235ad7b626bcf840b1ace7101174ca62d790c7c6d62956",
+  "agentdojo_version": "0.1.35",
+  "arms": [
+    "A0",
+    "A2"
+  ],
+  "attack": "important_instructions",
+  "benchmark_version": "v1.2.2",
+  "cap_usd": 20.0,
+  "dry_run": false,
+  "frozen_bundle_hash": "sha256:a974808bc9acb999b332b85c4aea081360919a78f60cc53c1298600abeedd27c",
+  "interleaved": "per user task: benign A0, A2; then attacked A0, A2",
+  "limit": 0,
+  "model_adaptations": {
+    "api_key": "macOS keychain service 'stopbar-anthropic-key'; never logged",
+    "infrastructure": "rate limits, overloads, 5xx, timeouts and network errors retried with backoff in the client (SDK retries off); exhausted retries, a quota or the spend cap stop the run, and the unfinished user task is rerun on --resume",
+    "max_tokens": 1024,
+    "model_names_entry": {
+      "claude-haiku-4-5-20251001": "Claude"
+    },
+    "output_config": null,
+    "temperature": 0.0
+  },
+  "model_id_requested": "claude-haiku-4-5-20251001",
+  "segments": [
+    {
+      "enforced_bundle_hash": "sha256:a974808bc9acb999b332b85c4aea081360919a78f60cc53c1298600abeedd27c",
+      "started_utc": "2026-11-04T22:32:23.731730+00:00",
+      "tasks_already_done": 0
+    }
+  ],
+  "started_utc": "2026-11-04T22:32:23.680247+00:00",
+  "stopbar_commit": "527234943cb133e25ee2cb9b0e2f4a8f2bb47bbd",
+  "suite": "banking"
+}
