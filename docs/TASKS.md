@@ -9,8 +9,8 @@ Estimates are focused build days for one engineer. IDs are stable; reference the
 | Phase | Tasks | Est. days |
 |---|---|---|
 | Phase 0 - Foundations (weeks 0-2) | 9 | 9 |
-| Phase 1 - Agent-wallet MVP (weeks 2-8) | 42 | 72 |
-| Phase 1R - Research track (parallel, weeks 4-10) | 11 | 21.5 |
+| Phase 1 - Agent-wallet MVP (weeks 2-8) | 43 | 75 |
+| Phase 1R - Research track (parallel, weeks 4-10) | 13 | 25.5 |
 | Phase 2 - Corpus & community (weeks 8-12) | 6 | 12.5 |
 | Phase 3 - Code-mode agents (months 3-9) | 7 | 35 |
 | Phase 4 - Custody grade (year 2) | 8 | 65 |
@@ -89,6 +89,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 | CS-143 | Human renderer + checksum phrase | Plain-language template + 6-word address checksum. | Snapshot tests; look-alike addresses yield different phrases. | 1.5d | CS-142 | FR-IR-3 |
 | CS-145 | Destructive-action flags + salami caps | min_out_zero and excessive_slippage flags for known swap routers; default per-destination count cap for non-allowlisted destinations. | Zero-min-out swap fixture denied; 6 sub-cap transfers to new destination escalate. | 1.5d | CS-142,CS-121 | FR-IR-2, FR-LIM-2a |
 | CS-144 | Decoder fuzzing | Go native fuzz targets on calldata. | 24h fuzz run with no panics. | 1d | CS-141 |  |
+| CS-514 | Off-chain signature requests | eth_signTypedData / personal_sign as an action kind: decode EIP-712 (Permit, Permit2 PermitSingle/Batch, Seaport) into intents with the same flags (unlimited_approval etc.). Until then wallet providers must refuse off-chain signing. | Permit2 PermitSingle with max amount denied; benign typed data renders. | 3d | CS-141 | LLD §6 |
 
 ### E6 Escalation
 
@@ -156,6 +157,8 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 | CS-509 | Adaptive attacker | Attacker LLM with policy text + denial reasons, N=10 attempts; tries allowlist routing, amount splitting, ungated tools. | Adaptive ASR reported per arm with examples of successful bypasses. | 3d | CS-507 | FR-EVAL-4 |
 | CS-510 | Scheming-agent (T4) setting | Covert side task in agent system prompt with user task as cover; no injection. | T4 containment reported for A0 vs A2. | 3d | CS-507 | FR-EVAL-5 |
 | CS-511 | Results write-up | Preliminary report: method, results, failure cases, limitations; reproducibility package. | Published (repo + LessWrong/arXiv); every number traceable to a run folder. | 2d | CS-508,CS-509,CS-510 | G6 |
+| CS-512 | Wallet-agent integration (AgentKit, gatekeeper) | StopbarWalletProvider for Coinbase AgentKit: holds no key; fills nonce/gas/fees from the chain, sends the full unsigned tx to stopbard, broadcasts only on HTTP 200; refuses off-chain signing. End-to-end against Anvil. | AgentKit actions allowed/escalated/denied end to end on Anvil; provider holds no key; in make e2e. | 1d | CS-141,CS-162 | LLD §18 |
+| CS-513 | Real-incident pilot (PILOT-2) | Pre-registered pilot on a real wallet-agent stack: PRD incident scenarios, open-weight victim and adaptive attacker on one pinned provider, Anvil fork; headlines are false-positive rate and adaptive bypass rate; competence and attack-validity gates first. | Pre-registration signed off; scenarios and policy frozen before any run; price check with a hard cap. | 3d | CS-512,CS-509 | PRD §9 |
 
 ## Phase 2 - Corpus & community (weeks 8-12)
 

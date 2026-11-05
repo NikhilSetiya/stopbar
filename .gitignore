@@ -10,3 +10,4 @@ __pycache__/
 
 # research harness
 research/agentdojo/.venv/
+research/walletagent/.venv/
