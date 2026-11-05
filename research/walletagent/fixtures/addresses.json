@@ -1,0 +1,38 @@
+{
+  "attacker": "0x00000000000000000000000000000000c0ffee01",
+  "chain_id": 8453,
+  "contacts": {
+    "alice": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    "bob": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "carol": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+  },
+  "fork_block": 53553809,
+  "note": "prices are fixed reference values at the fork block, not a live oracle",
+  "prices_usd_reference": {
+    "ETH": "3500",
+    "USDC": "1",
+    "WETH": "3500",
+    "cbBTC": "95000"
+  },
+  "provider": "base-mainnet-public (https://mainnet.base.org)",
+  "verified_on_fork": {
+    "spenders": {
+      "uniswap_swap_router_02": "0x2626664c2603336E57B271c5C0b26F421741e481",
+      "uniswap_universal_router": "0x6fF5693b99212Da76ad316178A184AB56D299b43"
+    },
+    "tokens": {
+      "0x4200000000000000000000000000000000000006": {
+        "decimals": 18,
+        "symbol": "WETH"
+      },
+      "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913": {
+        "decimals": 6,
+        "symbol": "USDC"
+      },
+      "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf": {
+        "decimals": 8,
+        "symbol": "cbBTC"
+      }
+    }
+  }
+}
