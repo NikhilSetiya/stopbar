@@ -80,4 +80,13 @@ func TestBatchesAndApprovalsArePricedSafely(t *testing.T) {
 	if err := w.Enrich(context.Background(), er); err != nil || er.AmountUSD == nil || *er.AmountUSD != "0" {
 		t.Fatalf("approval priced as spend: %v %v", er.AmountUSD, err)
 	}
+	if er.ApprovalUSD != nil {
+		t.Fatalf("unlimited approval got a value %s; it must have none", *er.ApprovalUSD)
+	}
+	// A bounded approval carries its value (250 DRB at $1), so policy can cap it.
+	er = &model.EnrichedRequest{Request: model.ActionRequest{Action: evm("")}, Velocity: map[string]model.Velocity{},
+		Intent: model.IntentSummary{Kind: "approve", Asset: &model.Asset{ChainID: 8453, Address: "0x3333333333333333333333333333333333333333"}, Amount: "250000000000000000000", Flags: []string{}}}
+	if err := w.Enrich(context.Background(), er); err != nil || er.ApprovalUSD == nil || *er.ApprovalUSD != "250" || *er.AmountUSD != "0" {
+		t.Fatalf("bounded approval: approval_usd %v amount_usd %v %v", er.ApprovalUSD, er.AmountUSD, err)
+	}
 }

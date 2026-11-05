@@ -20,7 +20,8 @@ namespace Stopbar {
         vel_1h_usd: decimal,
         vel_24h_usd: decimal,
         vel_1h_count: Long,
-        minutes_since_code_change?: Long
+        minutes_since_code_change?: Long,
+        approval_usd?: decimal
       }
     };
 }

@@ -154,6 +154,7 @@ Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decod
 |---|---|---|
 | `amount_usd` | decimal | price oracle; `null` + `price_stale=true` if stale. **Decided (CS-131):** `amount_usd` becomes optional in the schema (`amount_usd?`), so a stale price reaches the `stale-price` escalate policy. This is safe: a policy that reads it without `context has amount_usd` errors, and errors deny. Token-count caps still apply without a price. The rendered intent must say "price unavailable", never $0. Until CS-131 the schema requires it, so a stale price currently denies. |
 | `pct_of_balance` | decimal | balance provider |
+| `approval_usd?` | decimal | price oracle. It's the value a **bounded** approval lets the spender move. It's absent for unlimited approvals and for anything that isn't an approval, so a policy must test `context has approval_usd`. An approval itself counts as $0 of spend (`amount_usd`); its risk lives in this field and in the decoder's flags. The starter pack's `bounded-approval` permits ≤ $1,000 to a known spender. |
 | `velocity.{1m,1h,24h}.usd` / `.count` | decimal/int | limiter snapshot |
 | `destination.known` | bool | destination registry |
 | `destination.similar_to_known` | bool | address-similarity check |

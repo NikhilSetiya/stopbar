@@ -134,6 +134,9 @@ func (b *Bundle) cedarRequest(er model.EnrichedRequest) (cedar.Request, cedar.En
 	if er.MinutesSinceCodeChange != nil {
 		ctx["minutes_since_code_change"] = cedar.Long(*er.MinutesSinceCodeChange)
 	}
+	if er.ApprovalUSD != nil {
+		ctx["approval_usd"] = dec("approval_usd", er.ApprovalUSD)
+	}
 	if len(problems) > 0 {
 		sort.Strings(problems)
 		return cedar.Request{}, nil, errors.New("policy: incomplete context: " + strings.Join(problems, "; "))
