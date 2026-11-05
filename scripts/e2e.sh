@@ -20,9 +20,10 @@ else
   step "test (NO RACE: C toolchain unavailable; on macOS run 'sudo xcodebuild -license')"
   CGO_ENABLED=0 go test -count=1 ./...
 fi
-step "fuzz smoke (canonicaliser, gateway)"
+step "fuzz smoke (canonicaliser, gateway, EVM decoder)"
 go test -run='^$' -fuzz=FuzzTransformIdempotent -fuzztime="${FUZZTIME:-10s}" ./internal/canon/
 go test -run='^$' -fuzz=FuzzEvaluate -fuzztime="${FUZZTIME:-10s}" ./internal/gateway/
+go test -run='^$' -fuzz=FuzzDecode -fuzztime="${FUZZTIME:-10s}" ./internal/decode/evm/
 
 step "policy: starter pack validates and combines (CS-007)"
 go test -count=1 -run 'TestSpike' ./internal/policy/

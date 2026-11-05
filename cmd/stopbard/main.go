@@ -25,6 +25,7 @@ import (
 
 	"github.com/NikhilSetiya/stopbar/internal/audit"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
+	"github.com/NikhilSetiya/stopbar/internal/decode/evm"
 	"github.com/NikhilSetiya/stopbar/internal/decode/toolcall"
 	"github.com/NikhilSetiya/stopbar/internal/devstub"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
@@ -172,7 +173,7 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		enrichers = append(enrichers, &policy.SessionTaint{Bundle: b})
 	}
 	e, err := engine.New(engine.Config{
-		Decoders:  []engine.Decoder{devstub.Decoder{}, toolcall.Decoder{}},
+		Decoders:  []engine.Decoder{evm.Decoder{}, toolcall.Decoder{}},
 		Enrichers: enrichers,
 		Policy:    b,
 		Limiter:   lim,
