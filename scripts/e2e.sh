@@ -79,15 +79,22 @@ echo '{"limits_disabled": true}' > "$BIN/pilot-world.json"
 PID=$!
 for _ in $(seq 50); do grep -q 'listening on' "$BIN/pilot-out" 2>/dev/null && break; sleep 0.1; done
 PADDR="$(sed -n 's/.*listening on //p' "$BIN/pilot-out")"
-(cd "$H" && .venv/bin/python -m harness.run --arm A2 --dry-run --limit 3 --stopbard "http://$PADDR" --out "$BIN/pilot-results" >/dev/null)
+(cd "$H" && .venv/bin/python -m harness.run --dry-run --limit 3 --stopbard "http://$PADDR" --out "$BIN/pilot-results" >/dev/null)
 python3 - "$BIN/pilot-results" <<'PY'
 import glob, json, sys
-d = glob.glob(sys.argv[1] + "/*_A2")[0]
+d = glob.glob(sys.argv[1] + "/*_dry-run")[0]
 run = json.load(open(d + "/run.json"))
-calls = [json.loads(l) for l in open(d + "/calls.jsonl")]
-assert run["enforced_bundle_hash"] == run["frozen_bundle_hash"], "A2 not on the frozen bundle"
+calls = [json.loads(l) for l in open(d + "/A2/calls.jsonl")]
+done = [json.loads(l)["user_task"] for l in open(d + "/progress.jsonl")]
+assert all(s["enforced_bundle_hash"] == run["frozen_bundle_hash"] for s in run["segments"]), "A2 not on the frozen bundle"
 assert calls and not any(c["infra_error"] for c in calls), "gate infra errors"
-print(f"ok   dry run: {len(calls)} gated calls on frozen bundle {run['frozen_bundle_hash'][:19]}…, 0 infra errors")
+assert len(done) == 3, f"expected 3 finished user tasks, got {done}"
+for arm in ("A0", "A2"):
+    eps = [json.loads(l) for l in open(f"{d}/{arm}/episodes.jsonl")]
+    assert {e["user_task"] for e in eps} == set(done), f"{arm} episodes don't match finished tasks"
+    traces = glob.glob(f"{d}/agentdojo_logs/*-{arm}/banking/*/*/*.json")
+    assert len(traces) == len(eps), f"{arm}: {len(traces)} traces for {len(eps)} episodes (arms must not share trace paths)"
+print(f"ok   dry run: A0+A2 interleaved, {len(calls)} gated calls on frozen bundle {run['frozen_bundle_hash'][:19]}…, 0 infra errors")
 PY
 kill -TERM "$PID"; wait "$PID" || true
 PID=

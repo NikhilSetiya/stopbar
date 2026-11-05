@@ -82,6 +82,7 @@ type AuditLog interface {
 Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decode** (first decoder that `Supports`) → **enrich** → **policy** → **sign** (allow only; changes no state) → **reserve + audit** (allow: one transaction) or **audit** (deny/escalate).
 
 - Every component call runs with a stage timeout (default 1 s) and panic recovery. A component that ignores `ctx` is abandoned, and its partial output is never read.
+- Writes that record a decision or a state change that has already happened (the decision's audit append, `Commit`, `Release`) run **detached from the request's context**. They keep its values but not its cancellation, and have their own timeout (`AuditTimeout`, default 5 s). A client that disconnects mid-request can't leave a decision unaudited, and a commit after signing is recorded even if the caller has gone.
 - The engine enforces invariants between stages:
   - The decoder may not render a payload other than the bound one.
   - Enrichers may not change the action or intent, and may not remove a provenance label from `taint`.
