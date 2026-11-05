@@ -135,9 +135,14 @@ type EnrichedRequest struct {
 	// MaxFeeUSD is the most the transaction can spend on fees
 	// (gas_limit × max_fee_per_gas, priced). The limiter counts it on top of
 	// AmountUSD, so a zero-value transaction cannot burn ETH under a value cap.
-	MaxFeeUSD              *string             `json:"max_fee_usd"`
-	PriceStale             bool                `json:"price_stale"`
-	PctOfBalance           *string             `json:"pct_of_balance"`
+	MaxFeeUSD    *string `json:"max_fee_usd"`
+	PriceStale   bool    `json:"price_stale"`
+	PctOfBalance *string `json:"pct_of_balance"`
+	// ApprovalUSD is the value an approval would let the spender move, for a
+	// bounded approval with a known price. Absent for unlimited approvals and
+	// for everything that isn't an approval: a policy must check
+	// `context has approval_usd`, so a missing value can only deny.
+	ApprovalUSD            *string             `json:"approval_usd,omitempty"`
 	Velocity               map[string]Velocity `json:"velocity"` // keys: 1m, 1h, 24h
 	Destination            DestinationInfo     `json:"destination"`
 	Taint                  []string            `json:"taint"`

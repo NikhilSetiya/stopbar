@@ -193,6 +193,43 @@ func TestStarterPackSeedAttacks(t *testing.T) {
 	}
 }
 
+// Bounded approvals to a known spender are allowed; everything else about
+// approvals is denied (PILOT-2 D3: denying every approval is a strawman).
+func TestStarterPackBoundedApprovals(t *testing.T) {
+	b := mustLoad(t, starterDir)
+	s := func(v string) *string { return &v }
+	approve := func(usd *string, known bool, flags ...string) model.EnrichedRequest {
+		er := baseContext()
+		er.Intent.Kind, er.Intent.Flags = "approve", append([]string{}, flags...)
+		er.AmountUSD, er.PctOfBalance, er.ApprovalUSD = s("0"), s("0"), usd
+		er.Taint = []string{"trusted_user"}
+		er.Destination.Known = known
+		return er
+	}
+	for name, tt := range map[string]struct {
+		er   model.EnrichedRequest
+		want model.Outcome
+		id   string
+	}{
+		"bounded, known spender":   {approve(s("250"), true), model.Allow, ""},
+		"at the cap":               {approve(s("1000"), true), model.Allow, ""},
+		"over the cap":             {approve(s("1000.01"), true), model.Deny, ""},
+		"unknown spender":          {approve(s("250"), false), model.Deny, ""},
+		"no value (unpriced)":      {approve(nil, true), model.Deny, ""},
+		"unlimited, known spender": {approve(nil, true, "unlimited_approval"), model.Deny, "unlimited-approval"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pr, err := b.Evaluate(context.Background(), tt.er)
+			if err != nil || pr.Outcome != tt.want {
+				t.Fatalf("got %s %+v %v, want %s", pr.Outcome, pr.Reasons, err, tt.want)
+			}
+			if tt.id != "" && (len(pr.Reasons) != 1 || pr.Reasons[0].PolicyID != tt.id) {
+				t.Fatalf("reasons %+v, want %s", pr.Reasons, tt.id)
+			}
+		})
+	}
+}
+
 func TestEvaluateFailsClosedOnIncompleteContext(t *testing.T) {
 	b := mustLoad(t, starterDir)
 	for name, mut := range map[string]func(*model.EnrichedRequest){
@@ -202,6 +239,7 @@ func TestEvaluateFailsClosedOnIncompleteContext(t *testing.T) {
 		"amount not a decimal":         func(er *model.EnrichedRequest) { v := "1e3"; er.AmountUSD = &v },
 		"amount beyond Cedar range":    func(er *model.EnrichedRequest) { v := "1000000000000000000"; er.AmountUSD = &v },
 		"intent not a policy action":   func(er *model.EnrichedRequest) { er.Intent.Kind = "mint" },
+		"approval value not a decimal": func(er *model.EnrichedRequest) { v := "lots"; er.ApprovalUSD = &v },
 		"tool_call (CS-502)":           func(er *model.EnrichedRequest) { er.Request.Action.Kind = model.KindToolCall },
 	} {
 		t.Run(name, func(t *testing.T) {

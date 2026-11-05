@@ -4,6 +4,17 @@
 @id("base-permit")
 permit (principal, action in [Stopbar::Action::"transfer", Stopbar::Action::"contract_call"], resource);
 
+// Approvals are permitted only when bounded, to a known spender (the tenant's
+// allowlist), and worth at most $1,000. Anything else is default-denied, and
+// unlimited approvals are also forbidden below.
+@id("bounded-approval")
+permit (principal, action == Stopbar::Action::"approve", resource)
+when {
+  context.dest_known && context has approval_usd &&
+  context.approval_usd.lessThanOrEqual(decimal("1000.0")) &&
+  !context.flags.contains("unlimited_approval")
+};
+
 @id("taint-unknown-destination") @message("Untrusted content is in the agent's context and the destination is not allowlisted") @outcome("deny")
 forbid (principal, action, resource)
 when { context.taint.containsAny(["untrusted_web","untrusted_onchain","untrusted_email"]) && !context.dest_known };

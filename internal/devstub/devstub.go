@@ -122,6 +122,14 @@ func (w *World) Enrich(_ context.Context, er *model.EnrichedRequest) error {
 	er.PriceStale = w.PriceStale
 	if p, ok := ratOf(w.PricesUSD[symbol]); ok && !w.PriceStale {
 		er.AmountUSD = decimalString(new(big.Rat).Mul(tokens, p))
+		// A bounded approval's value, so a policy can cap what a spender may
+		// move. Unlimited approvals get none (the flag carries their risk).
+		if er.Intent.Kind == "approve" && !slices.Contains(er.Intent.Flags, "unlimited_approval") {
+			if amt, ok := new(big.Rat).SetString(er.Intent.Amount); ok {
+				scale := new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil))
+				er.ApprovalUSD = decimalString(new(big.Rat).Mul(new(big.Rat).Quo(amt, scale), p))
+			}
+		}
 	} else {
 		er.PriceStale = true
 	}

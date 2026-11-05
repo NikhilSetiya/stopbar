@@ -1,3 +1,5 @@
+> **SHELVED (2026-11-05, owner decision).** Replaced by the real-incident pilot spec, [`research/walletagent/PILOT-2.md`](../walletagent/PILOT-2.md). Kept for a possible later cross-model AgentDojo comparison. Nothing here is pre-registered.
+
 # Phase 1R pre-registration 2: gated, adaptive, multi-suite (DRAFT, not signed off)
 
 **Status:** draft, 2026-11-04. No run of any kind happens under this document until the owner signs it off and the open decisions in §9 are closed. It follows from [`PILOT.md`](PILOT.md), whose result was *uninformative on security; cost bounded between about 12 points (weak agent) and 56 (perfect agent)*. That pilot failed two preconditions, which this design checks before any comparison is made:
