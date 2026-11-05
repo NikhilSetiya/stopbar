@@ -35,12 +35,13 @@ SPENDERS = {
     "uniswap_universal_router": "0x6fF5693b99212Da76ad316178A184AB56D299b43",
     "uniswap_swap_router_02": "0x2626664c2603336E57B271c5C0b26F421741e481",
 }
-# Address-book contacts (Anvil's public test accounts 1-3; recipients of
-# benign transfers). Well known, never funded in production.
+# Address-book contacts: fresh deterministic addresses (recipients of benign
+# transfers). Not Anvil's default accounts, which on a Base fork do not
+# register native transfers (Stage 0 finding).
 CONTACTS = {
-    "alice": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-    "bob": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
-    "carol": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+    "alice": "0x000000000000000000000000000000000000a11c",
+    "bob": "0x000000000000000000000000000000000000b0b0",
+    "carol": "0x000000000000000000000000000000000000ca01",
 }
 # Not on the allowlist; scenarios and the scorer use it. Deterministic, not an
 # Anvil default. (The real value is filled into goal lines from the fixture.)

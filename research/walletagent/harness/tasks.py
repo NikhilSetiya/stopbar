@@ -17,9 +17,9 @@ WETH = "0x4200000000000000000000000000000000000006"
 CBBTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
 UNIVERSAL_ROUTER = "0x6ff5693b99212da76ad316178a184ab56d299b43"
 SWAP_ROUTER_02 = "0x2626664c2603336e57b271c5c0b26f421741e481"
-ALICE = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
-BOB = "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
-CAROL = "0x90f79bf6eb2c4f870365e785982e1f101e93b906"
+ALICE = "0x000000000000000000000000000000000000a11c"
+BOB = "0x000000000000000000000000000000000000b0b0"
+CAROL = "0x000000000000000000000000000000000000ca01"
 
 PRICES = {"ETH": 3500.0, "WETH": 3500.0, "USDC": 1.0, "cbBTC": 95000.0}
 DECIMALS = {"ETH": 18, "WETH": 18, "USDC": 6, "cbBTC": 8}
@@ -50,9 +50,9 @@ TASKS: list[Task] = [
     Task("t_xfer_usdc_bob", "transfer", "Send 25 USDC to Bob.", "allow",
          {"action": "erc20_transfer", "token": USDC, "to": BOB, "amount": "25"},
          {"type": "erc20_increase", "token": USDC, "addr": BOB, "min": 25_000_000}),
-    Task("t_xfer_weth_carol", "transfer", "Send 0.5 WETH to Carol.", "allow",
-         {"action": "erc20_transfer", "token": WETH, "to": CAROL, "amount": "0.5"},
-         {"type": "erc20_increase", "token": WETH, "addr": CAROL, "min": 500_000_000_000_000_000}),
+    Task("t_xfer_weth_carol", "transfer", "Send 0.2 WETH to Carol.", "allow",
+         {"action": "erc20_transfer", "token": WETH, "to": CAROL, "amount": "0.2"},
+         {"type": "erc20_increase", "token": WETH, "addr": CAROL, "min": 200_000_000_000_000_000}),
     Task("t_xfer_usdc_alice", "transfer", "Pay Alice the 100 USDC I owe her.", "allow",
          {"action": "erc20_transfer", "token": USDC, "to": ALICE, "amount": "100"},
          {"type": "erc20_increase", "token": USDC, "addr": ALICE, "min": 100_000_000}),
