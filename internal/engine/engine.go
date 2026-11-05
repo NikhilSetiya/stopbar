@@ -101,6 +101,7 @@ const (
 	CodeCircuitOpen     = "CIRCUIT_OPEN"
 	DefaultDecisionTTL  = 60 * time.Second
 	DefaultStageTimeout = time.Second
+	DefaultAuditTimeout = 5 * time.Second
 )
 
 // Config wires an Engine. Every component except Enrichers is required.
@@ -113,6 +114,11 @@ type Config struct {
 	Audit        AuditLog
 	DecisionTTL  time.Duration // default 60s, at most model.MaxTTL
 	StageTimeout time.Duration // per component call; default 1s
+	// AuditTimeout bounds each write that records a decision or a state
+	// change (audit append, Commit, Release). Those writes run detached from
+	// the request's context: a client that disconnects mid-request must not
+	// be able to leave a decision unaudited. Default 5s.
+	AuditTimeout time.Duration
 	Clock        func() time.Time
 	Logger       *slog.Logger
 }
@@ -162,6 +168,9 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.StageTimeout <= 0 {
 		cfg.StageTimeout = DefaultStageTimeout
 	}
+	if cfg.AuditTimeout <= 0 {
+		cfg.AuditTimeout = DefaultAuditTimeout
+	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
@@ -185,7 +194,18 @@ func failed(code string, err error) *stageError { return &stageError{code, err} 
 // an error. A component that ignores ctx is abandoned on timeout; callers
 // must not read state that fn may still be writing.
 func (e *Engine) call(ctx context.Context, fn func(context.Context) error) error {
-	ctx, cancel := context.WithTimeout(ctx, e.cfg.StageTimeout)
+	return e.callWithin(ctx, e.cfg.StageTimeout, fn)
+}
+
+// record runs a write that records a decision or a state change that has
+// already happened. It keeps the request's values but not its cancellation,
+// and has its own timeout, so a disconnecting caller can't stop the record.
+func (e *Engine) record(ctx context.Context, fn func(context.Context) error) error {
+	return e.callWithin(context.WithoutCancel(ctx), e.cfg.AuditTimeout, fn)
+}
+
+func (e *Engine) callWithin(ctx context.Context, timeout time.Duration, fn func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
@@ -223,7 +243,7 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 		for k, v := range extra {
 			body[k] = v
 		}
-		err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Audit.Append(ctx, model.AuditDecision, body) })
+		err := e.record(ctx, func(ctx context.Context) error { return e.cfg.Audit.Append(ctx, model.AuditDecision, body) })
 		if err == nil {
 			return d
 		}
@@ -390,7 +410,7 @@ func limiterFailure(err error) *stageError {
 // decision TTL.
 func (e *Engine) release(ctx context.Context, id, reason string) {
 	rec := &model.AuditEntry{Type: model.AuditRelease, Body: map[string]any{"request_id": id, "reason": reason}}
-	err := e.call(context.WithoutCancel(ctx), func(ctx context.Context) error { return e.cfg.Limiter.Release(ctx, id, rec) })
+	err := e.record(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Release(ctx, id, rec) })
 	if errors.Is(err, ErrUnknownReservation) || errors.Is(err, ErrReservationExpired) {
 		return // nothing was held
 	}
@@ -437,7 +457,7 @@ func publicMessage(se *stageError) string {
 // mode, signed). The commit and its audit record are one transaction.
 func (e *Engine) Commit(ctx context.Context, requestID, txRef string) error {
 	rec := &model.AuditEntry{Type: model.AuditCommit, Body: map[string]any{"request_id": requestID, "tx_ref": txRef}}
-	if err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Commit(ctx, requestID, txRef, rec) }); err != nil {
+	if err := e.record(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Commit(ctx, requestID, txRef, rec) }); err != nil {
 		if errors.Is(err, ErrAuditUnavailable) {
 			return failed(CodeAudit, err)
 		}
@@ -450,7 +470,7 @@ func (e *Engine) Commit(ctx context.Context, requestID, txRef string) error {
 // (e.g. "client", or why a signer adapter refused) is audited with it.
 func (e *Engine) Release(ctx context.Context, requestID, reason string) error {
 	rec := &model.AuditEntry{Type: model.AuditRelease, Body: map[string]any{"request_id": requestID, "reason": reason}}
-	if err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Release(ctx, requestID, rec) }); err != nil {
+	if err := e.record(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Release(ctx, requestID, rec) }); err != nil {
 		if errors.Is(err, ErrAuditUnavailable) {
 			return failed(CodeAudit, err)
 		}
