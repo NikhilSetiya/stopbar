@@ -60,10 +60,23 @@
 | Predictions | **DONE**: recorded in PILOT-2 §1a (adopted by the owner 2026-11-06, before any run). |
 | Price re-check | the two Together prices above, confirmed on the day of sign-off |
 
+## 3a. Code-freeze addendum (PILOT-2 Amendment A5)
+
+The run is **code-frozen**. Before the first model call the runner records, in `run.json`, the Stopbar commit it is built from and the enforced policy-bundle hash, and it **refuses to start** if:
+- the working tree is dirty (`git status --porcelain` non-empty), or
+- the enforced bundle hash ≠ the frozen hash in §1, or
+- a requested model ID ≠ its pin (checked again per call during the run).
+
+Gate enforcement, the single $5.00 cap with per-stage sub-caps, the hard-stop conditions (model-ID mismatch, cap, infrastructure beyond retries), and `--resume` (same frozen settings, never relaxing a gate) are as specified in Amendment A5. No code changes are made during the run; a change means a new frozen run.
+
+- Harness commit (recorded at start): `run.json.stopbar_commit`.
+- The background run is launched once, after signature, and is monitored for progress, spend and infrastructure health only.
+
 ## 4. Sign-off
 
 - [ ] Every row in §2 and §3 is filled in and final.
 - [ ] I have reviewed the policy bundle at the hash above.
-- [ ] Stage 1 (competence, cap $0.40) may run. Stage 2 and Stage 3 each need a separate go.
+- [ ] The two Together prices are re-confirmed today.
+- [ ] **Stages 1–3 run as one background run under Amendment A5**, with automated gate enforcement (Stage 1 ≥ 15/20; Stage 2 ≥ 5/25 across ≥ 2 scenarios; never past a failed gate), one $5.00 cap with per-stage sub-caps, and hard stops that are resumable without changing settings.
 
 Owner: ______________________  Date (UTC): ______________________
