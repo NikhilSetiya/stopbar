@@ -507,7 +507,7 @@ Normative spec: [`spec/decision-token-v1.md`](../spec/decision-token-v1.md), wit
 The adapter is edge code: it uses go-ethereum for secp256k1 and EIP-1559, which the stdlib lacks. It touches no key until the core verifier (`internal/decision`, stdlib only) has accepted the token. `SignTx` runs these steps in order:
 
 1. Verify the token (spec §4). This recomputes `payload_hash` from the exact unsigned tx and spends the token in the adapter's **own** spent store (`-state-dir/adapter-spent.db`, retention max TTL + 2× skew).
-2. Find the key for `from`.
+2. Find the key for `from`. If `Options.CodeAt` is set, read `from`'s on-chain code and refuse (`DELEGATED_WALLET`, fail closed on a read error) when it carries EIP-7702 delegation code (`0xef0100 || addr`, `signer.DelegatedTo`) to an address not in `ExpectedDelegates` — a delegated hot wallet can be driven to act as another contract (CS-146; `CodeAt` is wired once `stopbard` has a chain RPC). Type-4 (EIP-7702 SetCode) requests never reach here: the wire schema pins `tx_type` to `2`.
 3. Build the transaction from the approved fields only.
 4. Sign, recover the sender, and require it to equal `from`.
 5. Read the *signed* tx back and require its payload hash to equal the token's.

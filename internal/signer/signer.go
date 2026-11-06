@@ -36,14 +36,34 @@ import (
 
 // Errors.
 var (
-	ErrNoKey       = errors.New("signer: adapter holds no key for this from address")
-	ErrNotBindable = errors.New("signer: transaction does not match its approved payload")
+	ErrNoKey           = errors.New("signer: adapter holds no key for this from address")
+	ErrNotBindable     = errors.New("signer: transaction does not match its approved payload")
+	ErrDelegatedWallet = errors.New("signer: signing wallet carries unexpected delegation code (EIP-7702)")
 )
+
+// delegationPrefix marks an EIP-7702 delegated account: 0xef0100 followed by
+// the 20-byte delegate address (23 bytes total).
+var delegationPrefix = []byte{0xef, 0x01, 0x00}
+
+// DelegatedTo returns the address an account's code delegates to under
+// EIP-7702, and whether it is such a delegation. A plain EOA has empty code.
+func DelegatedTo(code []byte) (common.Address, bool) {
+	if len(code) != 23 || !bytesHasPrefix(code, delegationPrefix) {
+		return common.Address{}, false
+	}
+	return common.BytesToAddress(code[3:]), true
+}
+
+func bytesHasPrefix(b, prefix []byte) bool {
+	return len(b) >= len(prefix) && string(b[:len(prefix)]) == string(prefix)
+}
 
 // Adapter signs EVM transactions behind a decision-token check.
 type Adapter struct {
 	verifier *decision.Verifier
 	keys     map[common.Address]*ecdsa.PrivateKey
+	codeAt   func(context.Context, common.Address) ([]byte, error)
+	expected map[common.Address]bool
 }
 
 // Options for New.
@@ -52,6 +72,16 @@ type Options struct {
 	// stopbard sets it only with -dev-world: people copy example configs, and
 	// a known private key in production is an instant drain.
 	AllowWellKnownTestKeys bool
+	// CodeAt, when set, is queried for the `from` account's on-chain code
+	// before signing. If from carries EIP-7702 delegation code to an address
+	// not in ExpectedDelegates, the adapter refuses to sign (a delegated hot
+	// wallet can be made to act as another contract). A read error fails
+	// closed. nil disables the check (e.g. when the adapter has no chain
+	// access yet, CS-146).
+	CodeAt func(context.Context, common.Address) ([]byte, error)
+	// ExpectedDelegates are delegation targets the operator has vetted; a
+	// delegation to any other address is refused.
+	ExpectedDelegates map[common.Address]bool
 }
 
 // New returns an adapter. The verifier must have pinned keys, this adapter's
@@ -60,7 +90,7 @@ func New(v *decision.Verifier, keys []*ecdsa.PrivateKey, opts Options) (*Adapter
 	if v == nil || v.Spent == nil || v.Keys == nil || v.Aud == "" {
 		return nil, errors.New("signer: verifier needs pinned keys, an audience and a spent store")
 	}
-	a := &Adapter{verifier: v, keys: map[common.Address]*ecdsa.PrivateKey{}}
+	a := &Adapter{verifier: v, keys: map[common.Address]*ecdsa.PrivateKey{}, codeAt: opts.CodeAt, expected: opts.ExpectedDelegates}
 	for _, k := range keys {
 		addr := crypto.PubkeyToAddress(k.PublicKey)
 		if isWellKnownTestKey(addr) && !opts.AllowWellKnownTestKeys {
@@ -81,7 +111,7 @@ func (a *Adapter) Addresses() []common.Address {
 }
 
 // SignTx returns the raw signed transaction and its hash.
-func (a *Adapter) SignTx(_ context.Context, token string, act model.Action) ([]byte, common.Hash, error) {
+func (a *Adapter) SignTx(ctx context.Context, token string, act model.Action) ([]byte, common.Hash, error) {
 	claims, err := a.verifier.Verify(token, act) // step 1: core first
 	if err != nil {
 		return nil, common.Hash{}, err
@@ -90,6 +120,15 @@ func (a *Adapter) SignTx(_ context.Context, token string, act model.Action) ([]b
 	key, ok := a.keys[from]
 	if !ok || !strings.EqualFold(from.Hex(), act.From) {
 		return nil, common.Hash{}, fmt.Errorf("%w: %s", ErrNoKey, act.From)
+	}
+	if a.codeAt != nil { // refuse to sign for a delegated (EIP-7702) wallet
+		code, err := a.codeAt(ctx, from)
+		if err != nil {
+			return nil, common.Hash{}, fmt.Errorf("%w: code read failed: %v", ErrDelegatedWallet, err)
+		}
+		if to, ok := DelegatedTo(code); ok && !a.expected[to] {
+			return nil, common.Hash{}, fmt.Errorf("%w: %s -> %s", ErrDelegatedWallet, from.Hex(), to.Hex())
+		}
 	}
 	tx, err := buildTx(act) // step 3
 	if err != nil {
