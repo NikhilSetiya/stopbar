@@ -41,6 +41,9 @@ const (
 	selChangeThreshold       = "694e80c3"
 	selEnableModule          = "610b5925"
 	selSetGuard              = "e19a9dd9"
+	// Wrapped native (WETH9): deposit wraps msg.value, withdraw unwraps
+	selWethDeposit  = "d0e30db0"
+	selWethWithdraw = "2e1a7d4d"
 	// Proxies
 	selUpgradeTo        = "3659cfe6"
 	selUpgradeToAndCall = "4f1ef286"
@@ -139,4 +142,17 @@ var multiSendContracts = map[string]bool{
 	"0x40a2accbd92bca938b02010e17a5b8929b49130d": true, // MultiSendCallOnly 1.3.0
 	"0x38869bf66a61cf6bdb996a6ae40d5853fd43b526": true, // MultiSend 1.4.1
 	"0x9641d764fc13c8b624c04430c7356c1c7c8102e2": true, // MultiSendCallOnly 1.4.1
+}
+
+// WrappedNative is the canonical WETH9 (wrapped native) per chain id, so a
+// deposit()/withdraw() to exactly this address is decoded as a self-contained
+// wrap/unwrap rather than an unknown call. Base's is verified on the fork
+// (research/walletagent/harness/world.py); any address not listed here keeps
+// the unknown_call flag.
+var WrappedNative = map[uint64]string{
+	1:        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // ethereum WETH
+	10:       "0x4200000000000000000000000000000000000006", // optimism (OP predeploy)
+	8453:     "0x4200000000000000000000000000000000000006", // base (OP predeploy)
+	42161:    "0x82af49447d8a07e3bd95bd0d56f35241523fbab1", // arbitrum WETH
+	11155111: "0x7b79995e5f793a07bc00c21412e50ecae098e7f9", // sepolia WETH
 }

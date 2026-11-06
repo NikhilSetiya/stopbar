@@ -357,6 +357,7 @@ Implemented in `internal/decode/evm` (CS-141/142). It is stdlib-only, like the t
    - Permit2: approve, permit single and batch, transferFrom
    - Uniswap V2 router, V3 SwapRouter and SwapRouter02 swaps
    - Universal Router `execute`: V2/V3 swaps, Permit2 permit and transfer, sweep, pay-portion, wrap and unwrap. Other commands are `opaque`.
+   - WETH `deposit()`/`withdraw()`, but only to the chain's canonical wrapped-native address (`evm.WrappedNative`); the same selectors elsewhere stay `unknown_call`
    - Safe `execTransaction`, MultiSend, and owner/module/guard changes
    - Proxy upgrades
    - Multicall: Uniswap `multicall` variants, Multicall3 `aggregate*`

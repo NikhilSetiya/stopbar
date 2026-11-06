@@ -128,6 +128,10 @@ func TestGolden(t *testing.T) {
 			"transfer", "universal_router", token, "5", attacker, nil, 1},
 		{"universal router: unknown command is opaque", tx(router, "0", calldata(selURExecuteNoDeadline, bytesV([]byte{0x21}), arrV{bytesV(nil)})), "contract_call", "universal_router", "", "", "", []string{FlagOpaque}, 1},
 		// Other
+		{"weth wrap (deposit on the chain WETH)", tx(weth, "100000000000000000", calldata("d0e30db0")), "contract_call", "weth_wrap", "", "100000000000000000", weth, nil, 0},
+		{"weth unwrap (withdraw on the chain WETH)", tx(weth, "0", calldata("2e1a7d4d", u(50000000000000000))), "contract_call", "weth_unwrap", "", "50000000000000000", weth, nil, 0},
+		{"deposit() on a non-WETH address stays unknown", tx(token, "0", calldata("d0e30db0")), "contract_call", "unknown", "", "", token, []string{FlagUnknownCall}, 0},
+		{"withdraw() on a non-WETH address stays unknown", tx(token, "0", calldata("2e1a7d4d", u(1))), "contract_call", "unknown", "", "", token, []string{FlagUnknownCall}, 0},
 		{"unknown selector", tx(router, "0", calldata("deadbeef", u(1))), "contract_call", "unknown", "", "", router, []string{FlagUnknownCall}, 0},
 		{"value attached to a multicall is its own outflow", tx(router, "7", calldata(selMulticall, arrV{bytesV(transferTo(friend, 9))})), "contract_call", "call_with_value", "", "", "", []string{FlagMultiTransfer}, 2},
 		{"value to an unknown call inside a batch is an outflow", tx(router, "3", calldata(selAggregate3Value, arrV{tupV{addrV(attacker), boolV(false), u(3), bytesV(calldata("deadbeef"))}, tupV{addrV(token), boolV(false), u(0), bytesV(transferTo(friend, 1))}})), "contract_call", "aggregate3_value", "", "", "", []string{FlagMultiTransfer, FlagUnknownCall}, 2},
