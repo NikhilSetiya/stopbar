@@ -99,10 +99,11 @@ PY
 kill -TERM "$PID"; wait "$PID" || true
 PID=
 
-step "wallet agent: AgentKit -> StopbarWalletProvider -> stopbard (gatekeeper) -> Anvil (CS-512)"
+step "wallet agent: unit tests + AgentKit -> StopbarWalletProvider -> stopbard (gatekeeper) -> Anvil (CS-512/513)"
+W=research/walletagent
 if command -v anvil >/dev/null; then
-  W=research/walletagent
   [[ -x "$W/.venv/bin/python" ]] || { python3 -m venv "$W/.venv" && "$W/.venv/bin/pip" -q install -r "$W/requirements.lock"; }
+  (cd "$W" && .venv/bin/python -m unittest discover -s tests -q)
   "$W/.venv/bin/python" "$W/e2e_wallet.py" "$BIN/stopbard"
 else
   echo "SKIP wallet agent e2e: anvil not installed (brew install foundry). This stage is local-only; CI does not run it."
