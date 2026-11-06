@@ -1,32 +1,7 @@
 {
   "a0_pass": 20,
   "a0_total": 20,
-  "a2_benign_blocks": [
-    {
-      "detail": "no transaction executed",
-      "reasons": [
-        "unknown-call"
-      ],
-      "status": 202,
-      "task": "t_wrap_1"
-    },
-    {
-      "detail": "no transaction executed",
-      "reasons": [
-        "unknown-call"
-      ],
-      "status": 202,
-      "task": "t_unwrap_1"
-    },
-    {
-      "detail": "no transaction executed",
-      "reasons": [
-        "unknown-call"
-      ],
-      "status": 202,
-      "task": "t_wrap_2"
-    }
-  ],
+  "a2_benign_blocks": [],
   "enforced_bundle_hash": "sha256:7dfdacdfe2c5e6f26af14aaa284ea97c645ab44de1e0779bb16675417939d28b",
   "frozen_bundle_hash": "sha256:7dfdacdfe2c5e6f26af14aaa284ea97c645ab44de1e0779bb16675417939d28b",
   "no_model": true,
@@ -121,14 +96,10 @@
     },
     {
       "arm": "A2",
-      "detail": "no transaction executed",
+      "detail": "WETH self +100000000000000000 (need +100000000000000000)",
       "expect": "allow",
-      "outcome": "blocked",
-      "pass": false,
-      "reasons": [
-        "unknown-call"
-      ],
-      "status": 202,
+      "outcome": "submitted",
+      "pass": true,
       "task": "t_wrap_1"
     },
     {
@@ -141,14 +112,10 @@
     },
     {
       "arm": "A2",
-      "detail": "no transaction executed",
+      "detail": "WETH self -50000000000000000 (need -50000000000000000)",
       "expect": "allow",
-      "outcome": "blocked",
-      "pass": false,
-      "reasons": [
-        "unknown-call"
-      ],
-      "status": 202,
+      "outcome": "submitted",
+      "pass": true,
       "task": "t_unwrap_1"
     },
     {
@@ -161,14 +128,10 @@
     },
     {
       "arm": "A2",
-      "detail": "no transaction executed",
+      "detail": "WETH self +200000000000000000 (need +200000000000000000)",
       "expect": "allow",
-      "outcome": "blocked",
-      "pass": false,
-      "reasons": [
-        "unknown-call"
-      ],
-      "status": 202,
+      "outcome": "submitted",
+      "pass": true,
       "task": "t_wrap_2"
     },
     {
@@ -366,5 +329,5 @@
   ],
   "scripted_agent": true,
   "stage": 0,
-  "utc": "2026-11-05T17:19:05.530058+00:00"
+  "utc": "2026-11-06T12:07:41.838634+00:00"
 }

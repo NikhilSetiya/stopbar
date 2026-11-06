@@ -141,7 +141,7 @@ func (d *decoder) call(to string, value *big.Int, data []byte, depth int) (model
 // carry native value the intent doesn't show.
 func spendsValue(op string) bool {
 	switch op {
-	case "swap_exact_in", "swap_exact_out", "aggregate3_value", "safe_exec", "universal_router":
+	case "swap_exact_in", "swap_exact_out", "aggregate3_value", "safe_exec", "universal_router", "weth_wrap":
 		return true
 	}
 	return false
@@ -410,6 +410,24 @@ func (d *decoder) known(sel, to string, value *big.Int, p args, depth int) (mode
 	case selAddOwnerWithThreshold, selRemoveOwner, selSwapOwner, selChangeThreshold, selEnableModule, selSetGuard:
 		return model.IntentSummary{Kind: kindCall, Op: "wallet_admin", Destination: to, Flags: []string{FlagWalletAdmin},
 			Human: fmt.Sprintf("Change who controls the Safe %s (%s)", to, Signatures[sel])}, true, nil
+
+	case selWethDeposit, selWethWithdraw:
+		// Only the chain's canonical WETH; the same selector elsewhere stays
+		// unknown_call. A self-contained conversion between ETH and WETH,
+		// valued at its ETH amount (deposit: msg.value; withdraw: the arg).
+		if WrappedNative[d.chain] != to {
+			return model.IntentSummary{}, false, nil
+		}
+		if sel == selWethDeposit {
+			return model.IntentSummary{Kind: kindCall, Op: "weth_wrap", Destination: to, Amount: value.String(),
+				Human: fmt.Sprintf("Wrap %s wei of ETH into WETH (%s)", value, to)}, true, nil
+		}
+		wad, err := p.uint(0)
+		if err != nil {
+			return model.IntentSummary{}, true, err
+		}
+		return model.IntentSummary{Kind: kindCall, Op: "weth_unwrap", Destination: to, Amount: wad.String(),
+			Human: fmt.Sprintf("Unwrap %s wei of WETH back to ETH (%s)", wad, to)}, true, nil
 	}
 	if in, ok, err := d.swap(sel, to, value, p); ok || err != nil {
 		return in, true, err
