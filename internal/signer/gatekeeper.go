@@ -81,6 +81,8 @@ func adapterCode(err error) string {
 		return "NO_KEY_FOR_FROM"
 	case errors.Is(err, ErrNotBindable):
 		return "NOT_BINDABLE"
+	case errors.Is(err, ErrDelegatedWallet):
+		return "DELEGATED_WALLET"
 	default:
 		return "SIGNING_FAILED"
 	}

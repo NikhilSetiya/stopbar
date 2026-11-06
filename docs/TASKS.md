@@ -9,7 +9,7 @@ Estimates are focused build days for one engineer. IDs are stable; reference the
 | Phase | Tasks | Est. days |
 |---|---|---|
 | Phase 0 - Foundations (weeks 0-2) | 9 | 9 |
-| Phase 1 - Agent-wallet MVP (weeks 2-8) | 43 | 75 |
+| Phase 1 - Agent-wallet MVP (weeks 2-8) | 44 | 77 |
 | Phase 1R - Research track (parallel, weeks 4-10) | 13 | 25.5 |
 | Phase 2 - Corpus & community (weeks 8-12) | 6 | 12.5 |
 | Phase 3 - Code-mode agents (months 3-9) | 7 | 35 |
@@ -88,6 +88,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 | CS-142 | Risk flags | unlimited_approval, delegatecall, proxy_upgrade, new/similar destination, first_time_contract, opaque, unknown_call. | Each flag has positive + negative test. | 2d | CS-141,CS-133 | FR-IR-2 |
 | CS-143 | Human renderer + checksum phrase | Plain-language template + 6-word address checksum. | Snapshot tests; look-alike addresses yield different phrases. | 1.5d | CS-142 | FR-IR-3 |
 | CS-145 | Destructive-action flags + salami caps | min_out_zero and excessive_slippage flags for known swap routers; default per-destination count cap for non-allowlisted destinations. | Zero-min-out swap fixture denied; 6 sub-cap transfers to new destination escalate. | 1.5d | CS-142,CS-121 | FR-IR-2, FR-LIM-2a |
+| CS-146 | EIP-7702 / type-4 defense | Deny type-4 (EIP-7702 SetCode) by default (tx_type is const 2 at the wire; add tests). Gatekeeper refuses to sign for a `from` wallet carrying delegation code (0xef0100||addr) unless the target is operator-vetted (signer.DelegatedTo + Adapter.CodeAt/ExpectedDelegates; wire CodeAt in stopbard once it has a chain RPC). Add a corpus entry for the delegation-code refusal once CodeAt is wired. | type-4 rejected at the gateway; adapter refuses an unexpected-delegation wallet and fails closed on a code-read error; corpus entry blocks. | 2d | CS-162 | HLD §4 |
 | CS-144 | Decoder fuzzing | Go native fuzz targets on calldata. | 24h fuzz run with no panics. | 1d | CS-141 |  |
 | CS-514 | Off-chain signature requests | eth_signTypedData / personal_sign as an action kind: decode EIP-712 (Permit, Permit2 PermitSingle/Batch, Seaport) into intents with the same flags (unlimited_approval etc.). Until then wallet providers must refuse off-chain signing. | Permit2 PermitSingle with max amount denied; benign typed data renders. | 3d | CS-141 | LLD §6 |
 
