@@ -225,3 +225,29 @@ func FuzzDecode(f *testing.F) {
 		}
 	})
 }
+
+// The policy evaluates intent.Destination. For a swap or a multicall routed
+// through an allow-listed contract, that destination must be the fund
+// recipient, not the called contract — otherwise an allow-listed router could
+// launder funds to an unlisted recipient (PILOT-2 §9 pre-freeze guard).
+func TestSwapAndMulticallRecipientIsPolicyDestination(t *testing.T) {
+	// V2 swap through `router` (would be allow-listed) paying out to `attacker`.
+	swap := tx(router, "0", calldata(selV2SwapExactTokensForTokens, u(1000), u(990), arrV{addrV(token), addrV(token2)}, addrV(attacker), u(1)))
+	in := decode(t, swap)
+	if in.Destination != attacker {
+		t.Fatalf("swap destination %s, want the recipient %s (not the router)", in.Destination, attacker)
+	}
+	if in.Destination == router {
+		t.Fatalf("swap: router %s leaked into the policy destination", router)
+	}
+
+	// Multicall on `router` whose only transfer pays `attacker`.
+	mc := tx(router, "0", calldata(selMulticall, arrV{bytesV(calldata(selTransfer, addrV(attacker), u(5)))}))
+	in = decode(t, mc)
+	if in.Destination != attacker {
+		t.Fatalf("multicall destination %s, want the inner recipient %s (not the multicall contract)", in.Destination, attacker)
+	}
+	if in.Destination == router {
+		t.Fatalf("multicall: contract %s leaked into the policy destination", router)
+	}
+}
