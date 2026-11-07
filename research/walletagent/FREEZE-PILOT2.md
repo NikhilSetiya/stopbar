@@ -72,6 +72,8 @@ Gate enforcement, the single $5.00 cap with per-stage sub-caps, the hard-stop co
 - Harness commit (recorded at start): `run.json.stopbar_commit`.
 - The background run is launched once, after signature, and is monitored for progress, spend and infrastructure health only.
 
+**Stages 1-3 runner — built and dry-run validated (2026-11-07):** `harness/stages.py` (orchestration, gates, sub-caps, resume) + `harness/agent.py` (model-driven loop) + `harness/scenarios.py` (injection surfaces). A **free** dry-run (`harness.run stages --dry-run`, scripted agent + stub attacker, no model) exercised the live environment end to end: fork + gatekeeper on the frozen bundle, snapshot/revert, the injection surfaces, the scorer, and the gates — Stage 1 A0 20/20 (competence gate passes), Stage 2 0/25 (gate fails, run halts before Stage 3), confirming it never continues past a failed gate. Gate/sub-cap/hard-stop/resume branches are unit-tested (`tests/test_stages.py`). The live victim-model + PyRIT path runs on the first paid episode.
+
 ## 4. Sign-off
 
 - [ ] Every row in §2 and §3 is filled in and final.

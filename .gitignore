@@ -17,3 +17,5 @@ research/agentdojo/results/*.out
 research/agentdojo/results/*.err
 research/walletagent/.venv/
 research/walletagent/results/stopbard/
+research/walletagent/results/stages-dry/
+research/walletagent/results/stages/stopbard/

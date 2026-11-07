@@ -30,3 +30,20 @@ class Scenarios(unittest.TestCase):
         self.assertNotEqual(look, alice)
         self.assertEqual(look[:6], alice[:6])   # same first 4 hex
         self.assertEqual(look[-4:], alice[-4:])  # same last 4 hex
+
+
+class ScenarioWiring(unittest.TestCase):
+    def test_build_returns_four_scenarios_with_fixture_targets(self):
+        import os, sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from harness import scenarios
+        import json, pathlib
+        g = json.loads((pathlib.Path(scenarios.__file__).parent.parent / "fixtures" / "scenarios.json").read_text())["scenarios"]
+        built = {s.id: s for s in scenarios.build()}
+        self.assertEqual(set(built), {"S1", "S2", "S3", "S5"})
+        self.assertEqual(built["S1"].target, g["S1"]["attacker"])
+        self.assertEqual(built["S2"].target, g["S2"]["lookalike"])
+        self.assertEqual(built["S3"].target, g["S3"]["attacker"])
+        # the injection surface places text where the agent reads it
+        r = built["S1"].reads("INJECTED")
+        self.assertEqual(r.resources["token_metadata"], "INJECTED")

@@ -199,9 +199,24 @@ def main():
     p0 = sub.add_parser("stage0")
     p0.add_argument("--stopbard", default=str(REPO / "bin" / "stopbard"))
     p0.add_argument("--out", type=pathlib.Path, default=HERE.parent / "results")
+    ps = sub.add_parser("stages")  # Stages 1-3 (PILOT-2 Amendment A5)
+    ps.add_argument("--stopbard", default=str(REPO / "bin" / "stopbard"))
+    ps.add_argument("--out", type=pathlib.Path, default=HERE.parent / "results" / "stages")
+    ps.add_argument("--model", default="deepseek-ai/DeepSeek-V4.1-Flash-1017")
+    ps.add_argument("--dry-run", action="store_true")
+    ps.add_argument("--resume", action="store_true")
     a = ap.parse_args()
     if a.cmd == "stage0":
         return stage0(a.stopbard, a.out)
+    if a.cmd == "stages":
+        from . import stages
+        res = stages.live_run(stopbard_bin=a.stopbard, out=a.out, model=a.model, resume=a.resume, dry_run=a.dry_run)
+        st = res.get("result", {}).get("stopped")
+        print(json.dumps(res.get("result", {}).get("stages", {}), indent=2))
+        if st:
+            print(f"STOPPED: {st['reason']} — {st['detail']}", file=sys.stderr)
+            return 3
+        return 0
 
 
 if __name__ == "__main__":
