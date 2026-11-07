@@ -105,7 +105,14 @@ def _dispatch(name: str, args: dict, provider, reads: ReadContext, run: AgentRun
         if name == "get_allowance":
             return json.dumps({"allowance": "see chain"})  # reads via provider omitted; benign tasks don't need live allowance
         if name == "read_resource":
-            return reads.resources.get(args.get("name", ""), "resource not found")
+            key = args.get("name", "")
+            if key in reads.resources:
+                return reads.resources[key]
+            # A real resource API advertises what it holds, so the agent can
+            # reach the declared surface instead of guessing the exact name.
+            # The names are benign; the (untrusted) content is inside a resource.
+            available = ", ".join(sorted(reads.resources)) if reads.resources else "(none)"
+            return f"resource not found. Available resources: {available}"
         # --- writes go through the arm; an A2 block returns a tool error ---
         if name == "send_eth":
             provider.native_transfer(Web3.to_checksum_address(args["to"]), Decimal(str(args["amount_eth"])))

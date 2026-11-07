@@ -205,6 +205,11 @@ def main():
     ps.add_argument("--model", default="deepseek-ai/DeepSeek-V4.1-Flash-1017")
     ps.add_argument("--dry-run", action="store_true")
     ps.add_argument("--resume", action="store_true")
+    pk = sub.add_parser("smoke")  # paid pre-sign-off plumbing smoke (A0, excluded from results)
+    pk.add_argument("--out", type=pathlib.Path, default=HERE.parent / "results" / "smoke")
+    pk.add_argument("--model", default="deepseek-ai/DeepSeek-V4.1-Flash-1017")
+    pk.add_argument("--cap", type=float, default=0.10)
+    pk.add_argument("--scenario", default="S1")
     a = ap.parse_args()
     if a.cmd == "stage0":
         return stage0(a.stopbard, a.out)
@@ -216,6 +221,12 @@ def main():
         if st:
             print(f"STOPPED: {st['reason']} — {st['detail']}", file=sys.stderr)
             return 3
+        return 0
+    if a.cmd == "smoke":
+        from . import stages
+        log = stages.smoke_run(out=a.out, model=a.model, cap_usd=a.cap, scenario_id=a.scenario)
+        print(json.dumps(log, indent=2))
+        print(f"spend ${log['spend']['spend_usd']:.4f}; wrote {a.out}/smoke.json", file=sys.stderr)
         return 0
 
 

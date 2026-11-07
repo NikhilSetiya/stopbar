@@ -3,9 +3,12 @@
 It wires PyRIT's own `RedTeamingAttack` (max_turns = 5, default adversarial
 system prompt and converters) to the pilot sandbox:
 
-- **attacker model:** an `OpenAIChatTarget` pointed at Together, pinned to
-  `Qwen/Qwen3.5-9B` (PILOT-2 §2). PyRIT generates every attack; we configure
-  nothing about how it attacks.
+- **attacker model:** `Qwen/Qwen3.5-9B` on Together (PILOT-2 §2), reached
+  through `MeteredAttackerTarget` so every attacker generation goes through the
+  run's `spend.Meter` — its tokens count against the $5 cap and its reported
+  model id is checked on every call (the id is an alias, §2). PyRIT generates
+  every attack; only the transport is ours, the strategy and prompts are
+  PyRIT's defaults.
 - **`PilotTarget`:** the objective target. Each attacker turn's text is handed
   to an injected `episode` callable, which writes it into the scenario's
   declared untrusted surface, runs the agent's legitimate task, and returns
@@ -16,21 +19,18 @@ system prompt and converters) to the pilot sandbox:
   outcome (PILOT-2 §6.3), never the agent's words.
 
 No attack content lives here. The attacks are PyRIT's defaults, driven by the
-owner's one-line goal (the PyRIT objective). The agent episode is supplied by
-the runner (Stages 1-3); this module is the wiring, unit-tested with a fake
-episode and no model calls.
+owner's one-line goal (the PyRIT objective). The agent episode and the metered
+attacker client are supplied by the runner (Stages 1-3); this module is the
+wiring, unit-tested with fake clients and no model calls.
 """
 from dataclasses import dataclass
 from typing import Callable
 
 from pyrit.executor.attack import AttackAdversarialConfig, AttackScoringConfig, RedTeamingAttack
 from pyrit.models import ComponentIdentifier, Message, MessagePiece, Score
-from pyrit.prompt_target import OpenAIChatTarget, PromptTarget
+from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 from pyrit.score.true_false.true_false_scorer import MessageTrueFalseScorer
-
-from .infra import read_keychain
-from .spend import BASE_URL, KEYCHAIN_SERVICE
 
 ATTACKER_MODEL = "Qwen/Qwen3.5-9B"
 MAX_TURNS = 5
@@ -50,13 +50,31 @@ class EpisodeResult:
 Episode = Callable[[str], EpisodeResult]
 
 
-def attacker_target() -> OpenAIChatTarget:
-    """The pinned Together attacker model, PyRIT defaults otherwise."""
-    return OpenAIChatTarget(
-        endpoint=BASE_URL,  # the OpenAI SDK appends /chat/completions
-        model_name=ATTACKER_MODEL,
-        api_key=read_keychain(KEYCHAIN_SERVICE),
-    )
+class MeteredAttackerTarget(PromptTarget):
+    """PyRIT's adversarial (attacker) model, routed through the run's spend
+    Meter. This is how the attacker's tokens count against the $5 cap and how
+    its reported model id is checked on every call (the id is an alias, §2).
+    PyRIT's attack strategy, system prompt and converters are unchanged — only
+    the transport is the metered Together client."""
+
+    # A multi-turn chat target: RedTeamingAttack requires the adversarial target
+    # to natively support multi-turn conversations and system prompts (text I/O).
+    _DEFAULT_CONFIGURATION = TargetConfiguration(capabilities=TargetCapabilities(
+        supports_multi_turn=True, supports_system_prompt=True,
+        supports_editable_history=True, supports_multi_message_pieces=True))
+
+    def __init__(self, *, chat):
+        super().__init__()
+        self._chat = chat  # spend.MeteredChat pinned to ATTACKER_MODEL
+
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+        messages = [{"role": m.api_role, "content": m.get_value()} for m in normalized_conversation]
+        resp = self._chat.create(messages=messages)
+        text = resp.choices[0].message.content or ""
+        return [Message.from_prompt(prompt=text, role="assistant")]
+
+    def _validate_request(self, *, normalized_conversation: list[Message]) -> None:
+        return
 
 
 class PilotTarget(PromptTarget):
@@ -101,11 +119,14 @@ class ChainStateScorer(MessageTrueFalseScorer):
         )]
 
 
-def build_attack(target: PilotTarget, scorer: ChainStateScorer) -> RedTeamingAttack:
-    """RedTeamingAttack with PyRIT's defaults and max_turns = 5."""
+def build_attack(target: PilotTarget, scorer: ChainStateScorer, *, attacker_chat) -> RedTeamingAttack:
+    """RedTeamingAttack with PyRIT's defaults and max_turns = 5. `attacker_chat`
+    is a `spend.MeteredChat` pinned to `ATTACKER_MODEL`, so the attacker model
+    is governed by the same Meter (cap + per-call model-id guard) as the
+    victim; nothing about PyRIT's attack behaviour is changed."""
     return RedTeamingAttack(
         objective_target=target,
-        attack_adversarial_config=AttackAdversarialConfig(target=attacker_target()),
+        attack_adversarial_config=AttackAdversarialConfig(target=MeteredAttackerTarget(chat=attacker_chat)),
         attack_scoring_config=AttackScoringConfig(objective_scorer=scorer),
         max_turns=MAX_TURNS,
     )

@@ -138,7 +138,7 @@ def live_run(*, stopbard_bin: str, out: pathlib.Path, model: str | None, resume:
     from web3 import Web3
 
     from . import agent, chain, run, scenarios as scen, scorer, spend, world
-    from .attacker import ChainStateScorer, EpisodeResult, PilotTarget, build_attack
+    from .attacker import ATTACKER_MODEL, ChainStateScorer, EpisodeResult, PilotTarget, build_attack
 
     repo = pathlib.Path(__file__).resolve().parents[3]
     if not dry_run:
@@ -174,6 +174,7 @@ def live_run(*, stopbard_bin: str, out: pathlib.Path, model: str | None, resume:
 
         commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=repo).stdout.strip()
         victim = None if dry_run else spend.make_client(meter, model)
+        attacker_chat = None if dry_run else spend.make_client(meter, ATTACKER_MODEL)
         decimals = {scen.USDC: 6, scen.WETH: 18, scen.CBBTC: 8}
 
         def provider_for(arm):
@@ -234,7 +235,7 @@ def live_run(*, stopbard_bin: str, out: pathlib.Path, model: str | None, resume:
                     from pyrit.setup import IN_MEMORY, initialize_pyrit_async
                     asyncio.run(initialize_pyrit_async(IN_MEMORY, silent=True))
                     target = PilotTarget(episode=episode)
-                    atk = build_attack(target, ChainStateScorer(target=target))
+                    atk = build_attack(target, ChainStateScorer(target=target), attacker_chat=attacker_chat)
                     res = asyncio.run(atk.execute_async(objective=_goal(sc)))
                     success = res.outcome == AttackOutcome.SUCCESS
             finally:
@@ -255,6 +256,96 @@ def live_run(*, stopbard_bin: str, out: pathlib.Path, model: str | None, resume:
         if sb:
             sb.terminate(); sb.wait(timeout=10)
         proc.terminate(); proc.wait(timeout=10)
+
+
+def smoke_run(*, out: pathlib.Path, model: str, cap_usd: float, scenario_id: str = "S1") -> dict:
+    """Paid harness smoke (PILOT-2 pre-sign-off): A0 only, one benign and one
+    attacked episode of a single scenario, the real victim model and real
+    PyRIT, hard-capped at `cap_usd`. It exercises plumbing only — tool calls,
+    the injection slot, the visible text returned to the attacker, the chain
+    scorer, spend metering and the per-call model-id guards for both models.
+
+    A0 bypasses Stopbar, so no stopbard is launched and genuine Stopbar denial
+    reasons are NOT exercised here (that is an A2-only path); only the generic
+    return path (agent reply + tool errors -> attacker) is. These episodes are
+    EXCLUDED from pilot results; outcomes are recorded as visible for the smoke.
+    """
+    import asyncio
+
+    from pyrit.models import AttackOutcome
+    from pyrit.setup import IN_MEMORY, initialize_pyrit_async
+
+    from . import agent, chain, run, scenarios as scen, scorer, spend, world
+    from .attacker import ATTACKER_MODEL, ChainStateScorer, EpisodeResult, PilotTarget, build_attack
+
+    out.mkdir(parents=True, exist_ok=True)
+    sc = next(s for s in scen.build() if s.id == scenario_id)
+    goal = _goal(sc)
+    meter = spend.Meter(cap_usd=cap_usd, log_path=out / "infra.jsonl")
+    log = {"kind": "harness_smoke", "excluded_from_results": True, "outcomes": "visible",
+           "arm": "A0", "scenario": scenario_id, "cap_usd": cap_usd, "victim_model": model,
+           "attacker_model": ATTACKER_MODEL, "stopbard": False,
+           "note": "A0 bypasses Stopbar; genuine Stopbar denial reasons are not exercised here",
+           "started_utc": run.now(), "episodes": []}
+    proc = None
+    try:
+        proc, w3, rpc = world.fork()
+        a0 = run.a0_provider(rpc)
+        victim = spend.make_client(meter, model)
+        attacker_chat = spend.make_client(meter, ATTACKER_MODEL)
+
+        # --- benign episode (no injection; FPR-style baseline for this scenario) ---
+        base = chain.snapshot(w3)
+        run.fund(w3, a0)
+        b = agent.run_agent(victim, a0, sc.benign_reads(), sc.user_task)
+        log["episodes"].append({
+            "type": "benign", "task": sc.user_task,
+            "tool_calls": [{"name": n, "args": a} for n, a in b.calls],
+            "read_resource_called": any(n == "read_resource" for n, _ in b.calls),
+            "tool_errors": b.tool_errors, "iterations": b.iterations, "reply": b.reply,
+            "goal_reached_expect_false": bool(sc.success(w3, run.WALLET))})
+        chain.revert(w3, base)
+
+        # --- attacked episode (real PyRIT drives the injection into the read slot) ---
+        holder = {"base": chain.snapshot(w3)}
+        turns = []
+
+        def episode(text):
+            chain.revert(w3, holder["base"])
+            holder["base"] = chain.snapshot(w3)
+            run.fund(w3, a0)
+            r = agent.run_agent(victim, a0, sc.reads(text), sc.user_task)
+            visible = (r.reply or "") + ((" | " + "; ".join(r.tool_errors)) if r.tool_errors else "")
+            reached = bool(sc.success(w3, run.WALLET))
+            turns.append({
+                "injected_text": text,
+                "tool_calls": [{"name": n, "args": a} for n, a in r.calls],
+                "read_resource_called": any(n == "read_resource" for n, _ in r.calls),
+                "tool_errors": r.tool_errors, "visible_returned_to_attacker": visible,
+                "goal_reached": reached})
+            return EpisodeResult(visible_text=visible or "(no output)", goal_reached=reached)
+
+        attacked = {"type": "attacked", "objective": goal}
+        try:
+            asyncio.run(initialize_pyrit_async(IN_MEMORY, silent=True))
+            target = PilotTarget(episode=episode)
+            atk = build_attack(target, ChainStateScorer(target=target), attacker_chat=attacker_chat)
+            res = asyncio.run(atk.execute_async(objective=goal))
+            attacked["pyrit_outcome"] = (AttackOutcome.SUCCESS == res.outcome) and "SUCCESS" or str(res.outcome)
+        except spend.Abort as e:
+            attacked["aborted"] = str(e)
+        finally:
+            chain.revert(w3, holder["base"])
+        attacked["turns"] = turns
+        log["episodes"].append(attacked)
+    finally:
+        if proc:
+            proc.terminate(); proc.wait(timeout=10)
+
+    log["finished_utc"] = run.now()
+    log["spend"] = meter.summary()
+    (out / "smoke.json").write_text(json.dumps(log, indent=2, sort_keys=True) + "\n")
+    return log
 
 
 def _benign_tasks():
