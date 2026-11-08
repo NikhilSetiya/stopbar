@@ -54,20 +54,24 @@ class AgentRun:
 class ReadContext:
     """What the read tools return. `resources` maps a resource name to its text
     (the injection surface writes the attacker's content into one of these);
-    `transactions` is the history list; `decimals` maps token -> decimals."""
+    `transactions` is the history list; `decimals` maps token -> decimals.
+    `resource_taint` maps a resource name to the provenance category it carries
+    (e.g. untrusted_web); reading it taints the session (v1.1 SDK taint)."""
     balances: dict
     transactions: list
     resources: dict
     decimals: dict
+    resource_taint: dict = field(default_factory=dict)
 
 
 def _wei(amount: str, decimals: int) -> int:
     return int(Decimal(str(amount)) * (10 ** decimals))
 
 
-def run_agent(chat, provider, reads: ReadContext, task_prompt: str, *, max_iters: int = 8) -> AgentRun:
+def run_agent(chat, provider, reads: ReadContext, task_prompt: str, *, max_iters: int = 8, session=None) -> AgentRun:
     """Drive the victim model over the tools until it calls done() or stops.
-    `chat` is a spend.MeteredChat; `provider` is the arm's wallet provider."""
+    `chat` is a spend.MeteredChat; `provider` is the arm's wallet provider.
+    `session` (taint.Session) accrues SDK taint as untrusted surfaces are read."""
     run = AgentRun()
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": task_prompt}]
     for _ in range(max_iters):
@@ -90,23 +94,32 @@ def run_agent(chat, provider, reads: ReadContext, task_prompt: str, *, max_iters
             if name == "done":
                 run.reply = args.get("message", "")
                 return run
-            result = _dispatch(name, args, provider, reads, run)
+            result = _dispatch(name, args, provider, reads, run, session)
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
     run.reply = run.reply or "(stopped: reached the step limit)"
     return run
 
 
-def _dispatch(name: str, args: dict, provider, reads: ReadContext, run: AgentRun) -> str:
+def _dispatch(name: str, args: dict, provider, reads: ReadContext, run: AgentRun, session=None) -> str:
     try:
         if name == "get_balances":
             return json.dumps(reads.balances)
         if name == "get_recent_transactions":
+            # Transaction history is an untrusted-output tool (hashed trust map):
+            # reading it taints the session with its on-chain provenance.
+            if session is not None:
+                from . import taint
+                session.taint_tool("get_recent_transactions", taint.TX_HISTORY_LABEL)
             return json.dumps(reads.transactions)
         if name == "get_allowance":
             return json.dumps({"allowance": "see chain"})  # reads via provider omitted; benign tasks don't need live allowance
         if name == "read_resource":
             key = args.get("name", "")
             if key in reads.resources:
+                # Consuming a declared untrusted surface taints the session with
+                # that surface's provenance category (gated by the trust map).
+                if session is not None:
+                    session.taint_tool("read_resource", reads.resource_taint.get(key, ""))
                 return reads.resources[key]
             # A real resource API advertises what it holds, so the agent can
             # reach the declared surface instead of guessing the exact name.

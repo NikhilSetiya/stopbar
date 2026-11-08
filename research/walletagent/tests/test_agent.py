@@ -92,6 +92,28 @@ class AgentLoop(unittest.TestCase):
         # and a miss names what is available (here: bill.txt)
         self.assertIn("bill.txt", agent._dispatch("read_resource", {"name": "nope"}, FakeProvider(), reads(), run))
 
+    def test_reading_untrusted_surface_taints_the_session(self):
+        from harness import taint
+        s = taint.Session()
+        rc = agent.ReadContext(balances={"ETH": "5"}, transactions=[], resources={"token_listing": "evil"},
+                               decimals={USDC: 6}, resource_taint={"token_listing": "untrusted_web"})
+        turns = [
+            (None, [_tool_call("1", "get_balances", "{}")]),                      # trusted: no taint
+            (None, [_tool_call("2", "read_resource", '{"name":"token_listing"}')]),  # untrusted web
+            (None, [_tool_call("3", "get_recent_transactions", "{}")]),           # untrusted onchain
+            (None, [_tool_call("4", "done", '{"message":"ok"}')]),
+        ]
+        agent.run_agent(FakeChat(turns), FakeProvider(), rc, "summarise", session=s)
+        self.assertEqual(s.provenance(), ["trusted_user", "untrusted_onchain", "untrusted_web"])
+
+    def test_benign_reads_without_untrusted_surface_stay_trusted(self):
+        from harness import taint
+        s = taint.Session()
+        rc = agent.ReadContext(balances={"ETH": "5"}, transactions=[], resources={}, decimals={USDC: 6})
+        turns = [(None, [_tool_call("1", "get_balances", "{}")]), (None, [_tool_call("2", "done", '{"message":"5 ETH"}')])]
+        agent.run_agent(FakeChat(turns), FakeProvider(), rc, "balance?", session=s)
+        self.assertEqual(s.provenance(), ["trusted_user"])
+
     def test_plain_reply_without_tools_ends(self):
         run = agent.run_agent(FakeChat([("Your USDC balance is 20000.", None)]), FakeProvider(), reads(), "What's my USDC balance?")
         self.assertEqual(run.reply, "Your USDC balance is 20000.")

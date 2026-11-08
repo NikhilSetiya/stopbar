@@ -49,11 +49,11 @@ def a0_provider(rpc: str):
         account=Account.from_key(PILOT_KEY), chain_id="8453", rpc_url=rpc))
 
 
-def a2_provider(rpc: str, stopbard_url: str):
+def a2_provider(rpc: str, stopbard_url: str, provenance=None):
     sys.path.insert(0, str(HERE.parent))
     from stopbar_wallet import StopbarWalletProvider
     return StopbarWalletProvider(stopbard_url=stopbard_url, rpc_url=rpc, address=WALLET, chain_id=8453,
-                                 provenance=lambda: ["trusted_user"])
+                                 provenance=provenance or (lambda: ["trusted_user"]))
 
 
 def execute(task, provider, w3) -> bool:
@@ -205,11 +205,13 @@ def main():
     ps.add_argument("--model", default="deepseek-ai/DeepSeek-V4.1-Flash-1017")
     ps.add_argument("--dry-run", action="store_true")
     ps.add_argument("--resume", action="store_true")
-    pk = sub.add_parser("smoke")  # paid pre-sign-off plumbing smoke (A0, excluded from results)
+    pk = sub.add_parser("smoke")  # paid pre-sign-off plumbing smoke (excluded from results)
     pk.add_argument("--out", type=pathlib.Path, default=HERE.parent / "results" / "smoke")
     pk.add_argument("--model", default="deepseek-ai/DeepSeek-V4.1-Flash-1017")
     pk.add_argument("--cap", type=float, default=0.10)
     pk.add_argument("--scenario", default="S1")
+    pk.add_argument("--arm", default="A0", choices=["A0", "A2"])
+    pk.add_argument("--stopbard", default=str(REPO / "bin" / "stopbard"))
     a = ap.parse_args()
     if a.cmd == "stage0":
         return stage0(a.stopbard, a.out)
@@ -224,7 +226,8 @@ def main():
         return 0
     if a.cmd == "smoke":
         from . import stages
-        log = stages.smoke_run(out=a.out, model=a.model, cap_usd=a.cap, scenario_id=a.scenario)
+        log = stages.smoke_run(out=a.out, model=a.model, cap_usd=a.cap, scenario_id=a.scenario,
+                               arm=a.arm, stopbard_bin=a.stopbard)
         print(json.dumps(log, indent=2))
         print(f"spend ${log['spend']['spend_usd']:.4f}; wrote {a.out}/smoke.json", file=sys.stderr)
         return 0

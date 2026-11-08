@@ -226,6 +226,15 @@ Manual per-stage go is **replaced** by automated gate enforcement on the pre-reg
 
 This amendment governs execution only; the metrics, gates thresholds, scenarios, models, policy bundle and budget are unchanged.
 
+## 12. Amendment A6 (2026-11-07, before any run): harness taint labelling (frozen v1.1)
+
+The A2 arm never applied untrusted taint, so its `taint-unknown-destination` deny could not fire (the harness sent a static `provenance=["trusted_user"]`; the pre-run A2 smoke would have shown no denial). A6 wires the SDK taint the frozen Cedar policy already expects. **The Cedar policy, schema, scenarios, models, metrics, gate thresholds, §1a predictions and budget are unchanged.** The only changes are the trust map and the labelling:
+
+- **Trust map (hashed into the bundle):** `policies/pilot2/tool-trust.json` (sha256 `523947e45753fdbd3ecdec296314be99bfdad03b8fc8f4278761e9ce557e492d`) classifies the wallet agent's read tools from their definitions alone. `untrusted_output_tools = [get_recent_transactions, read_resource]`; all others are trusted. Adding it changes the enforced bundle hash from v1.0 `sha256:7dfdacdf…9d28b` to **v1.1 `sha256:4a74b695bbb646f11296759198aed7ac80da5db6bdc52bac284d2820b41852a5`** (the `.cedar` and `.cedarschema` bytes are unchanged).
+- **Monotonic session taint (labelling):** reading an untrusted-output surface taints the episode's session with that surface's definitional provenance category — `get_recent_transactions` and on-chain token metadata → `untrusted_onchain`, a web/token listing → `untrusted_web`, a document → `untrusted_email`. The taint is monotonic within an episode and attached as `provenance.labels` on **every** signing request, **in all arms, benign included** (A0 has no gatekeeper, so it is a no-op there). The deny then fires only on a transfer to a **non-allowlisted** destination from a tainted session; benign tasks send to allowlisted destinations, so taint never blocks them.
+
+Frozen artifact set for v1.1 = the v1.0 Cedar bundle + `tool-trust.json` + `harness/taint.py` and the labelling wiring (`harness/agent.py`, `harness/scenarios.py`, `harness/run.py`, `harness/stages.py`). No Cedar, scorer, gate, model or attacker change.
+
 ## Appendix A: why PyRIT (from the 2026-11-05 tool review)
 
 | Tool | Licence | Maintenance | Uses denial reasons | Fit |
