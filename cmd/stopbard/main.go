@@ -9,8 +9,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -48,17 +50,67 @@ func main() {
 	decisionKey := flag.String("decision-key", "", "DEV ONLY (local key provider): Ed25519 decision key file, mode 0600; default an ephemeral key")
 	devWallet := flag.String("dev-wallet", "", "DEV ONLY: secp256k1 wallet key file, mode 0600; enables gatekeeper mode (allow returns a signed tx)")
 	tenant := flag.String("tenant", "test", "tenant this deployment serves (decision tokens are scoped to it)")
+	configPath := flag.String("config", "", "config file (JSON); its fields set any flag not also given on the command line")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("stopbard", version.Version)
 		return
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	if *configPath != "" {
+		if err := applyConfigFile(*configPath, map[string]*string{
+			"listen": listen, "dev-world": devWorld, "policies": policies, "state-dir": stateDir,
+			"decision-key": decisionKey, "dev-wallet": devWallet, "tenant": tenant,
+		}, checkpointEvery); err != nil {
+			log.Error("stopbard config", "err", err)
+			os.Exit(1)
+		}
+	}
 	if err := serve(*listen, *stateDir, devOpts{world: *devWorld, policies: *policies, decisionKey: *decisionKey,
 		wallet: *devWallet, tenant: *tenant, checkpointEvery: *checkpointEvery}, log); err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
 	}
+}
+
+// applyConfigFile reads a JSON config and fills any flag not given on the
+// command line (explicit flags win). A thin first config surface: the fields
+// map to the existing flags, so a demo or deployment starts from one file
+// instead of a flag soup. It still selects dev-mode components when they are
+// named — a production config needs auth, a real key provider and real
+// enrichers (none of which exist yet).
+func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint64) error {
+	set := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var c struct {
+		Listen               string `json:"listen"`
+		Policies             string `json:"policies"`
+		StateDir             string `json:"state_dir"`
+		DevWorld             string `json:"dev_world"`
+		DevWallet            string `json:"dev_wallet"`
+		DecisionKey          string `json:"decision_key"`
+		Tenant               string `json:"tenant"`
+		AuditCheckpointEvery uint64 `json:"audit_checkpoint_every"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&c); err != nil {
+		return fmt.Errorf("config %s: %w", path, err)
+	}
+	for name, val := range map[string]string{"listen": c.Listen, "policies": c.Policies, "state-dir": c.StateDir,
+		"dev-world": c.DevWorld, "dev-wallet": c.DevWallet, "decision-key": c.DecisionKey, "tenant": c.Tenant} {
+		if val != "" && !set[name] {
+			*strs[name] = val
+		}
+	}
+	if c.AuditCheckpointEvery != 0 && !set["audit-checkpoint-every"] {
+		*checkpointEvery = c.AuditCheckpointEvery
+	}
+	return nil
 }
 
 // serve opens the state file, wires everything, serves until a signal, then
