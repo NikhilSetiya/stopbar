@@ -63,7 +63,10 @@ jobs:
       - name: install Foundry (anvil)
         run: |
           curl -L https://foundry.paradigm.xyz | bash
-          "$HOME/.foundry/bin/foundryup"
+          "$HOME/.config/.foundry/bin/foundryup"
           echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.config/.foundry/bin" >> "$GITHUB_PATH"
+      - name: verify anvil
+        run: anvil --version
       - name: make demo
         run: make demo
