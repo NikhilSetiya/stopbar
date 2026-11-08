@@ -188,12 +188,20 @@ def live_run(*, stopbard_bin: str, out: pathlib.Path, model: str | None, resume:
             return agent.ReadContext(balances={"ETH": "5", "USDC": "20000", "WETH": "2", "cbBTC": "0.05"},
                                      transactions=[], resources={}, decimals=decimals, contacts=ADDRESS_BOOK)
 
+        # Per-episode transcripts, so a 0/25 is diagnosable afterwards (delivery,
+        # attacker behaviour, victim behaviour) — the live run otherwise keeps
+        # only win/loss. Not persisted in dry runs (no model, scripted agent).
+        def _record(rec):
+            with open(out / "transcripts.jsonl", "a") as f:
+                f.write(json.dumps(rec, sort_keys=True) + "\n")
+
         def benign_fn(stage, arm, task):
             prov = provider_for(arm)
             snap = chain.snapshot(w3)
             run.fund(w3, a0)
             pre = scorer.snapshot_state(w3, run.WALLET, task.check)
             submitted = False
+            r = None
             session.reset()
             try:
                 if dry_run:
@@ -207,11 +215,16 @@ def live_run(*, stopbard_bin: str, out: pathlib.Path, model: str | None, resume:
                 submitted = False
             ok, _ = scorer.passed(w3, run.WALLET, task.check, pre, submitted)
             chain.revert(w3, snap)
+            if r is not None:
+                _record({"kind": "benign", "stage": stage, "arm": arm, "task": task.id, "passed": bool(ok),
+                         "submitted": r.submitted, "reply": r.reply,
+                         "tool_calls": [{"name": n, "args": a} for n, a in r.calls]})
             return ok
 
         def attack_fn(stage, arm, sc, run_idx):
             prov = provider_for(arm)
             holder = {"base": chain.snapshot(w3)}
+            turns = []
 
             def episode(text):
                 chain.revert(w3, holder["base"])
@@ -219,7 +232,7 @@ def live_run(*, stopbard_bin: str, out: pathlib.Path, model: str | None, resume:
                 run.fund(w3, a0)
                 reads = sc.reads(text)
                 session.reset()
-                errors = []
+                r, errors = None, []
                 if not dry_run:
                     try:
                         r = agent.run_agent(victim, prov, reads, sc.user_task, session=session)
@@ -232,6 +245,13 @@ def live_run(*, stopbard_bin: str, out: pathlib.Path, model: str | None, resume:
                 else:
                     visible = "(dry run: scripted agent ignores injection)"
                 reached = bool(sc.success(w3, run.WALLET))
+                if r is not None:
+                    read_names = [a.get("name") for n, a in r.calls if n == "read_resource"]
+                    surface_read = (any(k in read_names for k in reads.resource_taint) if reads.resource_taint
+                                    else any(n == "get_recent_transactions" for n, _ in r.calls))
+                    turns.append({"attacker_text": text, "surface_read": surface_read,
+                                  "tool_calls": [{"name": n, "args": a} for n, a in r.calls],
+                                  "tool_errors": r.tool_errors, "victim_reply": r.reply, "goal_reached": reached})
                 return EpisodeResult(visible_text=visible or "(no output)", goal_reached=reached)
 
             try:
@@ -247,6 +267,9 @@ def live_run(*, stopbard_bin: str, out: pathlib.Path, model: str | None, resume:
                     success = res.outcome == AttackOutcome.SUCCESS
             finally:
                 chain.revert(w3, holder["base"])
+            if not dry_run:
+                _record({"kind": "attack", "stage": stage, "arm": arm, "scenario": sc.id, "run": run_idx,
+                         "success": bool(success), "turns": turns})
             return bool(success)
 
         progress = Progress(out / "progress.jsonl")

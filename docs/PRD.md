@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| Version | 0.2 (draft) |
-| Date | 2026-11-04 |
+| Version | 0.3 (draft) |
+| Date | 2026-11-08 |
 | Owner | Nikhil |
 | Status | Design |
 
@@ -14,6 +14,8 @@
 Stopbar is an open-source **intent firewall for signers**. It intercepts every action an AI agent, service, or operator asks a signer to perform, evaluates it against deterministic policy, provenance, and loss bounds in an independent trust domain, and only then countersigns it. The signer refuses anything Stopbar has not approved.
 
 **Thesis:** the attack surface has moved from the key to the request path. Key security is largely solved (HSMs, MPC, hardware wallets). Request-path integrity is not.
+
+**Positioning (updated after the research pilots, 2026-11-08; [`docs/research/pilots-1-2.md`](research/pilots-1-2.md)).** Stopbar leads with the controls that hold **whatever the model does**: hard loss caps, independent intent decoding, allowlists, and a verifiable audit trail — against **compromised requesters (T3, the Binance pattern)** and **agent mistakes (T2, the OpenClaw pattern)**, where no model is in the loop or no adversary exists. Prompt-injection defence (T1) is **one input among several, not the headline**: two pre-registered pilots could not measure it — neither stock automated attacker landed a single success *even with no defence*, on Claude Haiku 4.5 or DeepSeek-V4.1-Flash — and showed session-level taint is too blunt. **Field-level taint stays in Phase 3** as the pre-registered replacement. See ADR 0002.
 
 ## 2. Problem
 
@@ -52,6 +54,8 @@ Every control is rated against the tier it actually holds at. Claims above a con
 | T4 | Scheming agent: pursues a hidden goal, writes code, launders taint, stays under thresholds | Agentic-misalignment and SHADE-Arena settings | Caps, allowlists, circuit breaker | v1 context taint; any control the agent can observe and route around |
 
 Key assumption for v1: the **harness** (agent framework + SDK) is trusted and the **model** is not. T4 is in scope for evaluation from Phase 1R and for enforcement from Phase 3, when taint moves into sandbox bindings the model cannot touch.
+
+**Pilot findings (2026-11-08, [`docs/research/pilots-1-2.md`](research/pilots-1-2.md)).** Two pre-registered pilots could not measure **T1** (prompt-injection) defence: the stock attackers achieved **0% attack success even on the undefended arm**, on Haiku 4.5 and DeepSeek-V4.1-Flash, and pilot 2's attacker (a safety-trained open model) partly refused to attack. The demonstrated, deterministic value is at **T2 and T3**, which do not depend on model robustness. Session-level taint was shown too blunt (a perfect agent loses ~56 usefulness points on the banking suite); **field-level taint (Phase 3)** is the planned replacement. The controls are unchanged; the product **headline shifts from T1 to T2/T3**.
 
 ## 3. Why now
 
