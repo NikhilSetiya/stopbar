@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/NikhilSetiya/stopbar/internal/audit"
+	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/decode/evm"
 	"github.com/NikhilSetiya/stopbar/internal/decode/toolcall"
@@ -50,6 +51,8 @@ func main() {
 	decisionKey := flag.String("decision-key", "", "DEV ONLY (local key provider): Ed25519 decision key file, mode 0600; default an ephemeral key")
 	devWallet := flag.String("dev-wallet", "", "DEV ONLY: secp256k1 wallet key file, mode 0600; enables gatekeeper mode (allow returns a signed tx)")
 	tenant := flag.String("tenant", "test", "tenant this deployment serves (decision tokens are scoped to it)")
+	authKeys := flag.String("auth-keys", "", "API key store (JSON array of `stopbar keygen api-key` records); enables authentication and non-loopback listening")
+	ratePerMin := flag.Int("rate-per-min", 0, "per-identity request cap per minute (0: no gateway cap)")
 	configPath := flag.String("config", "", "config file (JSON); its fields set any flag not also given on the command line")
 	flag.Parse()
 	if *showVersion {
@@ -60,14 +63,14 @@ func main() {
 	if *configPath != "" {
 		if err := applyConfigFile(*configPath, map[string]*string{
 			"listen": listen, "dev-world": devWorld, "policies": policies, "state-dir": stateDir,
-			"decision-key": decisionKey, "dev-wallet": devWallet, "tenant": tenant,
-		}, checkpointEvery); err != nil {
+			"decision-key": decisionKey, "dev-wallet": devWallet, "tenant": tenant, "auth-keys": authKeys,
+		}, checkpointEvery, ratePerMin); err != nil {
 			log.Error("stopbard config", "err", err)
 			os.Exit(1)
 		}
 	}
 	if err := serve(*listen, *stateDir, devOpts{world: *devWorld, policies: *policies, decisionKey: *decisionKey,
-		wallet: *devWallet, tenant: *tenant, checkpointEvery: *checkpointEvery}, log); err != nil {
+		wallet: *devWallet, tenant: *tenant, checkpointEvery: *checkpointEvery, authKeys: *authKeys, ratePerMin: *ratePerMin}, log); err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
 	}
@@ -79,7 +82,7 @@ func main() {
 // instead of a flag soup. It still selects dev-mode components when they are
 // named — a production config needs auth, a real key provider and real
 // enrichers (none of which exist yet).
-func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint64) error {
+func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint64, ratePerMin *int) error {
 	set := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	b, err := os.ReadFile(path)
@@ -94,7 +97,9 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 		DevWallet            string `json:"dev_wallet"`
 		DecisionKey          string `json:"decision_key"`
 		Tenant               string `json:"tenant"`
+		AuthKeys             string `json:"auth_keys"`
 		AuditCheckpointEvery uint64 `json:"audit_checkpoint_every"`
+		RatePerMin           int    `json:"rate_per_min"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -102,13 +107,16 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 		return fmt.Errorf("config %s: %w", path, err)
 	}
 	for name, val := range map[string]string{"listen": c.Listen, "policies": c.Policies, "state-dir": c.StateDir,
-		"dev-world": c.DevWorld, "dev-wallet": c.DevWallet, "decision-key": c.DecisionKey, "tenant": c.Tenant} {
+		"dev-world": c.DevWorld, "dev-wallet": c.DevWallet, "decision-key": c.DecisionKey, "tenant": c.Tenant, "auth-keys": c.AuthKeys} {
 		if val != "" && !set[name] {
 			*strs[name] = val
 		}
 	}
 	if c.AuditCheckpointEvery != 0 && !set["audit-checkpoint-every"] {
 		*checkpointEvery = c.AuditCheckpointEvery
+	}
+	if c.RatePerMin != 0 && !set["rate-per-min"] {
+		*ratePerMin = c.RatePerMin
 	}
 	return nil
 }
@@ -143,7 +151,16 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	runErr := run(addr, rt.eval, nonces, rt.keys, rt.counters, log)
+	var authn gateway.Authenticator
+	if o.authKeys != "" {
+		ks, err := auth.LoadKeyStore(o.authKeys)
+		if err != nil {
+			return err
+		}
+		authn = gateway.BearerAuthenticator{Store: ks}
+		log.Info("authentication enabled", "auth_keys", o.authKeys, "rate_per_min", o.ratePerMin)
+	}
+	runErr := run(addr, rt.eval, nonces, rt.keys, rt.counters, authn, rt.audit, o.ratePerMin, log)
 	if rt.signed {
 		if err := rt.audit.Checkpoint(); err != nil {
 			log.Error("final audit checkpoint failed", "severity", "high", "err", err)
@@ -155,6 +172,8 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 }
 
 type devOpts struct {
+	authKeys                                     string
+	ratePerMin                                   int
 	world, policies, decisionKey, wallet, tenant string
 	checkpointEvery                              uint64
 	db                                           *store.DB
@@ -262,8 +281,8 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 	return runtime{eval: eval, keys: ring.JWKS, counters: e.Counters, audit: lg, signed: true}, nil
 }
 
-func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys func() []decision.JWK, counters func() map[string]uint64, log *slog.Logger) error {
-	if err := requireLoopback(addr); err != nil {
+func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys func() []decision.JWK, counters func() map[string]uint64, authn gateway.Authenticator, auditSink gateway.AuditSink, ratePerMin int, log *slog.Logger) error {
+	if err := requireLoopbackUnlessAuth(addr, authn != nil); err != nil {
 		return err
 	}
 	ln, err := net.Listen("tcp", addr)
@@ -271,7 +290,8 @@ func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys fu
 		return err
 	}
 	srv := &http.Server{
-		Handler:           gateway.New(gateway.Config{Evaluator: eval, Nonces: nonces, Keys: keys, Counters: counters, Logger: log}),
+		Handler: gateway.New(gateway.Config{Evaluator: eval, Nonces: nonces, Keys: keys, Counters: counters, Logger: log,
+			Authenticator: authn, Audit: auditSink, RatePerMin: ratePerMin}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -304,8 +324,11 @@ func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys fu
 	return nil
 }
 
-// requireLoopback refuses to serve an unauthenticated API beyond this host.
-func requireLoopback(addr string) error {
+// requireLoopbackUnlessAuth refuses to serve an unauthenticated API beyond this
+// host (CS-103): a non-loopback address is allowed only when authentication is
+// configured (-auth-keys), so an agent/tenant identity can never be spoofed
+// over the network.
+func requireLoopbackUnlessAuth(addr string, authEnabled bool) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("invalid -listen %q: %w", addr, err)
@@ -315,7 +338,9 @@ func requireLoopback(addr string) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("refusing to listen on %q: no authentication yet (CS-103), so only loopback addresses are allowed", addr)
+		if !authEnabled {
+			return fmt.Errorf("refusing to listen on %q without authentication: set -auth-keys to serve a non-loopback address", addr)
+		}
 	}
 	return nil
 }

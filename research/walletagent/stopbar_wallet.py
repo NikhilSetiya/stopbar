@@ -38,10 +38,10 @@ class StopbarBlocked(Exception):
 
 class StopbarWalletProvider(EvmWalletProvider):
     def __init__(self, *, stopbard_url: str, rpc_url: str, address: str, chain_id: int, tenant: str = "test",
-                 agent_id: str = "wallet-agent", session_id: str | None = None,
+                 agent_id: str = "wallet-agent", session_id: str | None = None, api_key: str | None = None,
                  provenance: Callable[[], list[str]] = lambda: ["trusted_user"],
                  gas_limit_multiplier: float = 1.2, fee_per_gas_multiplier: float = 1.0, timeout: float = 15.0):
-        self.url, self.timeout = stopbard_url.rstrip("/"), timeout
+        self.url, self.timeout, self.api_key = stopbard_url.rstrip("/"), timeout, api_key
         self.web3 = Web3(Web3.HTTPProvider(rpc_url))
         self.address = Web3.to_checksum_address(address)
         self.chain_id = chain_id
@@ -118,8 +118,11 @@ class StopbarWalletProvider(EvmWalletProvider):
             },
             "provenance": {"labels": list(self.provenance())},
         }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = "Bearer " + self.api_key
         req = urllib.request.Request(self.url + "/v1/evaluate", data=json.dumps(body).encode(), method="POST",
-                                     headers={"Content-Type": "application/json"})
+                                     headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 return r.status, json.loads(r.read())

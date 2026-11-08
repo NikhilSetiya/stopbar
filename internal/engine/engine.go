@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
@@ -237,9 +238,19 @@ func (e *Engine) Evaluate(ctx context.Context, req model.ActionRequest) (d model
 	return e.evaluate(ctx, req, now), nil
 }
 
+// addIdentity puts the authenticated caller (if any) into an audit body, so
+// every audit record carries the identity. It goes INSIDE the body, leaving
+// audit-hash v1 unchanged (spec/audit-hash-v1.md).
+func addIdentity(ctx context.Context, body map[string]any) map[string]any {
+	if id, ok := auth.FromContext(ctx); ok {
+		body["identity"] = id
+	}
+	return body
+}
+
 func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time.Time) model.Decision {
 	audit := func(d model.Decision, extra map[string]any) model.Decision {
-		body := map[string]any{"request": req, "decision": d}
+		body := addIdentity(ctx, map[string]any{"request": req, "decision": d})
 		for k, v := range extra {
 			body[k] = v
 		}
@@ -312,7 +323,7 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 	d.Token = token
 
 	// limiter: reserve + audit the allow, atomically.
-	rec := &model.AuditEntry{Type: model.AuditDecision, Body: map[string]any{"request": req, "decision": d, "context": er}}
+	rec := &model.AuditEntry{Type: model.AuditDecision, Body: addIdentity(ctx, map[string]any{"request": req, "decision": d, "context": er})}
 	if err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Reserve(ctx, id, er, e.cfg.DecisionTTL, rec) }); err != nil {
 		e.release(ctx, id, "reserve failed or timed out") // a timed-out Reserve may still land
 		if errors.Is(err, ErrAuditUnavailable) {

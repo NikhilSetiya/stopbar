@@ -208,6 +208,7 @@ const (
 	AuditCommit       AuditRecordType = "commit"
 	AuditRelease      AuditRecordType = "release"
 	AuditOverride     AuditRecordType = "override"
+	AuditAuthReject   AuditRecordType = "auth_reject" // CS-103: a request rejected at the gateway (identity mismatch, scope)
 )
 
 // AuditEntry is an audit record before the log assigns its sequence number,
