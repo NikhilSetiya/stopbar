@@ -46,3 +46,24 @@ jobs:
         with: {go-version-file: go.mod}
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with: {version: v2.15.0}
+
+  # Product walking skeleton (make demo): build -> stopbard from a config file ->
+  # a scripted AgentKit agent on an Anvil fork of Base (allow+broadcast, deny,
+  # escalate, deny, restart with cap/nonce persistence, audit verify). Non-blocking
+  # until added to branch protection: it needs Foundry + a Base fork (network), so
+  # it is slower and more external than the required jobs.
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: {go-version-file: go.mod}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with: {python-version: "3.12"}
+      - name: install Foundry (anvil)
+        run: |
+          curl -L https://foundry.paradigm.xyz | bash
+          "$HOME/.foundry/bin/foundryup"
+          echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
+      - name: make demo
+        run: make demo
