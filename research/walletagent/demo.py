@@ -81,14 +81,26 @@ def start_stopbard(bin_path, config, log_path):
     raise SystemExit(f"stopbard did not start; log:\n{pathlib.Path(log_path).read_text()}")
 
 
-def post_evaluate(url, body):
-    req = urllib.request.Request(url + "/v1/evaluate", data=json.dumps(body).encode(),
-                                 method="POST", headers={"Content-Type": "application/json"})
+def post_evaluate(url, body, authz=None):
+    headers = {"Content-Type": "application/json"}
+    if authz:
+        headers["Authorization"] = authz
+    req = urllib.request.Request(url + "/v1/evaluate", data=json.dumps(body).encode(), method="POST", headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read())
+
+
+def gen_api_key(cli, store_path, tenant, agent, scopes):
+    # `stopbar keygen api-key`: secret on stderr (shown once), record on stdout.
+    r = subprocess.run([str(cli), "keygen", "api-key", "--tenant", tenant, "--agent", agent, "--scopes", scopes],
+                       capture_output=True, text=True, check=True)
+    record = json.loads("\n".join(l for l in r.stdout.splitlines() if not l.lstrip().startswith("#")))
+    secret = next(l.strip() for l in r.stderr.splitlines() if l.strip().startswith("stopbar_sk_"))
+    store_path.write_text(json.dumps([record], indent=2))  # the server-side hashed store
+    return secret
 
 
 def reasons(d):
@@ -100,7 +112,7 @@ def fixed_nonce_body(wallet):
     # can replay it after a restart to prove the spent-nonce set persisted.
     return {"id": "req_demo_replay", "tenant": "demo", "nonce": "demo-fixed-nonce-aaaaaaaaaaaa",
             "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "ttl_seconds": 300,
-            "actor": {"agent_id": "demo-agent"},
+            "actor": {"agent_id": "wallet-agent"},  # must match the api key's identity
             "action": {"kind": "evm_tx", "chain_id": 8453, "from": wallet.lower(), "to": UNKNOWN,
                        "value_wei": "1000000000000000", "data": "0x", "tx_type": 2, "tx_nonce": "0",
                        "gas_limit": "21000", "max_fee_per_gas": "200000000", "max_priority_fee_per_gas": "100000000"},
@@ -121,7 +133,9 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     dec_key, wallet_file = out / "decision.key", out / "wallet.key"
     worldf, config, statedir = out / "world.json", out / "config.json", out / "state"
+    keys_store = out / "api-keys.json"
     write_decision_key(binscli, dec_key)
+    api_secret = gen_api_key(binscli, keys_store, "demo", "wallet-agent", "evaluate")
     with open(os.open(wallet_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "w") as f:
         f.write("stopbar-dev-wallet-secp256k1-v1\n" + run.PILOT_KEY[2:] + "\n")
     demo_world(worldf)
@@ -135,12 +149,14 @@ def main():
             "listen": f"127.0.0.1:{port}", "policies": str(HERE / "policies" / "pilot2"),
             "state_dir": str(statedir), "dev_world": str(worldf), "dev_wallet": str(wallet_file),
             "decision_key": str(dec_key), "tenant": "demo", "audit_checkpoint_every": 1,
+            "auth_keys": str(keys_store), "rate_per_min": 600,
         }, indent=2))
         say(f"Config written: {config}")
+        say("  AUTH ON: identity comes from the API key (hashed store), never the body.")
         say("  (NOTE: the config still selects DEV components — dev_world, dev_wallet, decision_key — "
-            "a production config needs auth, a real key provider and real enrichers.)")
-        gap("stopbard -config only wraps the existing dev flags; no production config "
-            "(auth, KMS/HSM key provider, real enrichers) exists yet.")
+            "a production config needs a real (KMS/HSM) key provider and real enrichers.)")
+        gap("stopbard -config still selects dev components; a production config needs a real "
+            "(KMS/HSM) key provider and real enrichers (CS-131/132/133).")
 
         sb, url = start_stopbard(binsb, config, out / "stopbard.log")
         say(f"stopbard up at {url} from the config file (no dev flags on the command line).")
@@ -149,7 +165,7 @@ def main():
         run.fund(w3, a0)
         labels = ["trusted_user"]
         prov = StopbarWalletProvider(stopbard_url=url, rpc_url=rpc, address=run.WALLET, chain_id=8453,
-                                     tenant="demo", provenance=lambda: list(labels))
+                                     tenant="demo", api_key=api_secret, provenance=lambda: list(labels))
 
         # ---- Step 1: allowed contact payment (broadcast + balance change) ----
         hdr("STEP 1  Allowed contact payment  →  expect ALLOW, broadcast, balance change")
@@ -188,19 +204,26 @@ def main():
         except StopbarBlocked as e:
             say(f"  {e.status} DENY — {reasons(e.decision)}")
 
-        # consume a fixed nonce now, to replay after the restart
-        st, _ = post_evaluate(url, fixed_nonce_body(run.WALLET))
-        say(f"\n  (pre-restart: consumed a fixed-nonce request, status {st})")
+        # ---- Step 5: a request with no credential is rejected before anything ----
+        hdr("STEP 5  Unauthenticated request (no API key)  →  expect 401")
+        st, d = post_evaluate(url, fixed_nonce_body(run.WALLET), authz=None)
+        say(f"  {st} {reasons(d)}  " + ("[rejected at the door, no nonce spent]" if st == 401 else "[!! not rejected]"))
+        if st != 401:
+            gap("Step 5 (unauthenticated request) was not rejected with 401.")
 
-        # ---- Step 5: restart stopbard; caps and nonces persist ----
-        hdr("STEP 5  Restart stopbard (same config/state-dir/key)  →  caps & nonces persist")
+        # consume a fixed nonce now (authenticated), to replay after the restart
+        st, _ = post_evaluate(url, fixed_nonce_body(run.WALLET), authz="Bearer " + api_secret)
+        say(f"  (pre-restart: consumed a fixed-nonce authenticated request, status {st})")
+
+        # ---- Step 6: restart stopbard; caps and nonces persist ----
+        hdr("STEP 6  Restart stopbard (same config/state-dir/key)  →  caps & nonces persist")
         sb.terminate(); sb.wait(timeout=10)
         say("  stopbard stopped. Restarting from the same config …")
         sb, url = start_stopbard(binsb, config, out / "stopbard2.log")
         prov.url = url.rstrip("/")
         say(f"  stopbard back up at {url}")
-        # nonce persistence: replay the fixed-nonce request
-        st, d = post_evaluate(url, fixed_nonce_body(run.WALLET))
+        # nonce persistence: replay the fixed-nonce request (authenticated)
+        st, d = post_evaluate(url, fixed_nonce_body(run.WALLET), authz="Bearer " + api_secret)
         say(f"  Replay the pre-restart nonce → {st} {reasons(d)}  "
             + ("[nonce set PERSISTED]" if "NONCE_REPLAYED" in reasons(d) else "[!! nonce not remembered]"))
         if "NONCE_REPLAYED" not in reasons(d):
@@ -214,8 +237,8 @@ def main():
         except StopbarBlocked as e:
             say(f"  Second payment {e.status} DENY — {reasons(e.decision)}  [cap count PERSISTED]")
 
-        # ---- Step 6: one-shot audit verify (offline, over the whole log) ----
-        hdr("STEP 6  Audit verify (one-shot, offline, over the whole log incl. the restart)")
+        # ---- Step 7: one-shot audit verify (offline, over the whole log) ----
+        hdr("STEP 7  Audit verify (one-shot, offline, over the whole log incl. the restart)")
         sb.terminate(); sb.wait(timeout=10); sb = None  # final checkpoint on shutdown
         v = subprocess.run([str(binscli), "audit", "verify", "--state-dir", str(statedir),
                             "--decision-key", str(dec_key), "--require-covered"], capture_output=True, text=True)
@@ -234,7 +257,7 @@ def main():
     say(f"Wall-clock for the journey (excludes first clone/toolchain fetch): {mins:.1f} min "
         f"(PRD goal: < 30 min). Build + Foundry install are measured by `make demo` around this script.")
     say(f"\nSTUBS / DEV in play: devstub price+balance+allowlist (world.json), dev decision key, dev wallet key, "
-        f"loopback-only (no auth).")
+        f"a demo API key. AUTH is ON (API key); mTLS/SPIFFE and real enrichers are the remaining work.")
     say(f"\nHIDDEN-KNOWLEDGE STEPS ({len(HIDDEN)}):")
     for h in HIDDEN:
         say(f"  - {h}")

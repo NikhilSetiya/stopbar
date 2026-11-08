@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/canon"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/model"
@@ -40,6 +41,35 @@ const MaxBodyBytes = 64 << 10
 // maxSafeInt is 2^53: the largest magnitude at which every integer is exactly
 // representable as an IEEE-754 double, which is what JCS hashes.
 var maxSafeInt = new(big.Rat).SetInt64(1 << 53)
+
+// EvalScope is the scope an API key needs to call /v1/evaluate.
+const EvalScope = "evaluate"
+
+// Authenticator derives the caller's identity from the request (an API key
+// header now; mTLS/SPIFFE later). It returns auth.ErrUnauthenticated for a
+// missing or unknown credential. nil means auth is off (dev loopback only).
+type Authenticator interface {
+	Authenticate(r *http.Request) (auth.Identity, error)
+}
+
+// AuditSink records a gateway-level rejection (an identity mismatch or a
+// missing scope) in the hash-chained audit log.
+type AuditSink interface {
+	Append(ctx context.Context, t model.AuditRecordType, body any) error
+}
+
+// BearerAuthenticator authenticates "Authorization: Bearer <secret>" against a
+// key store (CS-103).
+type BearerAuthenticator struct{ Store *auth.KeyStore }
+
+// Authenticate returns the identity the bearer token authenticates as.
+func (b BearerAuthenticator) Authenticate(r *http.Request) (auth.Identity, error) {
+	secret, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		return auth.Identity{}, auth.ErrUnauthenticated
+	}
+	return b.Store.Verify(strings.TrimSpace(secret))
+}
 
 // Evaluator is the engine as the gateway sees it (LLD §2 Engine.Evaluate).
 type Evaluator interface {
@@ -64,6 +94,10 @@ const (
 	CodeExpired           Code = "EXPIRED"
 	CodeIssuedInFuture    Code = "ISSUED_IN_FUTURE"
 	CodeNonceReplayed     Code = "NONCE_REPLAYED"
+	CodeUnauthenticated   Code = "UNAUTHENTICATED"   // CS-103: missing or unknown credential
+	CodeIdentityMismatch  Code = "IDENTITY_MISMATCH" // body tenant/agent != authenticated identity
+	CodeForbiddenScope    Code = "FORBIDDEN_SCOPE"   // the key lacks the required scope
+	CodeRateLimited       Code = "RATE_LIMITED"      // per-identity rate limit exceeded
 )
 
 // ClockSkew is how far issued_at may lead or trail the gateway clock (LLD §4).
@@ -95,6 +129,10 @@ var codeStatus = map[Code]int{
 	CodeExpired:           http.StatusBadRequest,
 	CodeIssuedInFuture:    http.StatusBadRequest,
 	CodeNonceReplayed:     http.StatusBadRequest,
+	CodeUnauthenticated:   http.StatusUnauthorized,
+	CodeIdentityMismatch:  http.StatusForbidden,
+	CodeForbiddenScope:    http.StatusForbidden,
+	CodeRateLimited:       http.StatusTooManyRequests,
 }
 
 // ErrorBody is the wire shape of every non-2xx response (LLD §4.1).
@@ -128,6 +166,13 @@ type Config struct {
 	// Clock is for tests. stopbard never sets it: a configurable clock would
 	// be a switch that turns freshness checks off.
 	Clock func() time.Time
+	// Authenticator derives the caller identity (CS-103). nil: auth is off, and
+	// stopbard then refuses any non-loopback listen address.
+	Authenticator Authenticator
+	// Audit records gateway-level rejections (identity mismatch, missing scope).
+	Audit AuditSink
+	// RatePerMin is the per-identity request cap per minute (0: no gateway cap).
+	RatePerMin int
 }
 
 // Gateway is an http.Handler serving the Stopbar API.
@@ -140,11 +185,15 @@ type Gateway struct {
 	log     *slog.Logger
 	metrics *metrics
 	mux     *http.ServeMux
+	auth    Authenticator
+	audit   AuditSink
+	rate    *rateLimiter
 }
 
 // New returns a Gateway.
 func New(cfg Config) *Gateway {
-	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, keys: cfg.Keys, extra: cfg.Counters, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux()}
+	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, keys: cfg.Keys, extra: cfg.Counters, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux(),
+		auth: cfg.Authenticator, audit: cfg.Audit, rate: newRateLimiter(cfg.RatePerMin)}
 	if g.log == nil {
 		g.log = slog.New(slog.DiscardHandler)
 	}
@@ -197,13 +246,32 @@ func (g *Gateway) evaluate(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	ctx := r.Context()
+	if g.auth != nil { // CS-103: identity comes from auth, never the body
+		id, aerr := g.auth.Authenticate(r)
+		if aerr != nil {
+			return withID(fail(CodeUnauthenticated, "missing or invalid credential"), req.ID)
+		}
+		if !id.HasScope(EvalScope) {
+			g.auditReject(ctx, id, req, "key lacks the "+EvalScope+" scope")
+			return withID(fail(CodeForbiddenScope, "the API key lacks the %q scope", EvalScope), req.ID)
+		}
+		if req.Tenant != id.Tenant || (req.Actor.AgentID != "" && req.Actor.AgentID != id.AgentID) {
+			g.auditReject(ctx, id, req, "body tenant/agent does not match the authenticated identity")
+			return withID(fail(CodeIdentityMismatch, "request tenant/agent does not match the authenticated identity"), req.ID)
+		}
+		if !g.rate.allow(id.KeyID, g.clock()) {
+			return withID(fail(CodeRateLimited, "per-identity rate limit exceeded"), req.ID)
+		}
+		ctx = auth.WithIdentity(ctx, id)
+	}
 	if err := g.checkFresh(req); err != nil {
 		return err
 	}
 	if g.eval == nil {
 		return withID(fail(CodeEngineUnavailable, "no policy engine configured"), req.ID)
 	}
-	d, err := g.eval.Evaluate(r.Context(), req)
+	d, err := g.eval.Evaluate(ctx, req)
 	if err != nil {
 		g.log.Error("evaluator error", "request_id", req.ID, "err", err)
 		return withID(fail(CodeInternal, "evaluation failed"), req.ID)
@@ -227,6 +295,19 @@ var outcomeStatus = map[model.Outcome]int{
 }
 
 func withID(e *apiError, id string) *apiError { e.RequestID = id; return e }
+
+// auditReject records a gateway-level rejection in the audit log. The
+// authenticated identity goes INSIDE the body, so audit-hash v1 is unchanged.
+func (g *Gateway) auditReject(ctx context.Context, id auth.Identity, req model.ActionRequest, reason string) {
+	if g.audit == nil {
+		return
+	}
+	body := map[string]any{"request_id": req.ID, "tenant": req.Tenant, "actor": req.Actor,
+		"identity": id, "reason": reason}
+	if err := g.audit.Append(ctx, model.AuditAuthReject, body); err != nil {
+		g.log.Error("audit of auth rejection failed", "request_id", req.ID, "err", err)
+	}
+}
 
 // checkFresh enforces the time window (both directions) and spends the
 // nonce. It runs before evaluation, so the nonce is consumed whatever the

@@ -6,7 +6,8 @@ import (
 	"testing"
 )
 
-func TestRequireLoopback(t *testing.T) {
+func TestRequireLoopbackUnlessAuth(t *testing.T) {
+	// Without auth, only loopback is allowed.
 	for addr, ok := range map[string]bool{
 		"127.0.0.1:7777": true,
 		"localhost:7777": true,
@@ -19,9 +20,16 @@ func TestRequireLoopback(t *testing.T) {
 		"example.com:80": false,
 		"127.0.0.1":      false, // no port
 	} {
-		if err := requireLoopback(addr); (err == nil) != ok {
-			t.Errorf("%s: err=%v, want ok=%v", addr, err, ok)
+		if err := requireLoopbackUnlessAuth(addr, false); (err == nil) != ok {
+			t.Errorf("no auth, %s: err=%v, want ok=%v", addr, err, ok)
 		}
+	}
+	// With auth, a non-loopback address is allowed; a malformed one still isn't.
+	if err := requireLoopbackUnlessAuth("0.0.0.0:7777", true); err != nil {
+		t.Errorf("auth on, 0.0.0.0:7777 should be allowed: %v", err)
+	}
+	if err := requireLoopbackUnlessAuth("127.0.0.1", true); err == nil {
+		t.Error("auth on, a port-less address should still be rejected")
 	}
 }
 
