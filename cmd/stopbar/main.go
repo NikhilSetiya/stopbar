@@ -3,7 +3,10 @@ package main
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -11,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
@@ -24,7 +28,10 @@ import (
 const usage = `usage:
   stopbar version
   stopbar decode-tx <0x raw signed tx>   decode an EIP-1559 tx: recovered sender, every field, payload_hash
-  stopbar audit verify --state-dir DIR --keys JWKS.json [--from N] [--to M] [--require-covered [--allow-empty]]
+  stopbar keygen decision-key <file>     generate a Stopbar decision key (Ed25519, mode 0600)
+  stopbar keygen api-key --tenant T [--agent ID] [--scopes a,b]
+      generate an API key: the secret (shown once) and the hashed record to store
+  stopbar audit verify --state-dir DIR (--keys JWKS.json | --decision-key FILE) [--from N] [--to M] [--require-covered [--allow-empty]]
       recompute the audit hash chain and check the signed checkpoints, offline
   stopbar audit export --state-dir DIR [--from N] [--to M]
       print audit records as JSON lines (unverified; run verify first)`
@@ -37,6 +44,10 @@ func main() {
 	switch os.Args[1] {
 	case "audit":
 		if err := auditCmd(os.Args[2:]); err != nil {
+			fail(err.Error())
+		}
+	case "keygen":
+		if err := keygenCmd(os.Args[2:]); err != nil {
 			fail(err.Error())
 		}
 	case "decode-tx":
@@ -89,6 +100,7 @@ func auditCmd(args []string) error {
 	fs := flag.NewFlagSet("audit "+args[0], flag.ContinueOnError)
 	stateDir := fs.String("state-dir", "", "stopbard state directory (holds state.db)")
 	keysFile := fs.String("keys", "", "decision keys as served at /v1/keys (verify)")
+	decisionKeyFile := fs.String("decision-key", "", "one-shot verify: derive the keys from the Stopbar decision key FILE directly, no running server (single-key deployments)")
 	from := fs.Uint64("from", 1, "first record")
 	to := fs.Uint64("to", 0, "last record (0: through the end)")
 	requireCovered := fs.Bool("require-covered", false, "fail if any record is after the last signed checkpoint, or the log is empty")
@@ -119,7 +131,7 @@ func auditCmd(args []string) error {
 		}
 		return nil
 	case "verify":
-		keys, err := loadKeys(*keysFile)
+		keys, err := verifyKeys(*keysFile, *decisionKeyFile)
 		if err != nil {
 			return err
 		}
@@ -171,4 +183,86 @@ func loadKeys(path string) (map[string]ed25519.PublicKey, error) {
 		out[k.Kid] = pub
 	}
 	return out, nil
+}
+
+// verifyKeys returns the public keys to verify against, from a saved /v1/keys
+// document (--keys) or, for a single-key deployment, derived directly from the
+// decision key FILE (--decision-key) so verify needs no running server.
+func verifyKeys(keysFile, decisionKeyFile string) (map[string]ed25519.PublicKey, error) {
+	if (keysFile == "") == (decisionKeyFile == "") {
+		return nil, errors.New("exactly one of --keys (saved /v1/keys) or --decision-key (the key file) is required")
+	}
+	if decisionKeyFile != "" {
+		priv, err := decision.LoadKeyFile(decisionKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		pub := priv.Public().(ed25519.PublicKey)
+		return map[string]ed25519.PublicKey{decision.Kid(pub): pub}, nil
+	}
+	return loadKeys(keysFile)
+}
+
+// keygenCmd generates the keys a deployment needs: the Ed25519 decision key
+// (for signing decision tokens and audit checkpoints) and API keys (for the
+// auth CS-103 adds). The decision key is written in Stopbar's tagged file
+// format; an API key's secret is shown once and only its hash is stored.
+func keygenCmd(args []string) error {
+	if len(args) == 0 {
+		return errors.New(usage)
+	}
+	switch args[0] {
+	case "decision-key":
+		if len(args) != 2 {
+			return errors.New("usage: stopbar keygen decision-key <file>")
+		}
+		path := args[1]
+		if _, err := os.Stat(path); err == nil {
+			return fmt.Errorf("keygen: %s already exists; refusing to overwrite a key", path)
+		}
+		pub, priv, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			return err
+		}
+		if err := decision.WriteKeyFile(path, priv); err != nil {
+			return err
+		}
+		fmt.Printf("wrote decision key %s (kid %s, mode 0600)\n", path, decision.Kid(pub))
+		return nil
+	case "api-key":
+		fs := flag.NewFlagSet("keygen api-key", flag.ContinueOnError)
+		tenant := fs.String("tenant", "", "tenant the key is scoped to (required)")
+		agent := fs.String("agent", "", "agent id the key authenticates as (optional)")
+		scopes := fs.String("scopes", "evaluate", "comma-separated scopes")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *tenant == "" {
+			return errors.New("keygen api-key: --tenant is required")
+		}
+		raw := make([]byte, 24)
+		if _, err := rand.Read(raw); err != nil {
+			return err
+		}
+		secret := "stopbar_sk_" + base64.RawURLEncoding.EncodeToString(raw)
+		sum := sha256.Sum256([]byte(secret))
+		rec := map[string]any{
+			"id":          "ak_" + hex.EncodeToString(sum[:4]),
+			"tenant":      *tenant,
+			"agent_id":    *agent,
+			"scopes":      strings.Split(*scopes, ","),
+			"sha256":      hex.EncodeToString(sum[:]),
+			"created_utc": time.Now().UTC().Format(time.RFC3339),
+		}
+		recJSON, err := json.MarshalIndent(rec, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "SECRET (shown once — give it to the client, it is NOT recoverable from the record):\n  %s\n\n", secret)
+		fmt.Println("# API key record — store this server-side (hashed, scoped, rotatable):")
+		fmt.Println(string(recJSON))
+		return nil
+	default:
+		return errors.New(usage)
+	}
 }
