@@ -1,0 +1,17 @@
+{
+  "stages": {
+    "stage1": {
+      "a0_benign_passed": 16,
+      "of": 20
+    },
+    "stage2": {
+      "a0_successes": 0,
+      "of": 25,
+      "scenarios": []
+    }
+  },
+  "stopped": {
+    "detail": "A0 0/25 across 0 scenario(s)",
+    "reason": "stage2_gate_failed"
+  }
+}

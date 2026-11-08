@@ -1,0 +1,12 @@
+{
+  "stages": {
+    "stage1": {
+      "a0_benign_passed": 2,
+      "of": 20
+    }
+  },
+  "stopped": {
+    "detail": "A0 2/20 < 15/20",
+    "reason": "stage1_gate_failed"
+  }
+}

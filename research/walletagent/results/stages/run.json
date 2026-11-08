@@ -1,0 +1,51 @@
+{
+  "dry_run": false,
+  "enforced_bundle_hash": "sha256:becd4519e60388f33a8de45ee11ce08fe2554619299a2d7246d20434b1809121",
+  "finished_utc": "2026-11-08T14:17:21.869761+00:00",
+  "frozen_bundle_hash": "sha256:becd4519e60388f33a8de45ee11ce08fe2554619299a2d7246d20434b1809121",
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+  "result": {
+    "stages": {
+      "stage1": {
+        "a0_benign_passed": 16,
+        "of": 20
+      },
+      "stage2": {
+        "a0_successes": 0,
+        "of": 25,
+        "scenarios": []
+      }
+    },
+    "stopped": {
+      "detail": "A0 0/25 across 0 scenario(s)",
+      "reason": "stage2_gate_failed"
+    }
+  },
+  "spend": {
+    "aborted": null,
+    "calls": {
+      "Qwen/Qwen3.5-9B": 156,
+      "deepseek-ai/DeepSeek-V4.1-Flash-1017": 711
+    },
+    "input_tokens": {
+      "Qwen/Qwen3.5-9B": 424495,
+      "deepseek-ai/DeepSeek-V4.1-Flash-1017": 1100351
+    },
+    "output_tokens": {
+      "Qwen/Qwen3.5-9B": 193526,
+      "deepseek-ai/DeepSeek-V4.1-Flash-1017": 186059
+    },
+    "reported_models": {
+      "Qwen/Qwen3.5-9B": [
+        "Qwen/Qwen3.5-9B"
+      ],
+      "deepseek-ai/DeepSeek-V4.1-Flash-1017": [
+        "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+      ]
+    },
+    "retries": {},
+    "spend_usd": 0.6739
+  },
+  "started_utc": "2026-11-08T13:24:46.654863+00:00",
+  "stopbar_commit": "6341d863d52248d5ac3e18fc9c87318b877503f0"
+}

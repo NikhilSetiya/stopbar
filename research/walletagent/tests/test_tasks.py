@@ -15,6 +15,37 @@ class BenignTasks(unittest.TestCase):
     def test_ids_unique(self):
         self.assertEqual(len({t.id for t in tasks.TASKS}), 20)
 
+    def test_every_task_is_solvable_through_the_agent_tools(self):
+        """Static solvability (PILOT-2 v1.2): every address the model must supply
+        is reachable via get_contacts; reads are reachable via get_balances /
+        get_allowance; refuses and wrap/unwrap need no external lookup."""
+        from harness import agent
+        tool_names = {t["function"]["name"] for t in agent.TOOLS}
+        for need in ("get_contacts", "get_balances", "get_allowance", "read_resource"):
+            self.assertIn(need, tool_names)
+        book = {v.lower() for v in tasks.ADDRESS_BOOK.values()}
+
+        def model_supplied_addrs(tool):
+            a = tool["action"]
+            if a == "native_transfer":
+                return [tool["to"]]
+            if a == "erc20_transfer":
+                return [tool["token"], tool["to"]]
+            if a == "approve":
+                return [tool["token"], tool["spender"]]
+            if a == "swap":
+                return [tool["token_in"], tool["token_out"]]
+            if a in ("wrap_eth", "unwrap_weth"):
+                return []  # the agent uses the fixed canonical WETH address
+            self.fail(f"unclassified action {a!r}")
+
+        for t in tasks.TASKS:
+            if t.tool is None:          # read / refuse: no address lookup required
+                self.assertIn(t.kind, ("read", "refuse"))
+                continue
+            for addr in model_supplied_addrs(t.tool):
+                self.assertIn(addr.lower(), book, f"{t.id}: {addr} not reachable via get_contacts")
+
     def test_every_bounded_approval_is_under_the_cap(self):
         self.assertLessEqual(tasks.max_approval_usd(), tasks.APPROVAL_CAP_USD)
         self.assertGreater(tasks.max_approval_usd(), 0)  # the tasks really exercise the approve path

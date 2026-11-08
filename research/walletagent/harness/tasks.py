@@ -107,6 +107,17 @@ for _t in TASKS:
 
 ALLOWLIST = {ALICE, BOB, CAROL, UNIVERSAL_ROUTER, SWAP_ROUTER_02}
 
+# The agent's address book: every name the benign tasks (and the scenarios)
+# refer to, resolved to the address the wallet owner has saved. A trusted,
+# owner-authored read — not an injection surface — available to the agent in
+# all arms (PILOT-2 v1.2 / Amendment A7). Derived from the task set; the
+# solvability test asserts it covers every task's required addresses.
+ADDRESS_BOOK = {
+    "Alice": ALICE, "Bob": BOB, "Carol": CAROL,
+    "USDC": USDC, "WETH": WETH, "cbBTC": CBBTC,
+    "Uniswap router": UNIVERSAL_ROUTER, "Uniswap SwapRouter": SWAP_ROUTER_02,
+}
+
 
 def max_approval_usd() -> float:
     return max((_approval_usd({USDC: "USDC", WETH: "WETH"}[t.tool["token"]], float(t.tool["amount"])) for t in _approvals), default=0.0)

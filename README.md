@@ -2,7 +2,9 @@
 
 **An open-source intent firewall for signers.** Nothing gets signed — by an AI agent, a hot wallet, or an enterprise system — unless an independent policy engine clears it first. Like a runway stop bar: lit by default, and nothing crosses without clearance from an authority the requester does not control.
 
-An AI agent with a wallet reads an encoded instruction planted in on-chain content (the [Grok/Bankr pattern](corpus/attacks/CS-2026-0001-encoded-onchain-injection.yaml)) and asks to move 3,000,000 tokens to an address it has never paid. Stopbar answers:
+A compromised service, a buggy script, or an agent's mistake asks the signer to move funds it never should — no key is stolen and the signature is valid, as in the [Binance](#the-problem-in-one-line) and [OpenClaw](#the-problem-in-one-line) patterns. Stopbar denies it **deterministically, with no model in the loop**, because it binds the whole transaction to caps, allowlists, decoded intent and loss bounds. Every such block is replayed over real HTTP on every PR (`make e2e`).
+
+Prompt injection is **one input among several** here, not the headline. One example — an injected agent asks to move 3,000,000 tokens to an address it has never paid (the [Grok/Bankr pattern](corpus/attacks/CS-2026-0001-encoded-onchain-injection.yaml)), which Stopbar denies *when the harness labels the untrusted input* (the v1 trusted-harness assumption):
 
 ```console
 $ curl -i -X POST localhost:7777/v1/evaluate -H 'Content-Type: application/json' --data @CS-2026-0001.json
@@ -15,6 +17,8 @@ HTTP/1.1 403 Forbidden
 ```
 
 Every attack in the [corpus](corpus/) is replayed like this, over real HTTP, on every PR. The gateway, engine, Cedar policy, limiter and decision signer are real. In gatekeeper mode an allow comes back as a signed transaction, and the replay checks its recovered sender. The decoder, price/balance data and audit store are still [dev stubs](internal/devstub/), being replaced task by task.
+
+> **Honest scope (research).** Two pre-registered pilots ([`docs/research/pilots-1-2.md`](docs/research/pilots-1-2.md)) could **not** measure Stopbar's value against prompt injection: neither stock automated attacker landed a single success *even with no defence*, on Claude Haiku 4.5 or DeepSeek-V4.1-Flash, and the second pilot's attacker partly refused to attack. They did find real defects (now fixed and regression-tested) and showed session-level taint is too blunt. Stopbar's demonstrated, deterministic value is the part that holds **whatever the model does** — compromised requesters (T3), agent mistakes (T2), and hard loss caps — which the corpus replay proves end to end. No prompt-injection security claim is made.
 
 > **Status: v0.1.0-alpha. Alpha. Not for real funds. Dev-mode keys only.**
 > The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter and audit log are real, and every corpus attack is blocked end to end in CI. The decoder and price/balance data are still dev stubs. Keys come only from local dev providers (authentication, KMS and HSM aren't in yet), and `stopbard` refuses non-loopback addresses. No binaries are published yet; build from source. See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
