@@ -9,7 +9,6 @@ Everything here is DEV MODE on a fork with DEV KEYS and STUB price/balance data.
 No real funds, no auth. Gaps and "hidden knowledge" steps are collected and
 printed at the end, and the journey is timed against the PRD's 30-minute goal.
 """
-import base64
 import json
 import os
 import pathlib
@@ -45,14 +44,10 @@ def say(s=""): print(s, flush=True)
 def hdr(s): say("\n" + "=" * 72 + f"\n{s}\n" + "=" * 72)
 
 
-def write_decision_key(path: pathlib.Path):
-    # No `stopbar keygen`: the demo must hand-write stopbard's tagged key file.
-    seed = os.urandom(32)
-    body = "stopbar-decision-key-ed25519-v1\n" + base64.urlsafe_b64encode(seed).rstrip(b"=").decode() + "\n"
-    with open(os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "w") as f:
-        f.write(body)
-    hidden("A persistent decision key is required for audit-verify across a restart, but there is no "
-           "`stopbar keygen` command — the demo hand-writes stopbard's tagged key-file format.")
+def write_decision_key(cli: pathlib.Path, path: pathlib.Path):
+    # Persistent decision key (needed for audit-verify across a restart), via
+    # `stopbar keygen decision-key` — no hand-writing of key-file formats.
+    subprocess.run([str(cli), "keygen", "decision-key", str(path)], check=True, capture_output=True)
 
 
 def demo_world(path: pathlib.Path):
@@ -121,10 +116,12 @@ def main():
         raise SystemExit("build first: `make build` (expected bin/stopbard and bin/stopbar)")
 
     out = HERE / "results" / "demo"
+    import shutil
+    shutil.rmtree(out, ignore_errors=True)  # fresh keys/state each run (keygen refuses to overwrite)
     out.mkdir(parents=True, exist_ok=True)
     dec_key, wallet_file = out / "decision.key", out / "wallet.key"
     worldf, config, statedir = out / "world.json", out / "config.json", out / "state"
-    write_decision_key(dec_key)
+    write_decision_key(binscli, dec_key)
     with open(os.open(wallet_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "w") as f:
         f.write("stopbar-dev-wallet-secp256k1-v1\n" + run.PILOT_KEY[2:] + "\n")
     demo_world(worldf)
@@ -217,15 +214,12 @@ def main():
         except StopbarBlocked as e:
             say(f"  Second payment {e.status} DENY — {reasons(e.decision)}  [cap count PERSISTED]")
 
-        # ---- Step 6: audit verify ----
-        hdr("STEP 6  Audit verify (offline, over the whole log incl. the restart)")
-        with urllib.request.urlopen(url + "/v1/keys", timeout=5) as r:
-            (out / "keys.json").write_bytes(r.read())
-        hidden("audit verify needs the published keys: save GET /v1/keys to a file, then pass --keys. "
-               "There is no single `stopbar audit verify` that fetches them itself.")
+        # ---- Step 6: one-shot audit verify (offline, over the whole log) ----
+        hdr("STEP 6  Audit verify (one-shot, offline, over the whole log incl. the restart)")
         sb.terminate(); sb.wait(timeout=10); sb = None  # final checkpoint on shutdown
         v = subprocess.run([str(binscli), "audit", "verify", "--state-dir", str(statedir),
-                            "--keys", str(out / "keys.json"), "--require-covered"], capture_output=True, text=True)
+                            "--decision-key", str(dec_key), "--require-covered"], capture_output=True, text=True)
+        say("  $ stopbar audit verify --state-dir … --decision-key … --require-covered")
         say("  " + (v.stdout.strip() or v.stderr.strip()))
         if v.returncode != 0:
             gap("audit verify failed: " + (v.stderr.strip()[:200]))

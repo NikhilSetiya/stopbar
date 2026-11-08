@@ -1,0 +1,25 @@
+name: demo-nightly
+# The walking skeleton (make demo) on a schedule, so drift in the Base fork,
+# Foundry, the Python deps or the journey is caught even without a PR. The same
+# job also runs non-blocking on every PR in ci.yml.
+on:
+  schedule:
+    - cron: "0 7 * * *" # 07:00 UTC daily
+  workflow_dispatch: {}
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: {go-version-file: go.mod}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with: {python-version: "3.12"}
+      - name: install Foundry (anvil)
+        run: |
+          curl -L https://foundry.paradigm.xyz | bash
+          "$HOME/.config/.foundry/bin/foundryup"
+          echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.config/.foundry/bin" >> "$GITHUB_PATH"
+      - name: make demo
+        run: make demo

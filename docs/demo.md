@@ -39,11 +39,9 @@ Mapped to the product roadmap:
 - **Config wraps dev flags only.** `stopbard -config` is a thin first surface over
   the existing flags; it still selects dev components. A production config needs
   auth, a real (KMS/HSM) key provider and real enrichers.
-- **No `stopbar keygen`.** A persistent decision key — required for audit-verify
-  across a restart — has no CLI; the demo hand-writes stopbard's tagged key-file
-  format. A small productionization task.
-- **`audit verify` is two steps.** You must save `GET /v1/keys` to a file and pass
-  `--keys`; there is no one-shot verify.
+- **Key tooling — DONE.** `stopbar keygen decision-key` and `keygen api-key`, and a
+  one-shot `stopbar audit verify --decision-key FILE` (offline, no `/v1/keys` save),
+  which the demo now uses. The two earlier gaps here are closed.
 - **The demo CI job is heavier and more external** than the required jobs (it needs
   Foundry and a Base fork over the network), so it is non-blocking until added to
   branch protection.
