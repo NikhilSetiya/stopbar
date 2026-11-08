@@ -139,6 +139,7 @@ def live_run(*, stopbard_bin: str, out: pathlib.Path, model: str | None, resume:
 
     from . import agent, chain, run, scenarios as scen, scorer, spend, taint, world
     from .attacker import ATTACKER_MODEL, ChainStateScorer, EpisodeResult, PilotTarget, build_attack
+    from .tasks import ADDRESS_BOOK
 
     repo = pathlib.Path(__file__).resolve().parents[3]
     if not dry_run:
@@ -185,20 +186,21 @@ def live_run(*, stopbard_bin: str, out: pathlib.Path, model: str | None, resume:
 
         def benign_reads():
             return agent.ReadContext(balances={"ETH": "5", "USDC": "20000", "WETH": "2", "cbBTC": "0.05"},
-                                     transactions=[], resources={}, decimals=decimals)
+                                     transactions=[], resources={}, decimals=decimals, contacts=ADDRESS_BOOK)
 
         def benign_fn(stage, arm, task):
             prov = provider_for(arm)
             snap = chain.snapshot(w3)
             run.fund(w3, a0)
             pre = scorer.snapshot_state(w3, run.WALLET, task.check)
-            submitted = True
+            submitted = False
             session.reset()
             try:
                 if dry_run:
                     submitted = run.execute(task, prov, w3)
                 else:
-                    agent.run_agent(victim, prov, benign_reads(), task.prompt, session=session)
+                    r = agent.run_agent(victim, prov, benign_reads(), task.prompt, session=session)
+                    submitted = r.submitted > 0
             except Exception as e:
                 if isinstance(e, spend.Abort):
                     raise Stop("hard_stop", str(e))

@@ -114,6 +114,31 @@ class AgentLoop(unittest.TestCase):
         agent.run_agent(FakeChat(turns), FakeProvider(), rc, "balance?", session=s)
         self.assertEqual(s.provenance(), ["trusted_user"])
 
+    def test_run_records_actual_submission_in_the_model_path(self):
+        # a write the provider broadcasts counts; a read-only run submits nothing
+        write = [(None, [_tool_call("1", "send_eth", f'{{"to":"{ALICE}","amount_eth":"0.01"}}')]),
+                 (None, [_tool_call("2", "done", '{"message":"sent"}')])]
+        self.assertEqual(agent.run_agent(FakeChat(write), FakeProvider(), reads(), "pay").submitted, 1)
+        read = [(None, [_tool_call("1", "get_balances", "{}")]), (None, [_tool_call("2", "done", '{"message":"5"}')])]
+        self.assertEqual(agent.run_agent(FakeChat(read), FakeProvider(), reads(), "balance?").submitted, 0)
+
+    def test_blocked_write_is_not_counted_as_submitted(self):
+        turns = [(None, [_tool_call("1", "send_eth", f'{{"to":"{ALICE}","amount_eth":"0.01"}}')]),
+                 (None, [_tool_call("2", "done", '{"message":"blocked"}')])]
+        r = agent.run_agent(FakeChat(turns), FakeProvider(block=True), reads(), "pay")
+        self.assertEqual(r.submitted, 0)
+        self.assertEqual(len(r.tool_errors), 1)
+
+    def test_get_contacts_returns_the_address_book_and_is_trusted(self):
+        import json
+        from harness import taint
+        from harness.tasks import ADDRESS_BOOK
+        rc = agent.ReadContext(balances={}, transactions=[], resources={}, decimals={}, contacts=ADDRESS_BOOK)
+        run, s = agent.AgentRun(), taint.Session()
+        out = agent._dispatch("get_contacts", {}, FakeProvider(), rc, run, s)
+        self.assertEqual(json.loads(out)["Alice"].lower(), ALICE)
+        self.assertEqual(s.provenance(), ["trusted_user"])  # trusted read: no taint
+
     def test_plain_reply_without_tools_ends(self):
         run = agent.run_agent(FakeChat([("Your USDC balance is 20000.", None)]), FakeProvider(), reads(), "What's my USDC balance?")
         self.assertEqual(run.reply, "Your USDC balance is 20000.")

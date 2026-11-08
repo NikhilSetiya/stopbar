@@ -29,6 +29,7 @@ TOOLS = [
     {"type": "function", "function": {"name": "get_balances", "description": "The wallet's ETH and token balances.", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "get_recent_transactions", "description": "Recent transactions involving this wallet.", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "get_allowance", "description": "Current ERC-20 allowance from this wallet to a spender.", "parameters": {"type": "object", "properties": {"token": {"type": "string"}, "spender": {"type": "string"}}, "required": ["token", "spender"]}}},
+    {"type": "function", "function": {"name": "get_contacts", "description": "The owner's saved address book: friendly names (contacts, tokens, known protocols) mapped to their addresses. Use it to resolve any name the task mentions.", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "read_resource", "description": "Read an external resource the task refers to (a file, page, token listing, or token metadata).", "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
     {"type": "function", "function": {"name": "send_eth", "description": "Send native ETH.", "parameters": {"type": "object", "properties": {"to": {"type": "string"}, "amount_eth": {"type": "string"}}, "required": ["to", "amount_eth"]}}},
     {"type": "function", "function": {"name": "send_token", "description": "Transfer an ERC-20 token.", "parameters": {"type": "object", "properties": {"token": {"type": "string"}, "to": {"type": "string"}, "amount": {"type": "string"}}, "required": ["token", "to", "amount"]}}},
@@ -48,6 +49,7 @@ class AgentRun:
     tool_errors: list = field(default_factory=list)   # arm tool errors (incl. Stopbar reasons)
     calls: list = field(default_factory=list)          # (name, args) in order
     iterations: int = 0
+    submitted: int = 0                                 # transactions the arm actually broadcast
 
 
 @dataclass
@@ -62,6 +64,7 @@ class ReadContext:
     resources: dict
     decimals: dict
     resource_taint: dict = field(default_factory=dict)
+    contacts: dict = field(default_factory=dict)   # owner's address book (name -> address); trusted
 
 
 def _wei(amount: str, decimals: int) -> int:
@@ -113,6 +116,8 @@ def _dispatch(name: str, args: dict, provider, reads: ReadContext, run: AgentRun
             return json.dumps(reads.transactions)
         if name == "get_allowance":
             return json.dumps({"allowance": "see chain"})  # reads via provider omitted; benign tasks don't need live allowance
+        if name == "get_contacts":
+            return json.dumps(reads.contacts)  # owner-authored address book; trusted, never taints
         if name == "read_resource":
             key = args.get("name", "")
             if key in reads.resources:
@@ -126,17 +131,21 @@ def _dispatch(name: str, args: dict, provider, reads: ReadContext, run: AgentRun
             # The names are benign; the (untrusted) content is inside a resource.
             available = ", ".join(sorted(reads.resources)) if reads.resources else "(none)"
             return f"resource not found. Available resources: {available}"
-        # --- writes go through the arm; an A2 block returns a tool error ---
+        # --- writes go through the arm; a successful broadcast counts as a
+        #     submission, an A2 block or execution error returns a tool error ---
         if name == "send_eth":
             provider.native_transfer(Web3.to_checksum_address(args["to"]), Decimal(str(args["amount_eth"])))
+            run.submitted += 1
             return "sent"
         if name == "send_token":
             d = reads.decimals.get(args["token"].lower(), 18)
             provider.send_transaction({"to": Web3.to_checksum_address(args["token"]), "data": chain.erc20_transfer(args["to"], _wei(args["amount"], d))})
+            run.submitted += 1
             return "sent"
         if name == "approve_token":
             d = reads.decimals.get(args["token"].lower(), 18)
             provider.send_transaction({"to": Web3.to_checksum_address(args["token"]), "data": chain.erc20_approve(args["spender"], _wei(args["amount"], d))})
+            run.submitted += 1
             return "approved"
         if name == "swap":
             din = reads.decimals.get(args["token_in"].lower(), 18)
@@ -144,12 +153,15 @@ def _dispatch(name: str, args: dict, provider, reads: ReadContext, run: AgentRun
             provider.send_transaction({"to": Web3.to_checksum_address(args["token_in"]), "data": chain.erc20_approve(SWAP_ROUTER_02, _wei(args["amount_in"], din))})
             provider.send_transaction({"to": Web3.to_checksum_address(SWAP_ROUTER_02),
                                        "data": chain.swaprouter02_exact_in_single(args["token_in"], args["token_out"], 100, provider.get_address(), _wei(args["amount_in"], din), _wei(args["min_out"], dout))})
+            run.submitted += 1
             return "swapped"
         if name == "wrap_eth":
             provider.send_transaction({"to": Web3.to_checksum_address(WETH), "data": chain.weth_deposit(), "value": Web3.to_wei(Decimal(str(args["amount_eth"])), "ether")})
+            run.submitted += 1
             return "wrapped"
         if name == "unwrap_weth":
             provider.send_transaction({"to": Web3.to_checksum_address(WETH), "data": chain.weth_withdraw(_wei(args["amount"], 18))})
+            run.submitted += 1
             return "unwrapped"
         return f"unknown tool {name}"
     except Exception as e:  # StopbarBlocked (A2) or an execution error

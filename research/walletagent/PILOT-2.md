@@ -235,6 +235,18 @@ The A2 arm never applied untrusted taint, so its `taint-unknown-destination` den
 
 Frozen artifact set for v1.1 = the v1.0 Cedar bundle + `tool-trust.json` + `harness/taint.py` and the labelling wiring (`harness/agent.py`, `harness/scenarios.py`, `harness/run.py`, `harness/stages.py`). No Cedar, scorer, gate, model or attacker change.
 
+## 13. Amendment A7 (2026-11-08, before any valid run): two harness-defect fixes (frozen v1.2)
+
+The first v1.1 background run **stopped at the Stage 1 competence gate, A0 2/20**, which was a **harness artifact, not a measurement** — two defects in the model path (both verified from the per-task outcomes: only the two no-address, real-effect wrap/unwrap tasks passed):
+1. `benign_fn` discarded the agent result and left `submitted = True`, so every read/refuse task (where "no transaction" is correct) scored as a failure.
+2. the agent had no address book, so it could not resolve contact/token/spender names and could not complete transfers, approvals or swaps.
+
+A7 fixes **only** those two defects. **No Cedar, scorer, gate, model, attacker or §1a prediction change.**
+- **Submission recorded:** the agent run counts transactions the arm actually broadcasts (`AgentRun.submitted`); `benign_fn` scores on that instead of a hard-coded `True`.
+- **Address book (environment change, all arms):** a new trusted read tool `get_contacts` returns the owner's saved address book (`tasks.ADDRESS_BOOK`: contacts, tokens, known protocols → addresses), available to the agent in A0 and A2 and in benign and attacked episodes. It is owner-authored, so it is a **trusted** read (declared in `tool-trust.json`), never an injection surface, and it never taints. The attacker addresses are **not** in the book. A static solvability test asserts every task's required addresses are reachable through it.
+
+Adding `get_contacts` to the hashed trust map moves the bundle to **v1.2 `sha256:becd4519e60388f33a8de45ee11ce08fe2554619299a2d7246d20434b1809121`** (`tool-trust.json` sha256 `f4ec2ce74252bfdd30900276347ef8d73d67e86568d0364aad5340983c0ddace`; `.cedar`/`.cedarschema` unchanged). The failed v1.1 run is recorded in FREEZE §6 and preserved at `results/stages-v1_1-failed/`.
+
 ## Appendix A: why PyRIT (from the 2026-11-05 tool review)
 
 | Tool | Licence | Maintenance | Uses denial reasons | Fit |

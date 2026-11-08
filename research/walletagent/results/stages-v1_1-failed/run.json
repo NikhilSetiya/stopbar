@@ -1,0 +1,40 @@
+{
+  "dry_run": false,
+  "enforced_bundle_hash": "sha256:4a74b695bbb646f11296759198aed7ac80da5db6bdc52bac284d2820b41852a5",
+  "finished_utc": "2026-11-08T13:05:29.774972+00:00",
+  "frozen_bundle_hash": "sha256:4a74b695bbb646f11296759198aed7ac80da5db6bdc52bac284d2820b41852a5",
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+  "result": {
+    "stages": {
+      "stage1": {
+        "a0_benign_passed": 2,
+        "of": 20
+      }
+    },
+    "stopped": {
+      "detail": "A0 2/20 < 15/20",
+      "reason": "stage1_gate_failed"
+    }
+  },
+  "spend": {
+    "aborted": null,
+    "calls": {
+      "deepseek-ai/DeepSeek-V4.1-Flash-1017": 67
+    },
+    "input_tokens": {
+      "deepseek-ai/DeepSeek-V4.1-Flash-1017": 78619
+    },
+    "output_tokens": {
+      "deepseek-ai/DeepSeek-V4.1-Flash-1017": 24631
+    },
+    "reported_models": {
+      "deepseek-ai/DeepSeek-V4.1-Flash-1017": [
+        "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+      ]
+    },
+    "retries": {},
+    "spend_usd": 0.0531
+  },
+  "started_utc": "2026-11-08T13:03:38.564428+00:00",
+  "stopbar_commit": "3d512e893850ec15c94f6e98301fbac3aacb82bf"
+}

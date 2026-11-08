@@ -12,6 +12,7 @@ from web3 import Web3
 
 from . import chain
 from .agent import ReadContext
+from .tasks import ADDRESS_BOOK
 
 FIX = pathlib.Path(__file__).resolve().parent.parent / "fixtures"
 USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
@@ -34,6 +35,7 @@ def _base_reads(extra_tx=None, resources=None, resource_taint=None) -> ReadConte
         resources=resources or {},
         decimals=DECIMALS,
         resource_taint=resource_taint or {},
+        contacts=ADDRESS_BOOK,
     )
 
 
