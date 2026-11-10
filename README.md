@@ -16,12 +16,26 @@ HTTP/1.1 403 Forbidden
  "policy_bundle_hash":"sha256:…","payload_hash":"sha256:b1feb874…", …}
 ```
 
-Every attack in the [corpus](corpus/) is replayed like this, over real HTTP, on every PR. The gateway, engine, Cedar policy, limiter and decision signer are real. In gatekeeper mode an allow comes back as a signed transaction, and the replay checks its recovered sender. The decoder, price/balance data and audit store are still [dev stubs](internal/devstub/), being replaced task by task.
+**Watch the whole thing run — `make demo`.** It starts `stopbard` from a config file and drives a scripted AgentKit agent on an Anvil fork of Base (dev keys, stub prices), end to end:
+
+```text
+STEP 1  Allowed contact payment       200 ALLOW — stopbard signs, agent broadcasts, balance +0.01 ETH on-chain
+STEP 2  Tainted transfer to unknown   403 DENY      taint-unknown-destination
+STEP 3  Transfer > 20% of balance     202 ESCALATE  large-share-of-balance
+STEP 4  Unlimited token approval      403 DENY      unlimited-approval
+STEP 5  No API key                    401 UNAUTHENTICATED  (rejected before any nonce is spent)
+STEP 6  Restart stopbard              nonce + per-wallet cap persist (NONCE_REPLAYED, CAP_EXCEEDED)
+STEP 7  stopbar audit verify          OK — 13 records, 0 uncovered, across the restart
+```
+
+See [`docs/demo.md`](docs/demo.md) for the journey and the gaps it still exposes.
+
+Every attack in the [corpus](corpus/) is replayed over real HTTP on every PR. The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter, **EVM decoder** and hash-chained **audit log** are real. In gatekeeper mode an allow comes back as a signed transaction, and the replay checks its recovered sender. The remaining dev stubs are **live prices and balances and the destination registry** ([`internal/devstub`](internal/devstub/)), being replaced task by task.
 
 > **Honest scope (research).** Two pre-registered pilots ([`docs/research/pilots-1-2.md`](docs/research/pilots-1-2.md)) could **not** measure Stopbar's value against prompt injection: neither stock automated attacker landed a single success *even with no defence*, on Claude Haiku 4.5 or DeepSeek-V4.1-Flash, and the second pilot's attacker partly refused to attack. They did find real defects (now fixed and regression-tested) and showed session-level taint is too blunt. Stopbar's demonstrated, deterministic value is the part that holds **whatever the model does** — compromised requesters (T3), agent mistakes (T2), and hard loss caps — which the corpus replay proves end to end. No prompt-injection security claim is made.
 
 > **Status: v0.1.0-alpha. Alpha. Not for real funds. Dev-mode keys only.**
-> The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter and audit log are real, and every corpus attack is blocked end to end in CI. The decoder and price/balance data are still dev stubs. Keys come only from local dev providers (authentication, KMS and HSM aren't in yet), and `stopbard` refuses non-loopback addresses. No binaries are published yet; build from source. See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
+> The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter, EVM decoder and hash-chained audit log are real, and every corpus attack is blocked end to end in CI. The remaining stubs are live prices/balances and the destination registry ([`internal/devstub`](internal/devstub/)). API-key authentication has landed (opt-in, and required for any non-loopback address), but keys are dev-only — KMS/HSM key providers and mTLS/SPIFFE service auth aren't in yet. No binaries are published yet; build from source. See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
 
 ```bash
 make e2e     # everything CI runs, plus corpus replay against a live stopbard
