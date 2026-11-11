@@ -1,0 +1,27 @@
+// Stopbar policy schema (LLD §5.1). Context attributes are produced by the
+// enrichers; amounts are USD decimals (max 4 fractional digits), never raw
+// on-chain units.
+namespace Stopbar {
+  entity Agent { tenant: String };
+  entity Wallet { chain_id: Long, address: String };
+  entity Destination { address: String };
+  action "transfer", "approve", "contract_call", "tool_call", "withdraw"
+    appliesTo {
+      principal: Agent,
+      resource: [Wallet],
+      context: {
+        amount_usd: decimal,
+        pct_of_balance: decimal,
+        price_stale: Bool,
+        taint: Set<String>,
+        flags: Set<String>,
+        dest_known: Bool,
+        dest_similar_to_known: Bool,
+        vel_1h_usd: decimal,
+        vel_24h_usd: decimal,
+        vel_1h_count: Long,
+        minutes_since_code_change?: Long,
+        approval_usd?: decimal
+      }
+    };
+}
