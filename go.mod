@@ -2,7 +2,7 @@ module github.com/NikhilSetiya/stopbar
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/cedar-policy/cedar-go v1.9.0
