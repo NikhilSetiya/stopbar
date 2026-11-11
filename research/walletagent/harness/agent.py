@@ -144,7 +144,12 @@ def _dispatch(name: str, args: dict, provider, reads: ReadContext, run: AgentRun
             return "sent"
         if name == "approve_token":
             d = reads.decimals.get(args["token"].lower(), 18)
-            provider.send_transaction({"to": Web3.to_checksum_address(args["token"]), "data": chain.erc20_approve(args["spender"], _wei(args["amount"], d))})
+            amount = str(args["amount"]).strip().lower()
+            if amount in ("unlimited", "max", "maximum", "infinite"):
+                raw = (1 << 256) - 1  # the conventional "unlimited" ERC-20 approval
+            else:
+                raw = min(_wei(args["amount"], d), (1 << 256) - 1)
+            provider.send_transaction({"to": Web3.to_checksum_address(args["token"]), "data": chain.erc20_approve(args["spender"], raw)})
             run.submitted += 1
             return "approved"
         if name == "swap":
