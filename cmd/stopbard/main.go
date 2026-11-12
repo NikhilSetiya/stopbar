@@ -247,12 +247,18 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 	// supplying velocity. Approval (CS-152) re-runs these enrichers, so when the
 	// chain reader is active an approval re-checks live on-chain state.
 	var priceBalance engine.Enricher = w
+	var stageTimeout time.Duration // 0: engine default (1s), fine for in-memory stubs
 	if w.ChainRPC != "" {
-		ce, err := enrich.New(enrich.Config{RPCURL: w.ChainRPC, Feeds: w.Feeds, KnownDestinations: w.KnownDestinations})
+		ce, err := enrich.New(enrich.Config{RPCURL: w.ChainRPC, Feeds: w.Feeds,
+			KnownDestinations: w.KnownDestinations, RPCTimeout: 3 * time.Second})
 		if err != nil {
 			return runtime{}, err
 		}
 		priceBalance = ce
+		// Chain reads make several sequential RPC round-trips on a cache miss, so
+		// the per-stage budget must allow for them (the 1s default fits only the
+		// in-memory stub). Each RPC call is itself bounded above.
+		stageTimeout = 10 * time.Second
 		log.Info("enricher: reading balances and prices from the chain (CS-131/132)", "rpc", w.ChainRPC, "feeds", len(w.Feeds))
 	}
 	pending, err := newPendingStore(o.db)
@@ -265,14 +271,15 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		enrichers = append(enrichers, &policy.SessionTaint{Bundle: b})
 	}
 	e, err := engine.New(engine.Config{
-		Decoders:  []engine.Decoder{evm.Decoder{}, toolcall.Decoder{}},
-		Enrichers: enrichers,
-		Policy:    b,
-		Limiter:   lim,
-		Signer:    &decision.Signer{Keys: ring, Iss: devIssuer, Aud: devAudience},
-		Audit:     lg,
-		Pending:   pending,
-		Logger:    log,
+		Decoders:     []engine.Decoder{evm.Decoder{}, toolcall.Decoder{}},
+		Enrichers:    enrichers,
+		Policy:       b,
+		Limiter:      lim,
+		Signer:       &decision.Signer{Keys: ring, Iss: devIssuer, Aud: devAudience},
+		Audit:        lg,
+		Pending:      pending,
+		StageTimeout: stageTimeout,
+		Logger:       log,
 	})
 	if err != nil {
 		return runtime{}, err
