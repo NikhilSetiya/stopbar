@@ -19,5 +19,9 @@ if [[ ! -x "$W/.venv/bin/python" ]]; then
   python3 -m venv "$W/.venv"
   "$W/.venv/bin/pip" -q install -r "$W/requirements.lock"
 fi
+# The demo uses the published SDK (CS-182): install it editable from the repo so
+# `import stopbar` resolves. The wallet extra's deps (agentkit, web3) are already
+# in requirements.lock, so the core install is enough.
+"$W/.venv/bin/pip" -q install -e sdk/python >/dev/null
 
 exec "$W/.venv/bin/python" "$W/demo_live.py"

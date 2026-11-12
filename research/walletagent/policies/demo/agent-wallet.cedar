@@ -17,4 +17,4 @@ forbid (principal, action, resource) when { !context.dest_known };
 forbid (principal, action, resource) when { context.flags.contains("unlimited_approval") };
 
 @id("large-share-of-balance") @message("Transfer exceeds 20% of the wallet balance") @outcome("escalate")
-forbid (principal, action, resource) when { context.pct_of_balance.greaterThan(decimal("0.20")) };
+forbid (principal, action, resource) when { context has pct_of_balance && context.pct_of_balance.greaterThan(decimal("0.20")) };

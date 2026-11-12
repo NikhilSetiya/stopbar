@@ -22,7 +22,7 @@ except ImportError as e:  # pragma: no cover - exercised only without the extra
     ) from e
 
 from .client import Client
-from .errors import StopbarError
+from .errors import StopbarDecisionError, StopbarError
 
 
 class StopbarWalletProvider(EvmWalletProvider):
@@ -104,8 +104,14 @@ class StopbarWalletProvider(EvmWalletProvider):
             max_fee_per_gas=str(tx["maxFeePerGas"]), max_priority_fee_per_gas=str(tx["maxPriorityFeePerGas"]),
         )
         # evaluate raises StopbarDenied / StopbarEscalated on a non-allow, which
-        # propagate to the agent as a tool error — nothing is broadcast.
-        decision = self.client.evaluate(action, labels=list(self.provenance()))
+        # propagate to the agent as a tool error — nothing is broadcast. Every
+        # decision, allow or not, is recorded in self.decisions (a caller can
+        # read an escalation's request_id from there to approve it later).
+        try:
+            decision = self.client.evaluate(action, labels=list(self.provenance()))
+        except StopbarDecisionError as e:
+            self.decisions.append({"status": e.status, "decision": e.decision})
+            raise
         self.decisions.append({"status": decision.status, "decision": decision.body})
         if not decision.signed_tx:
             raise StopbarError("allow without a signed transaction (is stopbard in gatekeeper mode?)")

@@ -233,8 +233,6 @@ func TestStarterPackBoundedApprovals(t *testing.T) {
 func TestEvaluateFailsClosedOnIncompleteContext(t *testing.T) {
 	b := mustLoad(t, starterDir)
 	for name, mut := range map[string]func(*model.EnrichedRequest){
-		"amount missing (stale price)": func(er *model.EnrichedRequest) { er.AmountUSD = nil; er.PriceStale = true },
-		"balance share missing":        func(er *model.EnrichedRequest) { er.PctOfBalance = nil },
 		"velocity window missing":      func(er *model.EnrichedRequest) { delete(er.Velocity, "24h") },
 		"amount not a decimal":         func(er *model.EnrichedRequest) { v := "1e3"; er.AmountUSD = &v },
 		"amount beyond Cedar range":    func(er *model.EnrichedRequest) { v := "1000000000000000000"; er.AmountUSD = &v },
@@ -247,6 +245,27 @@ func TestEvaluateFailsClosedOnIncompleteContext(t *testing.T) {
 			mut(&er)
 			if pr, err := b.Evaluate(context.Background(), er); err == nil {
 				t.Fatalf("expected an error (fail closed), got %+v", pr)
+			}
+		})
+	}
+}
+
+// TestOptionalPriceFields: a stale or unavailable price (amount_usd / balance
+// share absent) is optional (CS-131, LLD §3.3), so evaluation no longer fails
+// closed — a policy that reads one guards with `context has …`, and the request
+// is decided by the policies that do apply (not a FAIL_CLOSED_POLICY deny).
+func TestOptionalPriceFields(t *testing.T) {
+	b := mustLoad(t, starterDir)
+	for name, mut := range map[string]func(*model.EnrichedRequest){
+		"amount_usd absent (stale price)": func(er *model.EnrichedRequest) { er.AmountUSD = nil; er.PriceStale = true },
+		"pct_of_balance absent":           func(er *model.EnrichedRequest) { er.PctOfBalance = nil },
+		"both absent":                     func(er *model.EnrichedRequest) { er.AmountUSD = nil; er.PctOfBalance = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			er := baseContext()
+			mut(&er)
+			if _, err := b.Evaluate(context.Background(), er); err != nil {
+				t.Fatalf("optional price field absent should not fail closed: %v", err)
 			}
 		})
 	}

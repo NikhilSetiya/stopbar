@@ -16,6 +16,8 @@ HTTP/1.1 403 Forbidden
  "policy_bundle_hash":"sha256:…","payload_hash":"sha256:b1feb874…", …}
 ```
 
+**Requirements:** Go ≥ 1.26 (the toolchain is fetched automatically), [Foundry](https://getfoundry.sh) (for `anvil`), and Python ≥ 3.10. The curl snippet above is illustrative — it shows the wire response shape; the runnable end-to-end paths are `make demo`, `make demo-live` and `make e2e` below.
+
 **Watch the whole thing run — `make demo`.** It starts `stopbard` from a config file and drives a scripted AgentKit agent on an Anvil fork of Base (dev keys, stub prices), end to end:
 
 ```text
@@ -30,12 +32,16 @@ STEP 7  stopbar audit verify          OK — 13 records, 0 uncovered, across the
 
 See [`docs/demo.md`](docs/demo.md) for the journey and the gaps it still exposes.
 
-Every attack in the [corpus](corpus/) is replayed over real HTTP on every PR. The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter, **EVM decoder** and hash-chained **audit log** are real. In gatekeeper mode an allow comes back as a signed transaction, and the replay checks its recovered sender. The remaining dev stubs are **live prices and balances and the destination registry** ([`internal/devstub`](internal/devstub/)), being replaced task by task.
+**A real model, live — `make demo-live`.** A real DeepSeek agent (via Together) drives AgentKit through Stopbar in gatekeeper mode on an Anvil fork of Base, with **prices and balances read from the chain** (Chainlink, no API key) and the agent talking to Stopbar through the **published Python SDK**. The operator gives plain-language tasks; a large transfer escalates and is approved with `stopbar approve`, and a compromised-but-authenticated service (T3) is denied live. It spends real model money, hard-capped at **$1**, and needs the Together API key in your keychain (`stopbar-together-key`).
+
+**Use it from your own agent — the Python SDK.** [`sdk/python`](sdk/python/) is a pip-installable client (`pip install stopbar`, stdlib-only; `pip install "stopbar[wallet]"` adds the AgentKit gatekeeper wallet provider). `Client.evaluate()` returns the signed decision on an allow and raises a typed error (`StopbarDenied`, `StopbarEscalated`) otherwise; `approve()` executes a pending escalation. See its [README](sdk/python/README.md).
+
+Every attack in the [corpus](corpus/) is replayed over real HTTP on every PR. The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter, **EVM decoder**, hash-chained **audit log** and the **chain-reading price/balance enricher** (Chainlink + RPC, used by `make demo-live`) are real. In gatekeeper mode an allow comes back as a signed transaction, and the replay checks its recovered sender. The remaining dev stub is the **destination registry** ([`internal/devstub`](internal/devstub/), CS-133); `make demo` still uses the stub world for prices/balances so it needs no live feeds.
 
 > **Honest scope (research).** Two pre-registered pilots ([`docs/research/pilots-1-2.md`](docs/research/pilots-1-2.md)) could **not** measure Stopbar's value against prompt injection: neither stock automated attacker landed a single success *even with no defence*, on Claude Haiku 4.5 or DeepSeek-V4.1-Flash, and the second pilot's attacker partly refused to attack. They did find real defects (now fixed and regression-tested) and showed session-level taint is too blunt. Stopbar's demonstrated, deterministic value is the part that holds **whatever the model does** — compromised requesters (T3), agent mistakes (T2), and hard loss caps — which the corpus replay proves end to end. No prompt-injection security claim is made.
 
 > **Status: v0.1.0-alpha. Alpha. Not for real funds. Dev-mode keys only.**
-> The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter, EVM decoder and hash-chained audit log are real, and every corpus attack is blocked end to end in CI. The remaining stubs are live prices/balances and the destination registry ([`internal/devstub`](internal/devstub/)). API-key authentication has landed (opt-in, and required for any non-loopback address), but keys are dev-only — KMS/HSM key providers and mTLS/SPIFFE service auth aren't in yet. No binaries are published yet; build from source. See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
+> The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter, EVM decoder, hash-chained audit log and the chain-reading price/balance enricher (CS-131/132) are real, and every corpus attack is blocked end to end in CI. The remaining dev stub is the destination registry ([`internal/devstub`](internal/devstub/), CS-133). A pip-installable Python SDK ([`sdk/python`](sdk/python/)) wraps the evaluate/approve API. API-key authentication has landed (opt-in, and required for any non-loopback address), but keys are dev-only — KMS/HSM key providers and mTLS/SPIFFE service auth aren't in yet. No binaries are published yet; build from source. See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
 
 ```bash
 make e2e     # everything CI runs, plus corpus replay against a live stopbard

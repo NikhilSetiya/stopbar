@@ -87,7 +87,7 @@ def post_evaluate(url, body, authz=None):
         headers["Authorization"] = authz
     req = urllib.request.Request(url + "/v1/evaluate", data=json.dumps(body).encode(), method="POST", headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=20) as r:  # headroom for chain reads (CS-131/132)
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read())

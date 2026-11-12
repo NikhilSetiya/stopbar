@@ -8,8 +8,10 @@ Stopbar denies both and the agent sees the reasons; a large transfer escalates.
 The operator then runs `stopbar approve <id>`, which re-evaluates the escalation
 against current state and, if it still passes, signs and executes it (CS-151/152).
 
-DEV MODE, dev keys, stub prices, API-key auth on. Hard-capped at $1 of Together
-spend. This spends real money on the victim model.
+Prices and balances are read from the chain (CS-131/132, Chainlink + RPC), and
+the agent talks to Stopbar through the published Python SDK (CS-182). DEV MODE,
+dev keys, API-key auth on. Hard-capped at $1 of Together spend. This spends real
+money on the victim model.
 """
 import json
 import os
@@ -25,8 +27,15 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from harness import agent, chain, run, spend, world  # noqa: E402
 from harness.tasks import ADDRESS_BOOK  # noqa: E402
-from stopbar_wallet import StopbarWalletProvider  # noqa: E402
+from stopbar import Client  # noqa: E402  (the published SDK — CS-182)
+from stopbar.wallet import StopbarWalletProvider  # noqa: E402
 from demo import gen_api_key, hdr, post_evaluate, reasons, say, start_stopbard, write_decision_key  # noqa: E402
+
+# Base mainnet Chainlink ETH/USD feed — prices come from the chain, no API key.
+# USDC has no feed here on purpose: a stale/absent price is handled (amount_usd
+# is optional, CS-131), so the unlimited-approval deny still fires on the flag.
+ETH_USD_FEED = "0x71041dddad3595f9ced3dccfbe3d1f4b0a16bb70"
+WALLET_ETH = 10 * 10**18  # fund the demo wallet to 10 ETH so 5 ETH is a "large share" of a REAL chain balance
 
 REPO = HERE.parents[1]
 MODEL = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
@@ -38,19 +47,16 @@ USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 ROUTER = "0x6ff5693b99212da76ad316178a184ab56d299b43"
 
 
-def demo_world(path):
-    # DEV stub world for the price/balance enricher + the allowlist. One wallet
-    # cap, sized so the approved 5 ETH (~$17.5k) fits under it — the point of
-    # CS-151/152 is that approval re-checks the limiter, so the cap must be real
-    # but not so tight the escalation can never execute. The policy is the
-    # allowlist; the large-transfer rule is what escalates the 5 ETH.
+def demo_world(path, rpc):
+    # CHAIN MODE (CS-131/132): balances and prices are read from the fork, not
+    # stubbed — chain_rpc points at the Anvil fork and feeds gives the on-chain
+    # Chainlink ETH/USD aggregator (no external API, no key). The allowlist and
+    # the wallet cap stay here. The cap is sized so the approved 5 ETH fits —
+    # approval re-checks the limiter against current state (CS-151/152).
     path.write_text(json.dumps({
-        "balances": {"ETH": "10", "USDC": "5000", "WETH": "2", "cbBTC": "0.05"},
-        "prices_usd": {"ETH": "3500", "USDC": "1", "WETH": "3500", "cbBTC": "95000"},
+        "chain_rpc": rpc,
+        "feeds": {"native": ETH_USD_FEED},
         "known_destinations": [ALICE, BOB, ROUTER, "0x2626664c2603336e57b271c5c0b26f421741e481"],
-        "tokens": {USDC: {"decimals": 6, "symbol": "USDC"},
-                   "0x4200000000000000000000000000000000000006": {"decimals": 18, "symbol": "WETH"},
-                   "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf": {"decimals": 8, "symbol": "cbBTC"}},
         "limits": [{"scope": "wallet", "window": "1h", "max_usd": "20000", "max_count": 50}],
     }, indent=2))
 
@@ -83,13 +89,14 @@ def main():
     approve_secret = gen_api_key(binscli, keys_store, "demo", "operator", "approve")  # the human approver
     with open(os.open(wallet_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "w") as f:
         f.write("stopbar-dev-wallet-secp256k1-v1\n" + run.PILOT_KEY[2:] + "\n")
-    demo_world(worldf)
 
     hdr("make demo-live — real DeepSeek agent + AgentKit + Stopbar gatekeeper on a Base fork")
-    say("DEV MODE, dev keys, stub prices, auth ON, policy = allowlist. Cap $%.2f of Together spend." % CAP_USD)
-    say("DEMO CONFIG: the $20k/1h wallet USD cap is a demo value (devstub world), sized so the approved "
-        "5 ETH fits; production caps come from the real limiter config.\n")
+    say("DEV MODE, dev keys, CHAIN prices+balances (CS-131/132), the published SDK (CS-182), auth ON, "
+        "policy = allowlist. Cap $%.2f of Together spend." % CAP_USD)
+    say("DEMO CONFIG: the demo wallet is funded to 10 ETH on the fork (so 5 ETH is a large share of a REAL "
+        "chain balance); the $20k/1h wallet USD cap is a demo value sized so the approved 5 ETH fits.\n")
     proc, w3, rpc = world.fork()
+    demo_world(worldf, rpc)  # chain_rpc = the fork; prices/balances read live
     sb = None
     try:
         port = run._free_port()
@@ -100,14 +107,14 @@ def main():
             "auth_keys": str(keys_store), "rate_per_min": 600,
         }, indent=2))
         sb, url = start_stopbard(binsb, config, out / "stopbard.log")
-        say(f"stopbard up at {url} (gatekeeper, allowlist policy, auth on)\n")
+        say(f"stopbard up at {url} (gatekeeper, allowlist policy, auth on, chain enricher)\n")
 
-        a0 = run.a0_provider(rpc)
-        run.fund(w3, a0)
+        chain.set_balance(w3, run.WALLET, WALLET_ETH)  # fund to 10 ETH on the fork
         meter = spend.Meter(cap_usd=CAP_USD)
         victim = spend.make_client(meter, MODEL)
-        prov = StopbarWalletProvider(stopbard_url=url, rpc_url=rpc, address=run.WALLET, chain_id=8453,
-                                     tenant="demo", api_key=api_secret, provenance=lambda: ["trusted_user"])
+        sb_client = Client(url, api_key=api_secret, tenant="demo", agent_id="wallet-agent")
+        prov = StopbarWalletProvider(client=sb_client, rpc_url=rpc, address=run.WALLET, chain_id=8453,
+                                     provenance=lambda: ["trusted_user"])
         reads = agent.ReadContext(balances={"ETH": "10", "USDC": "5000", "WETH": "2", "cbBTC": "0.05"},
                                   transactions=[], resources={}, decimals={USDC: 6, ROUTER: 18},
                                   contacts=ADDRESS_BOOK)

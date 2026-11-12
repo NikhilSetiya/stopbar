@@ -10,8 +10,8 @@ namespace Stopbar {
       principal: Agent,
       resource: [Wallet],
       context: {
-        amount_usd: decimal,
-        pct_of_balance: decimal,
+        amount_usd?: decimal,
+        pct_of_balance?: decimal,
         price_stale: Bool,
         taint: Set<String>,
         flags: Set<String>,

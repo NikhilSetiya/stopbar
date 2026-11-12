@@ -41,7 +41,7 @@ forbid (principal, action, resource) when { context.flags.contains("excessive_fe
 forbid (principal, action, resource) when { context.flags.contains("proxy_upgrade") };
 
 @id("large-share-of-balance") @message("Transfer exceeds 20% of the wallet balance") @outcome("escalate")
-forbid (principal, action, resource) when { context.pct_of_balance.greaterThan(decimal("0.20")) };
+forbid (principal, action, resource) when { context has pct_of_balance && context.pct_of_balance.greaterThan(decimal("0.20")) };
 
 @id("address-poisoning") @message("Destination looks like a known address but is not one (address poisoning)") @outcome("escalate")
 forbid (principal, action, resource) when { context.dest_similar_to_known && !context.dest_known };
