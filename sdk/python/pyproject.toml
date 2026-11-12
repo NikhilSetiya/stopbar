@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stopbar"
+version = "0.1.0"
+description = "Stopbar Python SDK — an intent firewall for AI-agent wallet actions and tool calls."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Stopbar" }]
+keywords = ["ethereum", "agent", "wallet", "policy", "firewall", "security"]
+dependencies = []  # the core client is stdlib-only
+
+[project.urls]
+Homepage = "https://github.com/NikhilSetiya/stopbar"
+Source = "https://github.com/NikhilSetiya/stopbar/tree/main/sdk/python"
+
+[project.optional-dependencies]
+# The AgentKit gatekeeper wallet provider (stopbar.wallet).
+wallet = ["coinbase-agentkit>=0.1.0", "web3>=6.0.0"]
+dev = ["pytest>=7.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["stopbar"]
