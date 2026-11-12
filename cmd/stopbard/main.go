@@ -32,6 +32,7 @@ import (
 	"github.com/NikhilSetiya/stopbar/internal/decode/toolcall"
 	"github.com/NikhilSetiya/stopbar/internal/devstub"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
+	"github.com/NikhilSetiya/stopbar/internal/enrich"
 	"github.com/NikhilSetiya/stopbar/internal/gateway"
 	"github.com/NikhilSetiya/stopbar/internal/limiter"
 	"github.com/NikhilSetiya/stopbar/internal/nonce"
@@ -238,7 +239,19 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		return runtime{}, err
 	}
 
-	enrichers := []engine.Enricher{w, lim} // lim supplies velocity
+	// The price/balance enricher: the chain reader (CS-131/132) when the world
+	// gives a chain RPC, else the static stub. Either way the limiter follows,
+	// supplying velocity.
+	var priceBalance engine.Enricher = w
+	if w.ChainRPC != "" {
+		ce, err := enrich.New(enrich.Config{RPCURL: w.ChainRPC, Feeds: w.Feeds, KnownDestinations: w.KnownDestinations})
+		if err != nil {
+			return runtime{}, err
+		}
+		priceBalance = ce
+		log.Info("enricher: reading balances and prices from the chain (CS-131/132)", "rpc", w.ChainRPC, "feeds", len(w.Feeds))
+	}
+	enrichers := []engine.Enricher{priceBalance, lim} // lim supplies velocity
 	if b.Trust() != nil {
 		// Tool-call bundle: session taint from its frozen trust map.
 		enrichers = append(enrichers, &policy.SessionTaint{Bundle: b})
