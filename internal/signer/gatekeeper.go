@@ -20,6 +20,7 @@ const CodeAdapter = "FAIL_CLOSED_ADAPTER"
 // Engine is the part of engine.Engine the gatekeeper drives.
 type Engine interface {
 	Evaluate(ctx context.Context, req model.ActionRequest) (model.Decision, error)
+	Approve(ctx context.Context, id, approver string) (model.Decision, model.ActionRequest, error)
 	Commit(ctx context.Context, requestID, txRef string) error
 	Release(ctx context.Context, requestID, reason string) error
 }
@@ -58,6 +59,28 @@ func (g *Gatekeeper) Evaluate(ctx context.Context, req model.ActionRequest) (mod
 	}
 	if err := g.Engine.Commit(ctx, req.ID, hash.Hex()); err != nil {
 		g.log().Error("gatekeeper: commit after signing failed; discarding the signed tx", "request_id", req.ID, "err", err)
+		g.release(ctx, req.ID, "commit failed after signing; signed tx discarded")
+		return refused(d), nil
+	}
+	d.SignedTx, d.TxHash = hexutil.Encode(raw), hash.Hex()
+	return d, nil
+}
+
+// Approve re-evaluates a pending escalation (CS-151/152) and, if it now allows,
+// signs and commits the transaction exactly as Evaluate does for a fresh allow.
+func (g *Gatekeeper) Approve(ctx context.Context, id, approver string) (model.Decision, error) {
+	d, req, err := g.Engine.Approve(ctx, id, approver)
+	if err != nil || d.Outcome != model.Allow {
+		return d, err
+	}
+	raw, hash, err := g.Adapter.SignTx(ctx, d.Token, req.Action)
+	if err != nil {
+		g.log().Warn("gatekeeper: adapter refused an approved allow", "request_id", req.ID, "err", err)
+		g.release(ctx, req.ID, "adapter refused: "+adapterCode(err))
+		return refused(d), nil
+	}
+	if err := g.Engine.Commit(ctx, req.ID, hash.Hex()); err != nil {
+		g.log().Error("gatekeeper: commit after approval signing failed; discarding the signed tx", "request_id", req.ID, "err", err)
 		g.release(ctx, req.ID, "commit failed after signing; signed tx discarded")
 		return refused(d), nil
 	}

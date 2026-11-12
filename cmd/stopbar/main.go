@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,6 +12,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +34,9 @@ const usage = `usage:
   stopbar keygen decision-key <file>     generate a Stopbar decision key (Ed25519, mode 0600)
   stopbar keygen api-key --tenant T [--agent ID] [--scopes a,b]
       generate an API key: the secret (shown once) and the hashed record to store
+  stopbar approve <id> --url URL --key APPROVER_KEY
+      approve a pending escalation: stopbard re-evaluates it against current
+      state and, if it now allows, returns the signed transaction
   stopbar audit verify --state-dir DIR (--keys JWKS.json | --decision-key FILE) [--from N] [--to M] [--require-covered [--allow-empty]]
       recompute the audit hash chain and check the signed checkpoints, offline
   stopbar audit export --state-dir DIR [--from N] [--to M]
@@ -48,6 +54,10 @@ func main() {
 		}
 	case "keygen":
 		if err := keygenCmd(os.Args[2:]); err != nil {
+			fail(err.Error())
+		}
+	case "approve":
+		if err := approveCmd(os.Args[2:]); err != nil {
 			fail(err.Error())
 		}
 	case "decode-tx":
@@ -201,6 +211,50 @@ func verifyKeys(keysFile, decisionKeyFile string) (map[string]ed25519.PublicKey,
 		return map[string]ed25519.PublicKey{decision.Kid(pub): pub}, nil
 	}
 	return loadKeys(keysFile)
+}
+
+// approveCmd approves a pending escalation by id. stopbard re-evaluates it
+// against current state (enrich, policy, limiter); if it now allows, the
+// response carries the signed transaction. The caller broadcasts it.
+func approveCmd(args []string) error {
+	// The id is the first argument, before the flags. Go's flag package stops at
+	// the first non-flag token, so parse it out before the flags rather than
+	// after (otherwise `approve <id> --url ... --key ...` leaves them unparsed).
+	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
+		return errors.New("usage: stopbar approve <id> --url URL --key APPROVER_KEY")
+	}
+	idArg := args[0]
+	fs := flag.NewFlagSet("approve", flag.ContinueOnError)
+	url := fs.String("url", "http://127.0.0.1:7777", "stopbard base URL")
+	key := fs.String("key", "", "approver API key (needs the 'approve' scope)")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("usage: stopbar approve <id> --url URL --key APPROVER_KEY")
+	}
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(*url, "/")+"/v1/approvals/"+idArg, nil)
+	if err != nil {
+		return err
+	}
+	if *key != "" {
+		req.Header.Set("Authorization", "Bearer "+*key)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	var pretty bytes.Buffer
+	if json.Indent(&pretty, body, "", "  ") != nil {
+		pretty.Write(body)
+	}
+	fmt.Printf("HTTP %d\n%s\n", resp.StatusCode, pretty.String())
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("escalation not executed (HTTP %d)", resp.StatusCode)
+	}
+	return nil
 }
 
 // keygenCmd generates the keys a deployment needs: the Ed25519 decision key

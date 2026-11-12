@@ -25,6 +25,8 @@ import (
 	"syscall"
 	"time"
 
+	bolt "go.etcd.io/bbolt"
+
 	"github.com/NikhilSetiya/stopbar/internal/audit"
 	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
@@ -161,7 +163,7 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 		authn = gateway.BearerAuthenticator{Store: ks}
 		log.Info("authentication enabled", "auth_keys", o.authKeys, "rate_per_min", o.ratePerMin)
 	}
-	runErr := run(addr, rt.eval, nonces, rt.keys, rt.counters, authn, rt.audit, o.ratePerMin, log)
+	runErr := run(addr, rt.eval, nonces, rt.keys, rt.counters, authn, rt.audit, rt.approver, o.ratePerMin, log)
 	if rt.signed {
 		if err := rt.audit.Checkpoint(); err != nil {
 			log.Error("final audit checkpoint failed", "severity", "high", "err", err)
@@ -183,6 +185,7 @@ type devOpts struct {
 // runtime is what serve needs from the wiring.
 type runtime struct {
 	eval     gateway.Evaluator
+	approver gateway.Approver
 	keys     func() []decision.JWK
 	counters func() map[string]uint64
 	audit    *audit.Log
@@ -241,7 +244,8 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 
 	// The price/balance enricher: the chain reader (CS-131/132) when the world
 	// gives a chain RPC, else the static stub. Either way the limiter follows,
-	// supplying velocity.
+	// supplying velocity. Approval (CS-152) re-runs these enrichers, so when the
+	// chain reader is active an approval re-checks live on-chain state.
 	var priceBalance engine.Enricher = w
 	if w.ChainRPC != "" {
 		ce, err := enrich.New(enrich.Config{RPCURL: w.ChainRPC, Feeds: w.Feeds, KnownDestinations: w.KnownDestinations})
@@ -250,6 +254,10 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		}
 		priceBalance = ce
 		log.Info("enricher: reading balances and prices from the chain (CS-131/132)", "rpc", w.ChainRPC, "feeds", len(w.Feeds))
+	}
+	pending, err := newPendingStore(o.db)
+	if err != nil {
+		return runtime{}, err
 	}
 	enrichers := []engine.Enricher{priceBalance, lim} // lim supplies velocity
 	if b.Trust() != nil {
@@ -263,12 +271,14 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		Limiter:   lim,
 		Signer:    &decision.Signer{Keys: ring, Iss: devIssuer, Aud: devAudience},
 		Audit:     lg,
+		Pending:   pending,
 		Logger:    log,
 	})
 	if err != nil {
 		return runtime{}, err
 	}
 	var eval gateway.Evaluator = e
+	var approver gateway.Approver // only in gatekeeper mode (an approval executes a signed tx)
 	mode := "advisory (allow returns a decision token)"
 	if o.wallet != "" {
 		keys, err := signer.LoadDevWallet(o.wallet)
@@ -286,15 +296,16 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		if err != nil {
 			return runtime{}, err
 		}
-		eval = &signer.Gatekeeper{Engine: e, Adapter: ad, Logger: log}
+		gk := &signer.Gatekeeper{Engine: e, Adapter: ad, Logger: log}
+		eval, approver = gk, gk
 		mode = fmt.Sprintf("gatekeeper (allow returns a signed tx; wallets %v)", ad.Addresses())
 	}
 	log.Warn("DEV STUBS ENABLED: decoder and price/balance enricher are stand-ins; local key providers. Not for production.",
 		"world", o.world, "policies", o.policies, "bundle_hash", b.Hash(), "mode", mode, "decision_kid", ring.ActiveKid())
-	return runtime{eval: eval, keys: ring.JWKS, counters: e.Counters, audit: lg, signed: true}, nil
+	return runtime{eval: eval, approver: approver, keys: ring.JWKS, counters: e.Counters, audit: lg, signed: true}, nil
 }
 
-func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys func() []decision.JWK, counters func() map[string]uint64, authn gateway.Authenticator, auditSink gateway.AuditSink, ratePerMin int, log *slog.Logger) error {
+func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys func() []decision.JWK, counters func() map[string]uint64, authn gateway.Authenticator, auditSink gateway.AuditSink, approver gateway.Approver, ratePerMin int, log *slog.Logger) error {
 	if err := requireLoopbackUnlessAuth(addr, authn != nil); err != nil {
 		return err
 	}
@@ -304,7 +315,7 @@ func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys fu
 	}
 	srv := &http.Server{
 		Handler: gateway.New(gateway.Config{Evaluator: eval, Nonces: nonces, Keys: keys, Counters: counters, Logger: log,
-			Authenticator: authn, Audit: auditSink, RatePerMin: ratePerMin}),
+			Authenticator: authn, Audit: auditSink, RatePerMin: ratePerMin, Approver: approver}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -335,6 +346,45 @@ func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys fu
 		return err
 	}
 	return nil
+}
+
+// pendingStore records escalations awaiting approval in the state DB (CS-152),
+// as JSON keyed by request id. It survives restart with the rest of state.db.
+type pendingStore struct{ db *store.DB }
+
+var pendingBucket = []byte("pending_escalations_v1")
+
+func newPendingStore(db *store.DB) (*pendingStore, error) {
+	if err := db.Bucket(pendingBucket); err != nil {
+		return nil, err
+	}
+	return &pendingStore{db}, nil
+}
+
+func (p *pendingStore) Put(_ context.Context, e engine.PendingEscalation) error {
+	b, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	return p.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(pendingBucket).Put([]byte(e.Request.ID), b) })
+}
+
+func (p *pendingStore) Get(_ context.Context, id string) (engine.PendingEscalation, bool, error) {
+	var e engine.PendingEscalation
+	var found bool
+	err := p.db.View(func(tx *bolt.Tx) error {
+		v := tx.Bucket(pendingBucket).Get([]byte(id))
+		if v == nil {
+			return nil
+		}
+		found = true
+		return json.Unmarshal(v, &e)
+	})
+	return e, found, err
+}
+
+func (p *pendingStore) Delete(_ context.Context, id string) error {
+	return p.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(pendingBucket).Delete([]byte(id)) })
 }
 
 // requireLoopbackUnlessAuth refuses to serve an unauthenticated API beyond this

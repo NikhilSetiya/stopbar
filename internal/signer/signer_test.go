@@ -308,6 +308,10 @@ func (f *fakeEngine) Evaluate(ctx context.Context, req model.ActionRequest) (mod
 	d.Token = tok
 	return d, err
 }
+func (f *fakeEngine) Approve(_ context.Context, id, _ string) (model.Decision, model.ActionRequest, error) {
+	return model.Decision{}, model.ActionRequest{}, model.ErrNoPending
+}
+
 func (f *fakeEngine) Commit(_ context.Context, id, txRef string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -211,6 +211,9 @@ const (
 	AuditAuthReject   AuditRecordType = "auth_reject" // CS-103: a request rejected at the gateway (identity mismatch, scope)
 )
 
+// ErrNoPending means no escalation with that id is awaiting approval (CS-151).
+var ErrNoPending = errors.New("no pending escalation for that id")
+
 // AuditEntry is an audit record before the log assigns its sequence number,
 // timestamp and hashes. State stores take one so that the record is written
 // in the same transaction as the state change it describes.
