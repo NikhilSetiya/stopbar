@@ -217,16 +217,23 @@ func verifyKeys(keysFile, decisionKeyFile string) (map[string]ed25519.PublicKey,
 // against current state (enrich, policy, limiter); if it now allows, the
 // response carries the signed transaction. The caller broadcasts it.
 func approveCmd(args []string) error {
+	// The id is the first argument, before the flags. Go's flag package stops at
+	// the first non-flag token, so parse it out before the flags rather than
+	// after (otherwise `approve <id> --url ... --key ...` leaves them unparsed).
+	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
+		return errors.New("usage: stopbar approve <id> --url URL --key APPROVER_KEY")
+	}
+	idArg := args[0]
 	fs := flag.NewFlagSet("approve", flag.ContinueOnError)
 	url := fs.String("url", "http://127.0.0.1:7777", "stopbard base URL")
 	key := fs.String("key", "", "approver API key (needs the 'approve' scope)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
+	if fs.NArg() != 0 {
 		return errors.New("usage: stopbar approve <id> --url URL --key APPROVER_KEY")
 	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(*url, "/")+"/v1/approvals/"+fs.Arg(0), nil)
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(*url, "/")+"/v1/approvals/"+idArg, nil)
 	if err != nil {
 		return err
 	}
