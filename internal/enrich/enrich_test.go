@@ -33,16 +33,32 @@ func word32(n *big.Int) string {
 	return hex.EncodeToString(out)
 }
 
-// roundData encodes latestRoundData() with the given answer and updatedAt.
-func roundData(answer int64, updatedAt time.Time) string {
-	return "0x" + word32(big.NewInt(1)) + word32(big.NewInt(answer)) + word32(big.NewInt(0)) +
-		word32(big.NewInt(updatedAt.Unix())) + word32(big.NewInt(1))
+// twos encodes a possibly-negative integer as a 32-byte two's-complement word.
+func twos(n *big.Int) string {
+	v := n
+	if n.Sign() < 0 {
+		v = new(big.Int).Add(n, new(big.Int).Lsh(big.NewInt(1), 256))
+	}
+	return word32(v)
 }
 
-// mockNode answers eth_getBalance and eth_call for a fixed world. It counts
-// calls so tests can assert caching.
+// roundData encodes latestRoundData() with full control over the round fields.
+func roundData(roundID int64, answer *big.Int, updatedAt time.Time, answeredInRound int64) string {
+	return "0x" + word32(big.NewInt(roundID)) + twos(answer) + word32(big.NewInt(0)) +
+		word32(big.NewInt(updatedAt.Unix())) + word32(big.NewInt(answeredInRound))
+}
+
+// freshRound is a complete, positive round updated at t.
+func freshRound(answer *big.Int, t time.Time) string { return roundData(1, answer, t, 1) }
+
+// mockNode answers eth_getBalance, eth_call and eth_getBlockByNumber for a
+// fixed world. now is the CHAIN clock (the latest block's timestamp); feedTime
+// is when the price feeds last updated (defaults to now). It counts calls so
+// tests can assert caching.
 type mockNode struct {
 	now       time.Time
+	feedTime  time.Time
+	feedDec   int64 // feed decimals() (default 8, Chainlink's USD convention)
 	ethWei    *big.Int
 	usdcUnits *big.Int
 	calls     map[string]int
@@ -50,7 +66,7 @@ type mockNode struct {
 }
 
 func newMockNode(now time.Time) *mockNode {
-	m := &mockNode{now: now, ethWei: new(big.Int), usdcUnits: new(big.Int), calls: map[string]int{}}
+	m := &mockNode{now: now, feedTime: now, feedDec: 8, ethWei: new(big.Int), usdcUnits: new(big.Int), calls: map[string]int{}}
 	m.srv = httptest.NewServer(http.HandlerFunc(m.handle))
 	return m
 }
@@ -69,28 +85,38 @@ func (m *mockNode) handle(w http.ResponseWriter, r *http.Request) {
 	switch req.Method {
 	case "eth_getBalance":
 		reply("0x" + m.ethWei.Text(16))
+	case "eth_getBlockByNumber":
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID,
+			"result": map[string]any{"timestamp": fmt.Sprintf("0x%x", m.now.Unix())}})
 	case "eth_call":
 		p := req.Params[0].(map[string]any)
 		to, data := strings.ToLower(p["to"].(string)), p["data"].(string)
 		sel := strings.TrimPrefix(data, "0x")[:8]
 		m.calls["eth_call:"+to+":"+sel]++
+		scale := func(dollars int64) *big.Int {
+			return new(big.Int).Mul(big.NewInt(dollars), pow10big(int(m.feedDec)))
+		}
 		switch {
 		case sel == selDecimals && to == usdc:
 			reply("0x" + word32(big.NewInt(6)))
-		case sel == selDecimals: // feed decimals (Chainlink USD feeds are 8)
-			reply("0x" + word32(big.NewInt(8)))
+		case sel == selDecimals: // the feed's own decimals()
+			reply("0x" + word32(big.NewInt(m.feedDec)))
 		case sel == selBalanceOf && to == usdc:
 			reply("0x" + word32(m.usdcUnits))
 		case sel == selLatestRoundData && to == ethFeed:
-			reply(roundData(3500e8, m.now))
+			reply(freshRound(scale(3500), m.feedTime))
 		case sel == selLatestRoundData && to == usdcFeed:
-			reply(roundData(1e8, m.now))
+			reply(freshRound(scale(1), m.feedTime))
 		default:
 			reply("0x" + word32(big.NewInt(0)))
 		}
 	default:
 		http.Error(w, "unexpected method "+req.Method, 400)
 	}
+}
+
+func pow10big(n int) *big.Int {
+	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(n)), nil)
 }
 
 func (m *mockNode) enricher(t *testing.T) *ChainEnricher {
@@ -163,17 +189,87 @@ func TestPriceOracleFreshAndStale(t *testing.T) {
 		t.Fatalf("ETH price = %v stale=%v, want 3500", p, stale)
 	}
 
-	// A feed that last updated two hours ago is stale (maxAge 1h).
-	m.now = now.Add(-2 * time.Hour)
-	o2 := NewPriceOracle(NewRPC(m.srv.URL, 0), map[string]string{NativeKey: ethFeed}, time.Hour, 0)
-	o2.clock = func() time.Time { return now }
-	if _, stale := o2.Price(context.Background(), NativeKey); !stale {
-		t.Fatal("a two-hour-old feed should be stale")
-	}
-
 	// An asset with no configured feed is stale, not an error.
 	if _, stale := o.Price(context.Background(), "0xdeadbeef"); !stale {
 		t.Fatal("an asset with no feed should be stale")
+	}
+}
+
+// TestStalenessUsesChainClock is the key regression for a fork pinned in the
+// past: when the node's latest block is hours old but the feed updated at that
+// same block, the price is FRESH. Staleness must compare the feed against the
+// chain clock, not the host's wall clock (which would make every price on an
+// old fork look stale and escalate every request).
+func TestStalenessUsesChainClock(t *testing.T) {
+	// The fork is pinned three hours in the (wall-clock) past.
+	forkTime := time.Now().Add(-3 * time.Hour)
+	m := newMockNode(forkTime) // block timestamp = forkTime
+	m.feedTime = forkTime      // the feed last updated at the fork block
+	o := NewPriceOracle(NewRPC(m.srv.URL, 0), map[string]string{NativeKey: ethFeed}, time.Hour, 0)
+	// o.clock is real wall-clock time (the host), hours ahead of the fork.
+
+	if p, stale := o.Price(context.Background(), NativeKey); stale {
+		t.Fatalf("a feed fresh at the fork block must not be stale (chain clock); got stale, p=%v", p)
+	}
+
+	// A feed that lags the chain clock by more than maxAge IS stale.
+	m2 := newMockNode(forkTime)
+	m2.feedTime = forkTime.Add(-2 * time.Hour) // two hours behind the latest block
+	o2 := NewPriceOracle(NewRPC(m2.srv.URL, 0), map[string]string{NativeKey: ethFeed}, time.Hour, 0)
+	if _, stale := o2.Price(context.Background(), NativeKey); !stale {
+		t.Fatal("a feed two hours behind the chain clock should be stale")
+	}
+}
+
+func TestIncompleteOrBadRoundIsStale(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	cases := map[string]string{
+		"incomplete round (answeredInRound < roundId)": roundData(5, big.NewInt(3500e8), now, 4),
+		"zero price":     roundData(1, big.NewInt(0), now, 1),
+		"negative price": roundData(1, big.NewInt(-3500e8), now, 1),
+		"updatedAt == 0": roundData(1, big.NewInt(3500e8), time.Unix(0, 0), 1),
+	}
+	for name, ret := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req struct {
+					Method string `json:"method"`
+					Params []any  `json:"params"`
+					ID     uint64 `json:"id"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				res := "0x" + word32(big.NewInt(8))
+				switch req.Method {
+				case "eth_getBlockByNumber":
+					_ = json.NewEncoder(w).Encode(map[string]any{"id": req.ID, "result": map[string]any{"timestamp": fmt.Sprintf("0x%x", now.Unix())}})
+					return
+				case "eth_call":
+					if strings.TrimPrefix(req.Params[0].(map[string]any)["data"].(string), "0x")[:8] == selLatestRoundData {
+						res = ret
+					}
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": req.ID, "result": res})
+			}))
+			defer srv.Close()
+			o := NewPriceOracle(NewRPC(srv.URL, 0), map[string]string{NativeKey: ethFeed}, time.Hour, 0)
+			if _, stale := o.Price(context.Background(), NativeKey); !stale {
+				t.Fatalf("%s must be treated as stale", name)
+			}
+		})
+	}
+}
+
+// TestFeedDecimalsReadFromFeed proves the price scales by the feed's own
+// decimals(), not an assumed 8: an 18-decimal feed reporting 3500e18 still
+// prices at $3500.
+func TestFeedDecimalsReadFromFeed(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	m := newMockNode(now)
+	m.feedDec = 18 // not the usual 8
+	o := NewPriceOracle(NewRPC(m.srv.URL, 0), map[string]string{NativeKey: ethFeed}, time.Hour, 0)
+	p, stale := o.Price(context.Background(), NativeKey)
+	if stale || p.FloatString(2) != "3500.00" {
+		t.Fatalf("18-decimal feed price = %v stale=%v, want 3500", p, stale)
 	}
 }
 

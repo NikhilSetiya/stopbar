@@ -79,7 +79,9 @@ func (o *PriceOracle) Price(ctx context.Context, key string) (price *big.Rat, st
 	return new(big.Rat).Set(p), false
 }
 
-func (o *PriceOracle) read(ctx context.Context, key string, now time.Time) (*big.Rat, bool) {
+// read fetches and validates a feed. _ is the (wall-clock) cache time, kept for
+// the signature; staleness is judged against the chain clock, below.
+func (o *PriceOracle) read(ctx context.Context, key string, _ time.Time) (*big.Rat, bool) {
 	feed, ok := o.feeds[key]
 	if !ok {
 		return nil, true // no feed for this asset: stale, policy escalates
@@ -89,23 +91,40 @@ func (o *PriceOracle) read(ctx context.Context, key string, now time.Time) (*big
 		return nil, true
 	}
 	// latestRoundData() -> (uint80 roundId, int256 answer, uint256 startedAt,
-	// uint256 updatedAt, uint80 answeredInRound).
+	// uint256 updatedAt, uint80 answeredInRound). The standard Chainlink
+	// safety checks: a positive answer, a non-zero updatedAt, and a complete
+	// round (answeredInRound >= roundId). Any failure is stale, never priced.
+	roundID, err := word(ret, 0)
+	if err != nil {
+		return nil, true
+	}
 	answer, err := signedWord(ret, 1)
-	if err != nil || answer.Sign() <= 0 {
+	if err != nil || answer.Sign() <= 0 { // zero or negative price
 		return nil, true
 	}
 	updatedAt, err := word(ret, 3)
-	if err != nil || updatedAt.Sign() <= 0 {
+	if err != nil || updatedAt.Sign() <= 0 { // round not yet finalised
 		return nil, true
 	}
-	age := now.Sub(time.Unix(updatedAt.Int64(), 0))
+	answeredInRound, err := word(ret, 4)
+	if err != nil || answeredInRound.Cmp(roundID) < 0 { // stale/incomplete round
+		return nil, true
+	}
+	// Staleness against the CHAIN clock (the latest block's timestamp), so a
+	// node forked at a past block does not make a fresh-at-that-block feed look
+	// stale. A failure to read the block fails closed (stale).
+	chainNow, err := o.rpc.BlockTimestamp(ctx)
+	if err != nil {
+		return nil, true
+	}
+	age := time.Duration(chainNow-updatedAt.Int64()) * time.Second
 	if age < 0 {
 		age = -age
 	}
 	if age > o.maxAge {
 		return nil, true // heartbeat missed: do not trust it
 	}
-	dec, err := o.decimals(ctx, feed)
+	dec, err := o.decimals(ctx, feed) // the feed's own decimals, never assumed
 	if err != nil {
 		return nil, true
 	}

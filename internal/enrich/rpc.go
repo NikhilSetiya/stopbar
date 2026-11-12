@@ -97,6 +97,27 @@ func (c *RPC) BalanceAt(ctx context.Context, addr string) (*big.Int, error) {
 	return hexToInt(hex)
 }
 
+// BlockTimestamp returns the latest block's Unix timestamp. Price staleness is
+// judged against this — the chain's clock — not the host's wall clock, so a
+// node forked at a past block does not make every feed look stale.
+func (c *RPC) BlockTimestamp(ctx context.Context) (int64, error) {
+	raw, err := c.call(ctx, "eth_getBlockByNumber", "latest", false)
+	if err != nil {
+		return 0, err
+	}
+	var block struct {
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(raw, &block); err != nil {
+		return 0, fmt.Errorf("eth_getBlockByNumber: %w", err)
+	}
+	ts, err := hexToInt(block.Timestamp)
+	if err != nil {
+		return 0, fmt.Errorf("eth_getBlockByNumber timestamp: %w", err)
+	}
+	return ts.Int64(), nil
+}
+
 // Call executes a read-only eth_call to `to` with calldata `data` (0x-hex) at
 // the latest block, returning the raw return bytes.
 func (c *RPC) Call(ctx context.Context, to string, data []byte) ([]byte, error) {
