@@ -100,9 +100,15 @@ const (
 	CodeEngine          = "FAIL_CLOSED_ENGINE"
 	CodeCapExceeded     = "CAP_EXCEEDED"
 	CodeCircuitOpen     = "CIRCUIT_OPEN"
+	CodeApprovalExpired = "APPROVAL_EXPIRED"       // the pending window passed before approval
+	CodeApprovalSelf    = "APPROVAL_SELF_APPROVAL" // the requester tried to approve their own escalation
 	DefaultDecisionTTL  = 60 * time.Second
 	DefaultStageTimeout = time.Second
 	DefaultAuditTimeout = 5 * time.Second
+	// DefaultPendingTTL is how long an escalation may wait for approval. It is
+	// separate from the request's own freshness TTL (≤5 min, checked at the
+	// gateway): approval ignores the request TTL but enforces this window.
+	DefaultPendingTTL = 15 * time.Minute
 )
 
 // Config wires an Engine. Every component except Enrichers is required.
@@ -125,6 +131,9 @@ type Config struct {
 	// Pending persists escalations awaiting approval (CS-151/152). nil disables
 	// approvals; an escalation is then returned but never recorded for approval.
 	Pending PendingStore
+	// PendingTTL is how long an escalation may wait for approval before it is
+	// refused. Default DefaultPendingTTL (15m).
+	PendingTTL time.Duration
 }
 
 // PendingEscalation is an escalated request awaiting human approval (CS-152).
@@ -132,6 +141,10 @@ type PendingEscalation struct {
 	Request  model.ActionRequest `json:"request"`
 	Reasons  []string            `json:"reasons"` // the escalated policy IDs an approver must cover
 	IssuedAt time.Time           `json:"issued_at"`
+	// RequestedBy is the KeyID of the identity that submitted the request, so
+	// the same identity cannot also approve it (CS-152 separation of duties).
+	// Empty when auth is off (loopback dev), which disables the check.
+	RequestedBy string `json:"requested_by,omitempty"`
 }
 
 // PendingStore records escalations until they are approved (and executed) or
@@ -193,6 +206,9 @@ func New(cfg Config) (*Engine, error) {
 	}
 	if cfg.AuditTimeout <= 0 {
 		cfg.AuditTimeout = DefaultAuditTimeout
+	}
+	if cfg.PendingTTL <= 0 {
+		cfg.PendingTTL = DefaultPendingTTL
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
@@ -278,17 +294,51 @@ func (e *Engine) Approve(ctx context.Context, id, approver string) (model.Decisi
 	if !ok {
 		return model.Decision{}, model.ActionRequest{}, ErrNoPending
 	}
+	now := e.cfg.Clock()
+	ph, _ := decision.PayloadHash(pe.Request.Action) // best-effort binding for the audit record
+
+	// Expiry: an escalation may wait only PendingTTL for approval. Approving
+	// after that is refused and audited, and the dead record is removed. This
+	// is the pending window, not the request's own freshness TTL, which
+	// approval deliberately ignores (a human takes longer than 5 minutes).
+	if now.Sub(pe.IssuedAt) > e.cfg.PendingTTL {
+		d := e.deny(id, now, ph, failed(CodeApprovalExpired, fmt.Errorf("escalation expired after %s", e.cfg.PendingTTL)))
+		e.auditRefusal(ctx, pe.Request, d)
+		if derr := e.cfg.Pending.Delete(ctx, id); derr != nil {
+			e.cfg.Logger.Error("approve: delete expired pending failed", "severity", "high", "id", id, "err", derr)
+		}
+		return d, pe.Request, nil
+	}
+
+	// Separation of duties: the identity that requested the action may not also
+	// approve it. A different approver can still approve, so the record stays.
+	if approver != "" && approver == pe.RequestedBy {
+		d := e.deny(id, now, ph, failed(CodeApprovalSelf, fmt.Errorf("the requester may not approve their own escalation")))
+		e.auditRefusal(ctx, pe.Request, d)
+		return d, pe.Request, nil
+	}
+
 	approved := make(map[string]bool, len(pe.Reasons))
 	for _, r := range pe.Reasons {
 		approved[r] = true
 	}
-	d := e.evaluate(ctx, pe.Request, e.cfg.Clock(), approved, approver)
+	d := e.evaluate(ctx, pe.Request, now, approved, approver)
 	if d.Outcome == model.Allow {
 		if err := e.cfg.Pending.Delete(ctx, id); err != nil {
 			e.cfg.Logger.Error("approve: delete pending after allow failed", "severity", "high", "id", id, "err", err)
 		}
 	}
 	return d, pe.Request, nil
+}
+
+// auditRefusal records an approval refusal (expired window or self-approval) as
+// a decision audit record. The outcome is already deny, so a failed audit still
+// fails closed; it is counted, loudly, as an unaudited denial.
+func (e *Engine) auditRefusal(ctx context.Context, req model.ActionRequest, d model.Decision) {
+	body := addIdentity(ctx, map[string]any{"request": req, "decision": d})
+	if err := e.record(ctx, func(ctx context.Context) error { return e.cfg.Audit.Append(ctx, model.AuditDecision, body) }); err != nil {
+		e.unaudited(req.ID, err)
+	}
 }
 
 // addIdentity puts the authenticated caller (if any) into an audit body, so
@@ -389,8 +439,13 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 			d.Outcome, d.Reasons = model.Allow, []model.Reason{}
 			d.Approvals = []model.Approval{{Approver: approver, At: now}}
 		case approved == nil && e.cfg.Pending != nil:
-			// CS-152: record the escalation so `stopbar approve <id>` can re-run it.
-			if perr := e.cfg.Pending.Put(ctx, PendingEscalation{Request: req, Reasons: policyIDs(reasons), IssuedAt: now}); perr != nil {
+			// CS-152: record the escalation so `stopbar approve <id>` can re-run it,
+			// with the requester's identity so it cannot also approve itself.
+			pe := PendingEscalation{Request: req, Reasons: policyIDs(reasons), IssuedAt: now}
+			if rid, ok := auth.FromContext(ctx); ok {
+				pe.RequestedBy = rid.KeyID
+			}
+			if perr := e.cfg.Pending.Put(ctx, pe); perr != nil {
 				return audit(e.deny(req.ID, now, payloadHash, failed(CodeAudit, perr)), ctxRecord)
 			}
 		}
@@ -548,6 +603,10 @@ func publicMessage(se *stageError) string {
 		return "value or velocity cap exceeded"
 	case CodeCircuitOpen:
 		return "circuit breaker open"
+	case CodeApprovalExpired:
+		return "the approval window has expired"
+	case CodeApprovalSelf:
+		return "the requester may not approve their own request"
 	case CodeNormalize:
 		if errors.Is(se.err, decision.ErrNoBinding) {
 			return "action kind cannot be bound to a decision in v1"
