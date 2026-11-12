@@ -151,13 +151,17 @@ type rig struct {
 	audit   *fakeAudit
 }
 
+// rigNow is the fixed clock the rig runs at, so tests that seed pending
+// escalations can stamp IssuedAt to "now".
+var rigNow = time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+
 func newRig() *rig {
 	a := &fakeAudit{}
 	l := &fakeLimiter{audit: a}
 	return &rig{limiter: l, audit: a, cfg: Config{
 		Decoders: []Decoder{fakeDecoder{}}, Policy: outcome(model.Allow), Limiter: l,
 		Signer: goodSigner, Audit: a, StageTimeout: 50 * time.Millisecond,
-		Clock: func() time.Time { return time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC) },
+		Clock: func() time.Time { return rigNow },
 	}}
 }
 
@@ -539,8 +543,9 @@ func (p *fakePending) len() int { p.mu.Lock(); defer p.mu.Unlock(); return len(p
 
 // TestApprove covers the escalation lifecycle (CS-151/152): an escalation is
 // recorded, approving it re-runs enrich/policy/limiter against current state,
-// and approval is refused if a new rule denies, a new escalation appears, or a
-// cap has filled since.
+// and approval is refused if a new rule denies, a new escalation appears, a cap
+// has filled, the pending window has expired, or the requester tries to approve
+// their own escalation. Approval ignores the request's own freshness TTL.
 func TestApprove(t *testing.T) {
 	const escReason = "taint-unknown-destination" // what outcome(Escalate) emits
 
@@ -590,7 +595,7 @@ func TestApprove(t *testing.T) {
 
 	t.Run("approve is refused when a new rule now denies", func(t *testing.T) {
 		pend := newFakePending()
-		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{escReason}}
+		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{escReason}, IssuedAt: rigNow}
 		r := newRig()
 		r.cfg.Policy = outcome(model.Deny) // state changed: it now denies
 		r.cfg.Pending = pend
@@ -615,7 +620,7 @@ func TestApprove(t *testing.T) {
 		// The recorded escalation covered one reason; re-running produces a
 		// different reason the approver never saw, so it must not auto-allow.
 		pend := newFakePending()
-		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{"some-old-reason"}}
+		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{"some-old-reason"}, IssuedAt: rigNow}
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate) // emits escReason, which is NOT approved
 		r.cfg.Pending = pend
@@ -635,7 +640,7 @@ func TestApprove(t *testing.T) {
 
 	t.Run("approve is refused when the cap has since filled", func(t *testing.T) {
 		pend := newFakePending()
-		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{escReason}}
+		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{escReason}, IssuedAt: rigNow}
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate)
 		r.cfg.Pending = pend
@@ -651,6 +656,88 @@ func TestApprove(t *testing.T) {
 		}
 		if pend.len() != 1 {
 			t.Fatalf("pending entries after cap-full refusal = %d, want 1 (kept)", pend.len())
+		}
+	})
+
+	t.Run("approval after the pending window expires is refused, audited and removed", func(t *testing.T) {
+		pend := newFakePending()
+		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"),
+			Reasons: []string{escReason}, IssuedAt: rigNow.Add(-16 * time.Minute)} // past the 15m default
+		r := newRig()
+		r.cfg.Policy = outcome(model.Escalate) // would otherwise promote to allow
+		r.cfg.Pending = pend
+		e := r.engine(t)
+
+		before := len(r.audit.records)
+		d, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		if err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+		if d.Outcome != model.Deny || d.Reasons[len(d.Reasons)-1].Code != CodeApprovalExpired {
+			t.Fatalf("Outcome/reason = %v / %+v, want deny APPROVAL_EXPIRED", d.Outcome, d.Reasons)
+		}
+		if len(r.audit.records) != before+1 {
+			t.Fatalf("expired refusal wrote %d audit records, want 1", len(r.audit.records)-before)
+		}
+		if len(r.limiter.reserved) != 0 {
+			t.Fatalf("an expired approval reserved %d caps, want 0", len(r.limiter.reserved))
+		}
+		if pend.len() != 0 {
+			t.Fatalf("expired pending entries = %d, want 0 (removed)", pend.len())
+		}
+	})
+
+	t.Run("the requester may not approve their own escalation", func(t *testing.T) {
+		pend := newFakePending()
+		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"),
+			Reasons: []string{escReason}, IssuedAt: rigNow, RequestedBy: "ak_requester"}
+		r := newRig()
+		r.cfg.Policy = outcome(model.Escalate)
+		r.cfg.Pending = pend
+		e := r.engine(t)
+
+		// same identity as the requester → refused, record kept for a real approver.
+		d, _, err := e.Approve(context.Background(), "r1", "ak_requester")
+		if err != nil {
+			t.Fatalf("Approve(self): %v", err)
+		}
+		if d.Outcome != model.Deny || d.Reasons[len(d.Reasons)-1].Code != CodeApprovalSelf {
+			t.Fatalf("Outcome/reason = %v / %+v, want deny APPROVAL_SELF_APPROVAL", d.Outcome, d.Reasons)
+		}
+		if pend.len() != 1 {
+			t.Fatalf("pending after self-approval = %d, want 1 (kept for another approver)", pend.len())
+		}
+		// a different identity may still approve it.
+		d2, _, err := e.Approve(context.Background(), "r1", "ak_operator")
+		if err != nil {
+			t.Fatalf("Approve(operator): %v", err)
+		}
+		if d2.Outcome != model.Allow {
+			t.Fatalf("a different approver got %v, want allow", d2.Outcome)
+		}
+	})
+
+	t.Run("approval ignores the request's own freshness TTL", func(t *testing.T) {
+		// The original request TTL (≤5m, checked at the gateway) may well have
+		// passed by the time a human approves; within the pending window the
+		// approval must still go through. Guards against a freshness check
+		// creeping into the engine's approval path.
+		stale := setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1")
+		stale.IssuedAt = rigNow.Add(-10 * time.Minute) // long past its ttl_seconds
+		stale.TTLSeconds = 60
+		pend := newFakePending()
+		pend.m["r1"] = PendingEscalation{Request: stale, Reasons: []string{escReason}, IssuedAt: rigNow}
+		r := newRig()
+		r.cfg.Policy = outcome(model.Escalate)
+		r.cfg.Pending = pend
+		e := r.engine(t)
+
+		d, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		if err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+		if d.Outcome != model.Allow {
+			t.Fatalf("Outcome = %v, want allow (request TTL must not block approval)", d.Outcome)
 		}
 	})
 

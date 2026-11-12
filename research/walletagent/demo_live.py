@@ -86,7 +86,9 @@ def main():
     demo_world(worldf)
 
     hdr("make demo-live — real DeepSeek agent + AgentKit + Stopbar gatekeeper on a Base fork")
-    say("DEV MODE, dev keys, stub prices, auth ON, policy = allowlist. Cap $%.2f of Together spend.\n" % CAP_USD)
+    say("DEV MODE, dev keys, stub prices, auth ON, policy = allowlist. Cap $%.2f of Together spend." % CAP_USD)
+    say("DEMO CONFIG: the $20k/1h wallet USD cap is a demo value (devstub world), sized so the approved "
+        "5 ETH fits; production caps come from the real limiter config.\n")
     proc, w3, rpc = world.fork()
     sb = None
     try:
