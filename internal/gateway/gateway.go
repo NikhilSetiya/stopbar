@@ -42,8 +42,18 @@ const MaxBodyBytes = 64 << 10
 // representable as an IEEE-754 double, which is what JCS hashes.
 var maxSafeInt = new(big.Rat).SetInt64(1 << 53)
 
-// EvalScope is the scope an API key needs to call /v1/evaluate.
-const EvalScope = "evaluate"
+// EvalScope is the scope an API key needs to call /v1/evaluate; ApproveScope is
+// the scope an approver key needs to approve an escalation (CS-151).
+const (
+	EvalScope    = "evaluate"
+	ApproveScope = "approve"
+)
+
+// Approver re-evaluates and, if it now allows, executes a pending escalation
+// (CS-151/152). It returns model.ErrNoPending when the id is unknown.
+type Approver interface {
+	Approve(ctx context.Context, id, approver string) (model.Decision, error)
+}
 
 // Authenticator derives the caller's identity from the request (an API key
 // header now; mTLS/SPIFFE later). It returns auth.ErrUnauthenticated for a
@@ -173,27 +183,31 @@ type Config struct {
 	Audit AuditSink
 	// RatePerMin is the per-identity request cap per minute (0: no gateway cap).
 	RatePerMin int
+	// Approver executes an approved escalation (CS-151/152); nil disables
+	// /v1/approvals.
+	Approver Approver
 }
 
 // Gateway is an http.Handler serving the Stopbar API.
 type Gateway struct {
-	eval    Evaluator
-	nonces  NonceStore
-	keys    func() []decision.JWK
-	extra   func() map[string]uint64
-	clock   func() time.Time
-	log     *slog.Logger
-	metrics *metrics
-	mux     *http.ServeMux
-	auth    Authenticator
-	audit   AuditSink
-	rate    *rateLimiter
+	eval     Evaluator
+	nonces   NonceStore
+	keys     func() []decision.JWK
+	extra    func() map[string]uint64
+	clock    func() time.Time
+	log      *slog.Logger
+	metrics  *metrics
+	mux      *http.ServeMux
+	auth     Authenticator
+	audit    AuditSink
+	rate     *rateLimiter
+	approver Approver
 }
 
 // New returns a Gateway.
 func New(cfg Config) *Gateway {
 	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, keys: cfg.Keys, extra: cfg.Counters, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux(),
-		auth: cfg.Authenticator, audit: cfg.Audit, rate: newRateLimiter(cfg.RatePerMin)}
+		auth: cfg.Authenticator, audit: cfg.Audit, rate: newRateLimiter(cfg.RatePerMin), approver: cfg.Approver}
 	if g.log == nil {
 		g.log = slog.New(slog.DiscardHandler)
 	}
@@ -204,6 +218,7 @@ func New(cfg Config) *Gateway {
 		g.nonces = nonce.NewMemory(g.clock)
 	}
 	g.route("/v1/evaluate", http.MethodPost, g.evaluate)
+	g.route("/v1/approvals/{id}", http.MethodPost, g.approve)
 	g.route("/healthz", http.MethodGet, g.healthz)
 	g.route("/metrics", http.MethodGet, g.serveMetrics)
 	g.route("/v1/keys", http.MethodGet, g.serveKeys)
@@ -283,6 +298,34 @@ func (g *Gateway) evaluate(w http.ResponseWriter, r *http.Request) error {
 	}
 	g.metrics.decision(d.Outcome)
 	return g.writeJSON(w, "/v1/evaluate", outcomeStatus[d.Outcome], d)
+}
+
+// approve re-evaluates and, if it now allows, executes a pending escalation
+// (CS-151/152). It needs an approver-scoped credential; the outcome status is
+// the decision's own (200 allow+executed, 202 still escalated, 403 denied).
+func (g *Gateway) approve(w http.ResponseWriter, r *http.Request) error {
+	id := r.PathValue("id")
+	if g.approver == nil || g.auth == nil {
+		return withID(fail(CodeEngineUnavailable, "approvals are not configured"), id)
+	}
+	identity, aerr := g.auth.Authenticate(r)
+	if aerr != nil {
+		return withID(fail(CodeUnauthenticated, "missing or invalid credential"), id)
+	}
+	if !identity.HasScope(ApproveScope) {
+		g.auditReject(r.Context(), identity, model.ActionRequest{ID: id}, "key lacks the "+ApproveScope+" scope")
+		return withID(fail(CodeForbiddenScope, "the API key lacks the %q scope", ApproveScope), id)
+	}
+	ctx := auth.WithIdentity(r.Context(), identity) // CS-103: the approver is in the re-run's audit record
+	d, err := g.approver.Approve(ctx, id, identity.KeyID)
+	if err != nil {
+		if errors.Is(err, model.ErrNoPending) {
+			return withID(fail(CodeNotFound, "no pending escalation for that id"), id)
+		}
+		g.log.Error("approve error", "id", id, "err", err)
+		return withID(fail(CodeInternal, "approval failed"), id)
+	}
+	return g.writeJSON(w, "/v1/approvals", outcomeStatus[d.Outcome], d)
 }
 
 // outcomeStatus makes the status code alone safe to act on: a client that
