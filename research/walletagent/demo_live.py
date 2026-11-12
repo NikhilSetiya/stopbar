@@ -31,10 +31,14 @@ from stopbar import Client  # noqa: E402  (the published SDK — CS-182)
 from stopbar.wallet import StopbarWalletProvider  # noqa: E402
 from demo import gen_api_key, hdr, post_evaluate, reasons, say, start_stopbard, write_decision_key  # noqa: E402
 
-# Base mainnet Chainlink ETH/USD feed — prices come from the chain, no API key.
-# USDC has no feed here on purpose: a stale/absent price is handled (amount_usd
-# is optional, CS-131), so the unlimited-approval deny still fires on the flag.
+# Base mainnet Chainlink USD feeds — prices come from the chain, no API key.
+# Each feed carries its own documented heartbeat (max_age_sec): ETH/USD updates
+# ~hourly, USDC/USD only every ~24h, so a single global bound would wrongly mark
+# USDC stale. A stale/absent price is still handled safely (amount_usd optional,
+# CS-131; the token-unit backstop and the approval-flag deny hold with no price).
 ETH_USD_FEED = "0x71041dddad3595f9ced3dccfbe3d1f4b0a16bb70"
+USDC_USD_FEED = "0x7e860098f58bbfc8648a4311b374b1d669a2bc6b"
+ETH_HEARTBEAT, USDC_HEARTBEAT = 3600, 86400  # Base: ETH/USD ~1h, USDC/USD ~24h
 WALLET_ETH = 10 * 10**18  # fund the demo wallet to 10 ETH so 5 ETH is a "large share" of a REAL chain balance
 
 REPO = HERE.parents[1]
@@ -50,12 +54,16 @@ ROUTER = "0x6ff5693b99212da76ad316178a184ab56d299b43"
 def demo_world(path, rpc):
     # CHAIN MODE (CS-131/132): balances and prices are read from the fork, not
     # stubbed — chain_rpc points at the Anvil fork and feeds gives the on-chain
-    # Chainlink ETH/USD aggregator (no external API, no key). The allowlist and
+    # Chainlink aggregators with each feed's own heartbeat (no external API, no
+    # key), so ETH/USD and the slower USDC/USD both price correctly. The allowlist and
     # the wallet cap stay here. The cap is sized so the approved 5 ETH fits —
     # approval re-checks the limiter against current state (CS-151/152).
     path.write_text(json.dumps({
         "chain_rpc": rpc,
-        "feeds": {"native": ETH_USD_FEED},
+        "feeds": {
+            "native": {"address": ETH_USD_FEED, "max_age_sec": ETH_HEARTBEAT},
+            USDC: {"address": USDC_USD_FEED, "max_age_sec": USDC_HEARTBEAT},
+        },
         "known_destinations": [ALICE, BOB, ROUTER, "0x2626664c2603336e57b271c5c0b26f421741e481"],
         "limits": [{"scope": "wallet", "window": "1h", "max_usd": "20000", "max_count": 50}],
     }, indent=2))

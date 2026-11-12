@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/NikhilSetiya/stopbar/internal/enrich"
 	"github.com/NikhilSetiya/stopbar/internal/limiter"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
@@ -55,9 +56,11 @@ type World struct {
 	// balances and prices from the chain (CS-131/132, internal/enrich). When
 	// ChainRPC is set stopbard uses the chain enricher; Balances/PricesUSD here
 	// are then ignored. Feeds maps an asset key (enrich.NativeKey, or a
-	// lowercase token address) to its Chainlink USD feed address.
-	ChainRPC string            `json:"chain_rpc,omitempty"`
-	Feeds    map[string]string `json:"feeds,omitempty"`
+	// lowercase token address) to its Chainlink USD feed. A feed is an address
+	// string, or {"address": "0x…", "max_age_sec": <heartbeat>} to state the
+	// feed's own staleness bound (ETH/USD ~1h, USDC/USD ~24h on Base).
+	ChainRPC string                 `json:"chain_rpc,omitempty"`
+	Feeds    map[string]enrich.Feed `json:"feeds,omitempty"`
 }
 
 // DefaultLimits are LLD §17's example caps, used when a world sets none.

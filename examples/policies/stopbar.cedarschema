@@ -12,6 +12,7 @@ namespace Stopbar {
       context: {
         amount_usd?: decimal,
         pct_of_balance?: decimal,
+        amount_tokens?: decimal,
         price_stale: Bool,
         taint: Set<String>,
         flags: Set<String>,

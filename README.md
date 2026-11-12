@@ -2,6 +2,10 @@
 
 **An open-source intent firewall for signers.** Nothing gets signed — by an AI agent, a hot wallet, or an enterprise system — unless an independent policy engine clears it first. Like a runway stop bar: lit by default, and nothing crosses without clearance from an authority the requester does not control.
 
+![A real model driven through Stopbar in gatekeeper mode: allow, escalate then approve, and a compromised requester denied — `make demo-live`](docs/demo-live.svg)
+
+<sub>A real DeepSeek agent through Stopbar on a Base fork, with prices and balances read from the chain: an allowlisted pay is signed, a large transfer escalates and is approved with `stopbar approve`, and a compromised-but-authenticated service (T3) is denied. Reproduce it with `make demo-live` (needs the Together key; hard-capped at $1).</sub>
+
 A compromised service, a buggy script, or an agent's mistake asks the signer to move funds it never should — no key is stolen and the signature is valid, as in the [Binance](#the-problem-in-one-line) and [OpenClaw](#the-problem-in-one-line) patterns. Stopbar denies it **deterministically, with no model in the loop**, because it binds the whole transaction to caps, allowlists, decoded intent and loss bounds. Every such block is replayed over real HTTP on every PR (`make e2e`).
 
 Prompt injection is **one input among several** here, not the headline. One example — an injected agent asks to move 3,000,000 tokens to an address it has never paid (the [Grok/Bankr pattern](corpus/attacks/CS-2026-0001-encoded-onchain-injection.yaml)), which Stopbar denies *when the harness labels the untrusted input* (the v1 trusted-harness assumption):
@@ -33,6 +37,8 @@ STEP 7  stopbar audit verify          OK — 13 records, 0 uncovered, across the
 See [`docs/demo.md`](docs/demo.md) for the journey and the gaps it still exposes.
 
 **A real model, live — `make demo-live`.** A real DeepSeek agent (via Together) drives AgentKit through Stopbar in gatekeeper mode on an Anvil fork of Base, with **prices and balances read from the chain** (Chainlink, no API key) and the agent talking to Stopbar through the **published Python SDK**. The operator gives plain-language tasks; a large transfer escalates and is approved with `stopbar approve`, and a compromised-but-authenticated service (T3) is denied live. It spends real model money, hard-capped at **$1**, and needs the Together API key in your keychain (`stopbar-together-key`).
+
+**On a live testnet — `make demo-testnet`.** A scripted run (no model, no real money) of the gatekeeper and the chain enricher against **live Base Sepolia** over a public RPC, using the verified on-chain Chainlink ETH/USD feed. The first run prints a wallet address to fund from a testnet faucet; fund it, then run again to see an allowlisted pay signed and broadcast, a large transfer escalate and approve, an unknown destination denied, and an unlimited approval denied — all on a real chain.
 
 **Use it from your own agent — the Python SDK.** [`sdk/python`](sdk/python/) is a pip-installable client (`pip install stopbar`, stdlib-only; `pip install "stopbar[wallet]"` adds the AgentKit gatekeeper wallet provider). `Client.evaluate()` returns the signed decision on an allow and raises a typed error (`StopbarDenied`, `StopbarEscalated`) otherwise; `approve()` executes a pending escalation. See its [README](sdk/python/README.md).
 

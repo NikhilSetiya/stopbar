@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="576" viewBox="0 0 980 576" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">
+<rect x="0" y="0" width="980" height="576" rx="10" fill="#0d1117"/>
+<rect x="0" y="0" width="980" height="36" rx="10" fill="#161b22"/>
+<rect x="0" y="26" width="980" height="10" fill="#161b22"/>
+<circle cx="20" cy="18" r="6" fill="#ff5f56"/>
+<circle cx="40" cy="18" r="6" fill="#ffbd2e"/>
+<circle cx="60" cy="18" r="6" fill="#27c93f"/>
+<text x="490.0" y="22" fill="#8b949e" text-anchor="middle" font-size="12">stopbar — make demo-live</text>
+<text x="20" y="54" fill="#7ee787" font-weight="600" xml:space="preserve">$ make demo-live</text>
+<text x="20" y="76" fill="#8b949e" xml:space="preserve"></text>
+<text x="20" y="98" fill="#79c0ff" font-weight="600" xml:space="preserve">make demo-live — real DeepSeek agent + AgentKit + Stopbar gatekeeper on a Base fork</text>
+<text x="20" y="120" fill="#8b949e" xml:space="preserve">CHAIN prices + balances (CS-131/132) · published SDK (CS-182) · auth ON · $1.00 cap</text>
+<text x="20" y="142" fill="#8b949e" xml:space="preserve"></text>
+<text x="20" y="164" fill="#c9d1d9" xml:space="preserve">OPERATOR → agent:  Pay Alice the 0.01 ETH I owe her.</text>
+<text x="20" y="186" fill="#3fb950" font-weight="600" xml:space="preserve">  ⟵ STOPBAR: allowed — stopbard signed, agent broadcast on-chain</text>
+<text x="20" y="208" fill="#8b949e" xml:space="preserve"></text>
+<text x="20" y="230" fill="#c9d1d9" xml:space="preserve">OPERATOR → agent:  Send 5 ETH to Bob for the equipment invoice.</text>
+<text x="20" y="252" fill="#d29922" font-weight="600" xml:space="preserve">  ⟵ STOPBAR: escalated for human approval (202) — large-share-of-balance</text>
+<text x="20" y="274" fill="#8b949e" xml:space="preserve"></text>
+<text x="20" y="296" fill="#c9d1d9" xml:space="preserve">OPERATOR → agent:  Pay 0.5 ETH to our new supplier 0x7c9e…0c2a</text>
+<text x="20" y="318" fill="#f85149" font-weight="600" xml:space="preserve">  ⟵ STOPBAR: denied (403) — unknown-destination</text>
+<text x="20" y="340" fill="#8b949e" xml:space="preserve"></text>
+<text x="20" y="362" fill="#c9d1d9" xml:space="preserve">HUMAN APPROVES — operator runs `stopbar approve` on the 5 ETH transfer</text>
+<text x="20" y="384" fill="#3fb950" font-weight="600" xml:space="preserve">  ⟵ STOPBAR: approved — re-evaluated vs current chain state, signed, broadcast</text>
+<text x="20" y="406" fill="#8b949e" xml:space="preserve">              wallet 9.99 → 4.99 ETH · Bob +5 ETH</text>
+<text x="20" y="428" fill="#8b949e" xml:space="preserve"></text>
+<text x="20" y="450" fill="#c9d1d9" xml:space="preserve">COMPROMISED REQUESTER (T3) — an authenticated service pushes the unlimited approval</text>
+<text x="20" y="472" fill="#f85149" font-weight="600" xml:space="preserve">  ⟵ STOPBAR: HTTP 403 [&#x27;unlimited-approval&#x27;] — forbidden whoever asks</text>
+<text x="20" y="494" fill="#8b949e" xml:space="preserve"></text>
+<text x="20" y="516" fill="#8b949e" xml:space="preserve">Together spend: $0.0096 of the $1.00 cap. The deterministic controls hold whatever</text>
+<text x="20" y="538" fill="#8b949e" xml:space="preserve">the requester is — compromised service (T3), agent mistake (T2), hard loss caps.</text>
+</svg>

@@ -271,6 +271,61 @@ func TestOptionalPriceFields(t *testing.T) {
 	}
 }
 
+// TestUnpricedIsNeverAllowedUnchecked: making amount_usd optional (so a stale
+// price escalates instead of failing closed) must never open a hole where an
+// unpriced action is silently allowed. The starter bundle has three backstops
+// that hold with no price: a price-independent token-unit cap denies a large
+// transfer, an under-cap unpriced transfer escalates (price unavailable), and an
+// unlimited approval is denied on the decoder flag.
+func TestUnpricedIsNeverAllowedUnchecked(t *testing.T) {
+	b := mustLoad(t, starterDir)
+	s := func(v string) *string { return &v }
+	for name, tt := range map[string]struct {
+		mut  func(*model.EnrichedRequest)
+		want model.Outcome
+		id   string
+	}{
+		"over the token-unit cap -> deny": {
+			func(er *model.EnrichedRequest) {
+				er.PriceStale, er.AmountUSD, er.PctOfBalance = true, nil, nil
+				er.AmountTokens = s("2000") // > the 1000-unit backstop, with no price
+			}, model.Deny, "stale-price-amount-cap",
+		},
+		"under the cap, no price -> escalate (price unavailable)": {
+			func(er *model.EnrichedRequest) {
+				er.PriceStale, er.AmountUSD, er.PctOfBalance = true, nil, nil
+				er.AmountTokens = s("500") // under the backstop cap
+			}, model.Escalate, "stale-price",
+		},
+		"no price and no amount at all -> escalate": {
+			func(er *model.EnrichedRequest) {
+				er.PriceStale, er.AmountUSD, er.PctOfBalance, er.AmountTokens = true, nil, nil, nil
+			}, model.Escalate, "stale-price",
+		},
+		"unlimited approval, unpriced -> deny": {
+			func(er *model.EnrichedRequest) {
+				er.Intent.Kind, er.Intent.Flags = "approve", []string{"unlimited_approval"}
+				er.PriceStale, er.AmountUSD, er.PctOfBalance, er.ApprovalUSD = true, nil, nil, nil
+			}, model.Deny, "unlimited-approval",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			er := baseContext()
+			tt.mut(&er)
+			pr, err := b.Evaluate(context.Background(), er)
+			if err != nil {
+				t.Fatalf("fail closed is not expected here: %v", err)
+			}
+			if pr.Outcome != tt.want {
+				t.Fatalf("outcome %s %+v, want %s", pr.Outcome, pr.Reasons, tt.want)
+			}
+			if len(pr.Reasons) != 1 || pr.Reasons[0].PolicyID != tt.id {
+				t.Fatalf("reasons %+v, want only %s", pr.Reasons, tt.id)
+			}
+		})
+	}
+}
+
 func TestToCedarDecimalRoundsUp(t *testing.T) {
 	for in, want := range map[string]string{
 		"0": "0.0", "25": "25.0", "0.20": "0.2", "0.2001": "0.2001", "0.20001": "0.2001",

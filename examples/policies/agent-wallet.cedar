@@ -49,5 +49,12 @@ forbid (principal, action, resource) when { context.dest_similar_to_known && !co
 @id("stale-price") @message("Price data is stale; USD value cannot be trusted") @outcome("escalate")
 forbid (principal, action, resource) when { context.price_stale };
 
+// Backstop when the price is unavailable: a large transfer (in raw token units,
+// which need no price) is denied outright, never allowed unchecked. Under this
+// cap, the stale-price rule above still escalates for a human.
+@id("stale-price-amount-cap") @message("Price unavailable and the transfer exceeds the hard token-unit backstop cap") @outcome("deny")
+forbid (principal, action in [Stopbar::Action::"transfer", Stopbar::Action::"contract_call"], resource)
+when { context.price_stale && context has amount_tokens && context.amount_tokens.greaterThan(decimal("1000.0")) };
+
 @id("unknown-call") @message("Contract call could not be decoded") @outcome("escalate")
 forbid (principal, action, resource) when { context.flags.containsAny(["unknown_call","opaque"]) };

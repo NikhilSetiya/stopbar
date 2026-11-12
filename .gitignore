@@ -21,3 +21,6 @@ research/walletagent/results/stages-dry/
 research/walletagent/results/stages/stopbard/
 research/walletagent/results/demo/
 research/walletagent/results/demo-live/
+research/walletagent/results/demo-testnet/
+# Never commit the testnet wallet private key.
+research/walletagent/results/testnet-wallet.key

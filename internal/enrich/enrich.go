@@ -15,14 +15,15 @@ import (
 // Config wires a ChainEnricher.
 type Config struct {
 	RPCURL string // Ethereum JSON-RPC endpoint (the Base node or an Anvil fork)
-	// Feeds maps an asset key — a lowercase ERC-20 address, or NativeKey — to a
-	// Chainlink USD feed address. An asset with no feed prices as stale.
-	Feeds map[string]string
+	// Feeds maps an asset key — a lowercase ERC-20 address, or NativeKey — to its
+	// Chainlink USD feed (address + the feed's documented heartbeat). An asset
+	// with no feed prices as stale.
+	Feeds map[string]Feed
 	// KnownDestinations is the allowlist used for Destination.Known /
 	// SimilarToKnown until the CS-133 registry replaces it.
 	KnownDestinations []string
 	RPCTimeout        time.Duration
-	PriceMaxAge       time.Duration // a feed older than this is stale (default 1h)
+	PriceMaxAge       time.Duration // default bound for a feed that sets no max_age (default 1h)
 	PriceTTL          time.Duration // price cache (default 15s)
 	BalanceTTL        time.Duration // balance cache (default 10s)
 	Clock             func() time.Time
@@ -90,6 +91,10 @@ func (e *ChainEnricher) Enrich(ctx context.Context, er *model.EnrichedRequest) e
 		raw = new(big.Rat) // contract calls and approvals move no funds when made
 	}
 	tokens := new(big.Rat).Quo(raw, new(big.Rat).SetInt(scale))
+	// amount_tokens is the raw amount in token units — known from the decoded tx
+	// and the asset's decimals, with no price. It backs a price-independent cap
+	// so an unpriced transfer is never allowed unchecked (stale-price-amount-cap).
+	er.AmountTokens = decimalString(tokens)
 
 	// Price the moved asset.
 	if price, stale := e.prices.Price(ctx, priceKey); stale {

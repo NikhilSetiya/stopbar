@@ -140,6 +140,12 @@ func (b *Bundle) cedarRequest(er model.EnrichedRequest) (cedar.Request, cedar.En
 	if er.PctOfBalance != nil {
 		ctx["pct_of_balance"] = dec("pct_of_balance", er.PctOfBalance)
 	}
+	// amount_tokens is price-independent (raw token units), so a policy can cap an
+	// unpriced transfer deterministically — it is how "unpriced" never silently
+	// means "allowed unchecked".
+	if er.AmountTokens != nil {
+		ctx["amount_tokens"] = dec("amount_tokens", er.AmountTokens)
+	}
 	if er.MinutesSinceCodeChange != nil {
 		ctx["minutes_since_code_change"] = cedar.Long(*er.MinutesSinceCodeChange)
 	}
