@@ -51,6 +51,13 @@ type World struct {
 	// PriorOutflowUSD1h is rejected: prior spend must be real reservations
 	// (a corpus `requests` sequence), not a number the enricher invents.
 	PriorOutflowUSD1h string `json:"prior_outflow_usd_1h"`
+	// ChainRPC and Feeds switch the enricher from this static stub to reading
+	// balances and prices from the chain (CS-131/132, internal/enrich). When
+	// ChainRPC is set stopbard uses the chain enricher; Balances/PricesUSD here
+	// are then ignored. Feeds maps an asset key (enrich.NativeKey, or a
+	// lowercase token address) to its Chainlink USD feed address.
+	ChainRPC string            `json:"chain_rpc,omitempty"`
+	Feeds    map[string]string `json:"feeds,omitempty"`
 }
 
 // DefaultLimits are LLD §17's example caps, used when a world sets none.
