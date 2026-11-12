@@ -99,7 +99,9 @@ def gen_api_key(cli, store_path, tenant, agent, scopes):
                        capture_output=True, text=True, check=True)
     record = json.loads("\n".join(l for l in r.stdout.splitlines() if not l.lstrip().startswith("#")))
     secret = next(l.strip() for l in r.stderr.splitlines() if l.strip().startswith("stopbar_sk_"))
-    store_path.write_text(json.dumps([record], indent=2))  # the server-side hashed store
+    store = json.loads(store_path.read_text()) if store_path.exists() else []  # append: a store can hold many keys
+    store.append(record)
+    store_path.write_text(json.dumps(store, indent=2))  # the server-side hashed store
     return secret
 
 
