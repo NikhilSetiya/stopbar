@@ -498,3 +498,173 @@ func TestUnauditedDenialsAreCounted(t *testing.T) {
 		}
 	}
 }
+
+// fakePending is an in-memory PendingStore for the approval-lifecycle tests.
+type fakePending struct {
+	mu  sync.Mutex
+	m   map[string]PendingEscalation
+	err error // forced on every call when set
+}
+
+func newFakePending() *fakePending { return &fakePending{m: map[string]PendingEscalation{}} }
+
+func (p *fakePending) Put(_ context.Context, e PendingEscalation) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.err != nil {
+		return p.err
+	}
+	p.m[e.Request.ID] = e
+	return nil
+}
+func (p *fakePending) Get(_ context.Context, id string) (PendingEscalation, bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.err != nil {
+		return PendingEscalation{}, false, p.err
+	}
+	e, ok := p.m[id]
+	return e, ok, nil
+}
+func (p *fakePending) Delete(_ context.Context, id string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.err != nil {
+		return p.err
+	}
+	delete(p.m, id)
+	return nil
+}
+func (p *fakePending) len() int { p.mu.Lock(); defer p.mu.Unlock(); return len(p.m) }
+
+// TestApprove covers the escalation lifecycle (CS-151/152): an escalation is
+// recorded, approving it re-runs enrich/policy/limiter against current state,
+// and approval is refused if a new rule denies, a new escalation appears, or a
+// cap has filled since.
+func TestApprove(t *testing.T) {
+	const escReason = "taint-unknown-destination" // what outcome(Escalate) emits
+
+	t.Run("escalate records a pending entry; approve promotes to allow and signs", func(t *testing.T) {
+		r := newRig()
+		pend := newFakePending()
+		r.cfg.Policy = outcome(model.Escalate)
+		r.cfg.Pending = pend
+		e := r.engine(t)
+
+		req := fixtureRequest(t, "action_request.evm_tx.json")
+		d := evaluate(t, e, req)
+		if d.Outcome != model.Escalate {
+			t.Fatalf("Outcome = %v, want escalate", d.Outcome)
+		}
+		if pend.len() != 1 {
+			t.Fatalf("pending entries = %d, want 1", pend.len())
+		}
+		if got := len(r.limiter.reserved); got != 0 {
+			t.Fatalf("escalation reserved %d caps, want 0", got)
+		}
+
+		// A human approves: the single escalation reason is now waived.
+		ad, areq, err := e.Approve(context.Background(), req.ID, "ops@example.com")
+		if err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+		if ad.Outcome != model.Allow {
+			t.Fatalf("approved Outcome = %v, want allow", ad.Outcome)
+		}
+		if ad.Token == "" {
+			t.Fatal("approved allow has no signed token")
+		}
+		if len(ad.Approvals) != 1 || ad.Approvals[0].Approver != "ops@example.com" {
+			t.Fatalf("Approvals = %+v, want one from ops@example.com", ad.Approvals)
+		}
+		if !slices.Contains(r.limiter.reserved, req.ID) {
+			t.Fatalf("approve did not reserve the cap; reserved=%v", r.limiter.reserved)
+		}
+		if areq.ID != req.ID {
+			t.Fatalf("returned request ID = %q, want %q", areq.ID, req.ID)
+		}
+		if pend.len() != 0 {
+			t.Fatalf("pending entries after allow = %d, want 0 (deleted)", pend.len())
+		}
+	})
+
+	t.Run("approve is refused when a new rule now denies", func(t *testing.T) {
+		pend := newFakePending()
+		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{escReason}}
+		r := newRig()
+		r.cfg.Policy = outcome(model.Deny) // state changed: it now denies
+		r.cfg.Pending = pend
+		e := r.engine(t)
+
+		d, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		if err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+		if d.Outcome != model.Deny {
+			t.Fatalf("Outcome = %v, want deny", d.Outcome)
+		}
+		if len(r.limiter.reserved) != 0 {
+			t.Fatalf("a denied approval reserved %d caps, want 0", len(r.limiter.reserved))
+		}
+		if pend.len() != 1 {
+			t.Fatalf("pending entries after refusal = %d, want 1 (kept)", pend.len())
+		}
+	})
+
+	t.Run("approve is refused when a new escalation reason appears", func(t *testing.T) {
+		// The recorded escalation covered one reason; re-running produces a
+		// different reason the approver never saw, so it must not auto-allow.
+		pend := newFakePending()
+		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{"some-old-reason"}}
+		r := newRig()
+		r.cfg.Policy = outcome(model.Escalate) // emits escReason, which is NOT approved
+		r.cfg.Pending = pend
+		e := r.engine(t)
+
+		d, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		if err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+		if d.Outcome != model.Escalate {
+			t.Fatalf("Outcome = %v, want escalate (unapproved reason)", d.Outcome)
+		}
+		if len(r.limiter.reserved) != 0 {
+			t.Fatalf("reserved %d caps on a still-escalated request, want 0", len(r.limiter.reserved))
+		}
+	})
+
+	t.Run("approve is refused when the cap has since filled", func(t *testing.T) {
+		pend := newFakePending()
+		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{escReason}}
+		r := newRig()
+		r.cfg.Policy = outcome(model.Escalate)
+		r.cfg.Pending = pend
+		r.limiter.reserveErr = ErrCapExceeded // the cap filled while it waited
+		e := r.engine(t)
+
+		d, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		if err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+		if d.Outcome != model.Deny {
+			t.Fatalf("Outcome = %v, want deny (cap full)", d.Outcome)
+		}
+		if pend.len() != 1 {
+			t.Fatalf("pending entries after cap-full refusal = %d, want 1 (kept)", pend.len())
+		}
+	})
+
+	t.Run("unknown id is ErrNoPending", func(t *testing.T) {
+		r := newRig()
+		r.cfg.Pending = newFakePending()
+		e := r.engine(t)
+		if _, _, err := e.Approve(context.Background(), "nope", "ops@example.com"); !errors.Is(err, model.ErrNoPending) {
+			t.Fatalf("Approve(unknown) err = %v, want ErrNoPending", err)
+		}
+	})
+}
+
+func setID(req model.ActionRequest, id string) model.ActionRequest {
+	req.ID = id
+	return req
+}
