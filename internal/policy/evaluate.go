@@ -120,8 +120,6 @@ func (b *Bundle) cedarRequest(er model.EnrichedRequest) (cedar.Request, cedar.En
 	}
 	v1h, v24h := vel("1h"), vel("24h")
 	ctx := cedar.RecordMap{
-		"amount_usd":            dec("amount_usd", er.AmountUSD),
-		"pct_of_balance":        dec("pct_of_balance", er.PctOfBalance),
 		"price_stale":           cedar.Boolean(er.PriceStale),
 		"taint":                 stringSet(er.Taint),
 		"flags":                 stringSet(er.Intent.Flags),
@@ -130,6 +128,23 @@ func (b *Bundle) cedarRequest(er model.EnrichedRequest) (cedar.Request, cedar.En
 		"vel_1h_usd":            dec("velocity 1h usd", &v1h.USD),
 		"vel_24h_usd":           dec("velocity 24h usd", &v24h.USD),
 		"vel_1h_count":          cedar.Long(v1h.Count),
+	}
+	// amount_usd and pct_of_balance are optional (CS-131, LLD §3.3): a stale or
+	// unavailable price leaves them absent, so a policy that reads one must
+	// guard with `context has …`, and a missing price reaches a stale-price
+	// escalate policy rather than failing closed. (No policy needs amount_usd to
+	// deny an unlimited approval — that rides on the decoder's flag.)
+	if er.AmountUSD != nil {
+		ctx["amount_usd"] = dec("amount_usd", er.AmountUSD)
+	}
+	if er.PctOfBalance != nil {
+		ctx["pct_of_balance"] = dec("pct_of_balance", er.PctOfBalance)
+	}
+	// amount_tokens is price-independent (raw token units), so a policy can cap an
+	// unpriced transfer deterministically — it is how "unpriced" never silently
+	// means "allowed unchecked".
+	if er.AmountTokens != nil {
+		ctx["amount_tokens"] = dec("amount_tokens", er.AmountTokens)
 	}
 	if er.MinutesSinceCodeChange != nil {
 		ctx["minutes_since_code_change"] = cedar.Long(*er.MinutesSinceCodeChange)

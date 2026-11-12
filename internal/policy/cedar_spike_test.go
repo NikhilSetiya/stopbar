@@ -216,14 +216,19 @@ func TestSpikeEvalErrorsAreSkipped(t *testing.T) {
 		t.Fatalf("expected raw Cedar to Allow with errors (fail-open); got %v, %d errors", d, len(diag.Errors))
 	}
 
+	// The starter policy now GUARDS the optional pct_of_balance read with
+	// `context has pct_of_balance` (CS-131), so a missing value no longer errors
+	// — it is handled, not failed closed.
 	b := loadSpikeBundle(t)
 	ctx := benignCtx(t)
 	delete(ctx, "pct_of_balance")
-	if got, _ := b.evaluate(request("transfer", ctx)); got != "deny:FAIL_CLOSED_POLICY" {
-		t.Fatalf("combiner outcome = %q, want fail-closed deny", got)
+	if got, _ := b.evaluate(request("transfer", ctx)); got == "deny:FAIL_CLOSED_POLICY" {
+		t.Fatalf("a missing optional field should be guarded, not fail closed; got %q", got)
 	}
 
-	// Wrong type (a string where a decimal is expected) behaves the same way.
+	// A wrong type (a string where a decimal is expected) is present, so it
+	// passes the `has` guard and then errors on .greaterThan — cedar-go drops
+	// the policy and the engine still fails closed.
 	ctx = benignCtx(t)
 	ctx["pct_of_balance"] = cedar.String("0.9")
 	if got, _ := b.evaluate(request("transfer", ctx)); got != "deny:FAIL_CLOSED_POLICY" {
@@ -277,8 +282,15 @@ func TestSpikeSchemaValidation(t *testing.T) {
 	if err := v.Request(request("transfer", benignCtx(t))); err != nil {
 		t.Errorf("benign request rejected: %v", err)
 	}
+	// pct_of_balance is optional (CS-131): a request without it still validates.
 	ctx := benignCtx(t)
 	delete(ctx, "pct_of_balance")
+	if err := v.Request(request("transfer", ctx)); err != nil {
+		t.Errorf("request without the optional pct_of_balance was rejected: %v", err)
+	}
+	// A still-required attribute missing is still rejected before eval.
+	ctx = benignCtx(t)
+	delete(ctx, "dest_known")
 	if err := v.Request(request("transfer", ctx)); err == nil {
 		t.Errorf("request missing a required context attribute was accepted")
 	}

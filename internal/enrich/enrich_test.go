@@ -123,7 +123,7 @@ func (m *mockNode) enricher(t *testing.T) *ChainEnricher {
 	t.Helper()
 	e, err := New(Config{
 		RPCURL: m.srv.URL,
-		Feeds:  map[string]string{NativeKey: ethFeed, usdc: usdcFeed},
+		Feeds:  map[string]Feed{NativeKey: {Address: ethFeed}, usdc: {Address: usdcFeed}},
 		Clock:  func() time.Time { return m.now },
 	})
 	if err != nil {
@@ -181,7 +181,7 @@ func TestBalanceCacheHitsRPCOnce(t *testing.T) {
 func TestPriceOracleFreshAndStale(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	m := newMockNode(now)
-	o := NewPriceOracle(NewRPC(m.srv.URL, 0), map[string]string{NativeKey: ethFeed, usdc: usdcFeed}, time.Hour, 0)
+	o := NewPriceOracle(NewRPC(m.srv.URL, 0), map[string]Feed{NativeKey: {Address: ethFeed}, usdc: {Address: usdcFeed}}, time.Hour, 0)
 	o.clock = func() time.Time { return now }
 
 	p, stale := o.Price(context.Background(), NativeKey)
@@ -205,7 +205,7 @@ func TestStalenessUsesChainClock(t *testing.T) {
 	forkTime := time.Now().Add(-3 * time.Hour)
 	m := newMockNode(forkTime) // block timestamp = forkTime
 	m.feedTime = forkTime      // the feed last updated at the fork block
-	o := NewPriceOracle(NewRPC(m.srv.URL, 0), map[string]string{NativeKey: ethFeed}, time.Hour, 0)
+	o := NewPriceOracle(NewRPC(m.srv.URL, 0), map[string]Feed{NativeKey: {Address: ethFeed}}, time.Hour, 0)
 	// o.clock is real wall-clock time (the host), hours ahead of the fork.
 
 	if p, stale := o.Price(context.Background(), NativeKey); stale {
@@ -215,9 +215,54 @@ func TestStalenessUsesChainClock(t *testing.T) {
 	// A feed that lags the chain clock by more than maxAge IS stale.
 	m2 := newMockNode(forkTime)
 	m2.feedTime = forkTime.Add(-2 * time.Hour) // two hours behind the latest block
-	o2 := NewPriceOracle(NewRPC(m2.srv.URL, 0), map[string]string{NativeKey: ethFeed}, time.Hour, 0)
+	o2 := NewPriceOracle(NewRPC(m2.srv.URL, 0), map[string]Feed{NativeKey: {Address: ethFeed}}, time.Hour, 0)
 	if _, stale := o2.Price(context.Background(), NativeKey); !stale {
 		t.Fatal("a feed two hours behind the chain clock should be stale")
+	}
+}
+
+// TestPerFeedMaxAge: a feed older than the global default but within its own
+// documented heartbeat is fresh. This is why USDC (a ~24h heartbeat) prices
+// correctly, where a single 1h bound would wrongly mark it stale and escalate.
+func TestPerFeedMaxAge(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	m := newMockNode(now)
+	m.feedTime = now.Add(-2 * time.Hour) // 2h behind the chain clock
+
+	// No per-feed override: 2h old is stale under the 1h default bound.
+	strict := NewPriceOracle(NewRPC(m.srv.URL, 0), map[string]Feed{usdc: {Address: usdcFeed}}, time.Hour, 0)
+	strict.clock = func() time.Time { return now }
+	if _, stale := strict.Price(context.Background(), usdc); !stale {
+		t.Fatal("a 2h-old feed should be stale under the 1h default bound")
+	}
+
+	// The feed's own 24h heartbeat: the same 2h-old reading is fresh.
+	perFeed := NewPriceOracle(NewRPC(m.srv.URL, 0), map[string]Feed{usdc: {Address: usdcFeed, MaxAge: 24 * time.Hour}}, time.Hour, 0)
+	perFeed.clock = func() time.Time { return now }
+	if p, stale := perFeed.Price(context.Background(), usdc); stale {
+		t.Fatalf("a 2h-old feed within its 24h heartbeat must be fresh; got stale (p=%v)", p)
+	}
+}
+
+// TestFeedUnmarshalJSON accepts a bare address or an {address, max_age_sec}
+// object, so a world file can carry each feed's heartbeat.
+func TestFeedUnmarshalJSON(t *testing.T) {
+	var feeds map[string]Feed
+	in := `{"native":"0xabc","0xusdc":{"address":"0xdef","max_age_sec":86400}}`
+	if err := json.Unmarshal([]byte(in), &feeds); err != nil {
+		t.Fatal(err)
+	}
+	if feeds["native"] != (Feed{Address: "0xabc"}) {
+		t.Fatalf("native = %+v", feeds["native"])
+	}
+	if feeds["0xusdc"] != (Feed{Address: "0xdef", MaxAge: 24 * time.Hour}) {
+		t.Fatalf("usdc = %+v", feeds["0xusdc"])
+	}
+	for _, bad := range []string{`{"max_age_sec":10}`, `{"address":"0x1","heartbeat":10}`, `5`} {
+		var f Feed
+		if err := json.Unmarshal([]byte(bad), &f); err == nil {
+			t.Errorf("%s should be rejected", bad)
+		}
 	}
 }
 
@@ -251,7 +296,7 @@ func TestIncompleteOrBadRoundIsStale(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(map[string]any{"id": req.ID, "result": res})
 			}))
 			defer srv.Close()
-			o := NewPriceOracle(NewRPC(srv.URL, 0), map[string]string{NativeKey: ethFeed}, time.Hour, 0)
+			o := NewPriceOracle(NewRPC(srv.URL, 0), map[string]Feed{NativeKey: {Address: ethFeed}}, time.Hour, 0)
 			if _, stale := o.Price(context.Background(), NativeKey); !stale {
 				t.Fatalf("%s must be treated as stale", name)
 			}
@@ -266,7 +311,7 @@ func TestFeedDecimalsReadFromFeed(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	m := newMockNode(now)
 	m.feedDec = 18 // not the usual 8
-	o := NewPriceOracle(NewRPC(m.srv.URL, 0), map[string]string{NativeKey: ethFeed}, time.Hour, 0)
+	o := NewPriceOracle(NewRPC(m.srv.URL, 0), map[string]Feed{NativeKey: {Address: ethFeed}}, time.Hour, 0)
 	p, stale := o.Price(context.Background(), NativeKey)
 	if stale || p.FloatString(2) != "3500.00" {
 		t.Fatalf("18-decimal feed price = %v stale=%v, want 3500", p, stale)
@@ -355,7 +400,7 @@ func TestEnrichAgainstAnvil(t *testing.T) {
 		t.Skip("set ANVIL_RPC to a Base fork to run the live balance/price check")
 	}
 	// Base mainnet ETH/USD Chainlink feed.
-	e, err := New(Config{RPCURL: rpc, Feeds: map[string]string{NativeKey: "0x71041dddad3595f9ced3dccfbe3d1f4b0a16bb70"}})
+	e, err := New(Config{RPCURL: rpc, Feeds: map[string]Feed{NativeKey: {Address: "0x71041dddad3595f9ced3dccfbe3d1f4b0a16bb70"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,7 +1,8 @@
-.PHONY: build test fuzz vet fmt check e2e demo demo-live
+.PHONY: build test fuzz vet fmt check e2e demo demo-live demo-testnet
 build: ; go build ./...
 demo: ; ./scripts/demo.sh
 demo-live: ; ./scripts/demo-live.sh
+demo-testnet: ; ./scripts/demo-testnet.sh
 test: ; go test -race -count=1 ./...
 fuzz: ; go test -run='^$$' -fuzz=FuzzTransformIdempotent -fuzztime=60s ./internal/canon/
 vet: ; go vet ./...
