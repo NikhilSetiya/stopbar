@@ -180,6 +180,11 @@ func TestFeesPerChain(t *testing.T) {
 	if in := decode(t, busy); slices.Contains(in.Flags, FlagExcessiveFee) {
 		t.Fatal("300 gwei on Polygon flagged")
 	}
+	baseSepolia := uint64(84532)
+	busy.ChainID = &baseSepolia
+	if _, err := (Decoder{}).Decode(context.Background(), busy); err != nil {
+		t.Fatalf("Base Sepolia (make demo-testnet) must be supported: %v", err)
+	}
 	other := uint64(999999)
 	busy.ChainID = &other
 	if _, err := (Decoder{}).Decode(context.Background(), busy); err == nil {

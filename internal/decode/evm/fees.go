@@ -41,6 +41,7 @@ var Chains = map[uint64]FeeLimits{
 	56:       {"bnb", gwei(100), 30_000_000, milli(100)},
 	137:      {"polygon", gwei(10_000), 30_000_000, new(big.Int).Mul(big.NewInt(50), milli(1000))},
 	8453:     {"base", gwei(50), 30_000_000, milli(20)},
+	84532:    {"base-sepolia", gwei(50), 30_000_000, milli(20)}, // Base's L2 limits (make demo-testnet)
 	42161:    {"arbitrum", gwei(50), 100_000_000, milli(20)},
 	11155111: {"sepolia", gwei(1000), 30_000_000, milli(250)},
 	31337:    {"anvil", gwei(1000), 30_000_000, milli(250)},

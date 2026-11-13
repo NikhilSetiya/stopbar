@@ -4,7 +4,7 @@
 
 ![A real model driven through Stopbar in gatekeeper mode: allow, escalate then approve, and a compromised requester denied — `make demo-live`](docs/demo-live.svg)
 
-<sub>A real DeepSeek agent through Stopbar on a Base fork, with prices and balances read from the chain: an allowlisted pay is signed, a large transfer escalates and is approved with `stopbar approve`, and a compromised-but-authenticated service (T3) is denied. Reproduce it with `make demo-live` (needs the Together key; hard-capped at $1).</sub>
+<sub>Transcript of a real `make demo-live` run (2026-11-12): a real DeepSeek agent through Stopbar on a Base fork, with prices and balances read from the chain — an allowlisted pay is signed, a large transfer escalates and is approved with `stopbar approve`, and a compromised-but-authenticated service (T3) is denied. Reproduce it with `make demo-live` (needs the Together key; hard-capped at $1 of model spend).</sub>
 
 A compromised service, a buggy script, or an agent's mistake asks the signer to move funds it never should — no key is stolen and the signature is valid, as in the [Binance](#the-problem-in-one-line) and [OpenClaw](#the-problem-in-one-line) patterns. Stopbar denies it **deterministically, with no model in the loop**, because it binds the whole transaction to caps, allowlists, decoded intent and loss bounds. Every such block is replayed over real HTTP on every PR (`make e2e`).
 

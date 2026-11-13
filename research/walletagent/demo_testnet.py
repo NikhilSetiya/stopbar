@@ -149,9 +149,14 @@ def main():
         authz = "Bearer " + api_secret
         outcomes = []
 
+        # Size amounts to the real balance so the allow broadcast fits (value +
+        # gas), while the escalate stays a clear majority of the balance.
+        gas_reserve = Web3.to_wei("0.00003", "ether")
+        small = max(1, int((bal - gas_reserve) * 0.10))  # allow: ~10% of what's spendable
+        small_eth = small / 1e18
+
         # 1) ALLOW — a small transfer to an allowlisted address, broadcast live.
-        hdr("1) pay an allowlisted address 0.0002 ETH")
-        small = Web3.to_wei("0.0002", "ether")
+        hdr(f"1) pay an allowlisted address {small_eth:.6f} ETH")
         st, d = post_evaluate(url, tx_body("req_tn_allow", addr, BOB, small, "0x", nonce), authz=authz)
         if st == 200 and d.get("signed_tx"):
             txh = w3.eth.send_raw_transaction(d["signed_tx"])
@@ -161,7 +166,7 @@ def main():
             outcomes.append("ALLOWED (broadcast)")
         else:
             say(f"  ⟵ STOPBAR: HTTP {st} {reasons(d)} (expected 200 allow)")
-            outcomes.append(f"HTTP {st}")
+            outcomes.append(f"HTTP {st} {reasons(d)}")
 
         # 2) ESCALATE — a large share of the real on-chain balance, then approve.
         hdr("2) send a large share of the balance to an allowlisted address")
@@ -189,22 +194,30 @@ def main():
             else:
                 outcomes.append(f"ESCALATED → refused on approval ({reasons(ad)})")
         else:
-            outcomes.append(f"HTTP {st} (expected 202 escalate)")
+            outcomes.append(f"HTTP {st} {reasons(d)} (expected 202 escalate)")
+
+        # The outcome is labelled from the ACTUAL reason, so a fail-closed
+        # (e.g. an unsupported chain) can never read as a policy deny.
+        def denied_by(d, policy_id, good):
+            st_ok = (post_st == 403) and (policy_id in reasons(d))
+            return good if st_ok else f"HTTP {post_st} {reasons(d)}"
 
         # 3) DENY — a transfer to an address that is not on the allowlist.
         hdr("3) pay an unknown (non-allowlisted) supplier")
-        st, d = post_evaluate(url, tx_body("req_tn_unknown", addr, SUPPLIER, small, "0x", nonce), authz=authz)
-        say(f"  ⟵ STOPBAR: HTTP {st} {reasons(d)}  " + ("[DENIED]" if st == 403 else "[!! not denied]"))
-        outcomes.append("DENIED (unknown-destination)" if st == 403 else f"HTTP {st}")
+        post_st, d = post_evaluate(url, tx_body("req_tn_unknown", addr, SUPPLIER, small, "0x", nonce), authz=authz)
+        oc = denied_by(d, "unknown-destination", "DENIED (unknown-destination)")
+        say(f"  ⟵ STOPBAR: HTTP {post_st} {reasons(d)}  " + ("[DENIED]" if "DENIED" in oc else "[!! check reason]"))
+        outcomes.append(oc)
 
         # 4) DENY (T3) — a compromised but authenticated service asks for an unlimited approval.
         hdr("4) compromised requester (T3): unlimited USDC approval to the router")
-        st, d = post_evaluate(url, tx_body("req_tn_t3", addr, USDC, 0, chain.erc20_approve(ROUTER, (1 << 256) - 1), nonce), authz=authz)
-        say(f"  ⟵ STOPBAR: HTTP {st} {reasons(d)}  " + ("[DENIED — forbidden whoever asks]" if st == 403 else "[!! not denied]"))
-        outcomes.append("DENIED (unlimited-approval)" if st == 403 else f"HTTP {st}")
+        post_st, d = post_evaluate(url, tx_body("req_tn_t3", addr, USDC, 0, chain.erc20_approve(ROUTER, (1 << 256) - 1), nonce), authz=authz)
+        oc = denied_by(d, "unlimited-approval", "DENIED (unlimited-approval)")
+        say(f"  ⟵ STOPBAR: HTTP {post_st} {reasons(d)}  " + ("[DENIED — forbidden whoever asks]" if "DENIED" in oc else "[!! check reason]"))
+        outcomes.append(oc)
 
         hdr("DONE — outcomes on LIVE Base Sepolia (scripted; the deterministic controls)")
-        for p, oc in zip(["pay allowlisted 0.0002 ETH", "send a large share (escalate → approve)",
+        for p, oc in zip([f"pay allowlisted {small_eth:.6f} ETH", "send a large share (escalate → approve)",
                           "pay unknown supplier", "unlimited approval (T3)"], outcomes):
             say(f"  {p:42s} → {oc}")
         say("\nNo model and no real money: this is the part of Stopbar that holds whatever the requester is. "
