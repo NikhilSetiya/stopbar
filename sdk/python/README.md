@@ -53,9 +53,19 @@ on every request and only ever grow (taint is monotonic in v1):
 
 ```python
 s = sb.session(["trusted_user"])
-s.add_label("untrusted_web")               # after the agent reads web content
-s.evaluate(action)                         # both labels attached
+s.add(page_text, "untrusted_web", ref=url) # after the agent reads web content
+s.evaluate(action)                         # both labels (and the source) attached
 ```
+
+`add` scans every input not labelled `trusted_*` for encoded content — base64,
+hex, Morse, ROT-n and zero-width characters — and adds `decoded` when it finds
+any (the Grok/Bankr pattern: an instruction hidden in Morse in on-chain content).
+Base64 and hex count only when they decode to readable text, so addresses, hashes
+and calldata don't trip it. `stopbar.detect_encodings(text)` exposes the detector.
+
+Outside gatekeeper mode, report what happened to an allowed action so its limiter
+reservation is committed or released: `sb.commit(request_id, tx_hash)` /
+`sb.release(request_id)` (`POST /v1/actions/{id}/commit|release`, LLD §4.1).
 
 > Labels are *claims* from the requester. In v1 they hold against an injected
 > model with an honest harness (T1); against a compromised requester (T3) only

@@ -38,6 +38,12 @@ jobs:
           pip install pyyaml
           go build -o "$RUNNER_TEMP/" ./cmd/stopbard ./cmd/stopbar
           python3 scripts/e2e_corpus.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
+      # Both SDKs (unit tests, shared encoding-detector fixtures) and each SDK's
+      # example agent against a live stopbard. Node 20 is the oldest supported.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: {node-version: "20"}
+      - name: SDKs (TypeScript, Python) vs live stopbard
+        run: ./scripts/e2e_sdk.sh "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
   lint:
     runs-on: ubuntu-latest
     steps:

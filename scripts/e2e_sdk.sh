@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# SDK gate (CS-181/182/183), run by scripts/e2e.sh and the required CI `go` job.
+# Both SDKs' unit tests (mock server, shared encoding fixtures), then each SDK's
+# example agent end to end against a real stopbard: -dev-world, gatekeeper mode,
+# auth on. Allow + signed tx; a Grok-pattern encoded injection labelled decoded
+# and denied; an escalation approved by a separate operator key. Then the run's
+# audit log must verify offline.
+# Usage: scripts/e2e_sdk.sh PATH/TO/stopbard PATH/TO/stopbar   (needs node >= 20, npm)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+STOPBARD=$1 CLI=$2
+T="$(mktemp -d)"
+trap 'kill "${PID:-}" 2>/dev/null || true; rm -rf "$T"' EXIT
+
+echo "--- python SDK: unit tests"
+P=sdk/python
+[[ -x "$P/.venv/bin/python" ]] || { python3 -m venv "$P/.venv" && "$P/.venv/bin/pip" -q install -e "$P[dev]"; }
+"$P/.venv/bin/python" -m pytest -q "$P/tests"
+
+echo "--- typescript SDK: unit tests (node:test), npm pack"
+(cd sdk/typescript && { [[ -d node_modules ]] || npm ci --no-audit --no-fund; } && npm test --silent && npm pack --dry-run --silent >/dev/null)
+
+echo "--- stopbard: dev world, gatekeeper, auth on"
+cat >"$T/world.json" <<'EOF'
+{"balances": {"ETH": "10"}, "prices_usd": {"ETH": "3500"},
+ "known_destinations": ["0x000000000000000000000000000000000000b0b0"],
+ "limits": [{"scope": "wallet", "window": "24h", "max_usd": "50000", "max_count": 10}]}
+EOF
+# Anvil test account 0: a public test key, never funded (the examples' WALLET).
+(umask 077; printf 'stopbar-dev-wallet-secp256k1-v1\nac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n' >"$T/wallet")
+key() { # agent scopes -> secret on stdout, record in $T/rec.<agent>
+  "$CLI" keygen api-key --tenant demo --agent "$1" --scopes "$2" 2>"$T/sec" | grep -v '^#' >"$T/rec.$1"
+  grep -o 'stopbar_sk_[A-Za-z0-9_-]*' "$T/sec"
+}
+AGENT_KEY="$(key wallet-agent evaluate)"
+APPROVE_KEY="$(key operator approve)"
+python3 -c 'import json,sys; print(json.dumps([json.load(open(f)) for f in sys.argv[1:]]))' "$T"/rec.* >"$T/keys.json"
+"$STOPBARD" -listen 127.0.0.1:0 -dev-world "$T/world.json" -dev-wallet "$T/wallet" -tenant demo \
+  -auth-keys "$T/keys.json" -state-dir "$T/state" >"$T/out" 2>"$T/log" &
+PID=$!
+for _ in $(seq 50); do grep -q 'listening on' "$T/out" 2>/dev/null && break; sleep 0.1; done
+ADDR="$(sed -n 's/.*listening on //p' "$T/out")"
+[[ -n "$ADDR" ]] || { echo "stopbard did not start"; cat "$T/log"; exit 1; }
+export STOPBAR_URL="http://$ADDR" STOPBAR_KEY="$AGENT_KEY" STOPBAR_APPROVE_KEY="$APPROVE_KEY" STOPBAR_TENANT=demo
+
+echo "--- typescript example vs live stopbard"
+node sdk/typescript/dist/examples/protect-agent.js
+echo "--- python example vs live stopbard"
+PYTHONPATH="$P" python3 "$P/examples/protect_agent.py"
+
+python3 -c 'import sys,urllib.request; sys.stdout.buffer.write(urllib.request.urlopen(sys.argv[1]).read())' "$STOPBAR_URL/v1/keys" >"$T/jwks.json"
+kill -TERM "$PID"; wait "$PID" || true
+PID=
+"$CLI" audit verify --state-dir "$T/state" --keys "$T/jwks.json" --require-covered
+echo "ok   SDK examples (TypeScript, Python) end to end"

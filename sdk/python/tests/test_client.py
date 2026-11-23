@@ -115,3 +115,28 @@ def test_unreachable_fails_closed():
     sb = Client("http://127.0.0.1:1", timeout=1)  # nothing listening
     with pytest.raises(StopbarUnavailable):
         sb.evaluate(evm(sb))
+
+
+def test_commit_and_release_hit_the_lld_routes():
+    seen = []
+
+    def responder(path, body):
+        seen.append((path, body))
+        return (200, {"request_id": path.split("/")[3], "status": "ok"})
+
+    srv = serve(responder)
+    sb = client(srv, api_key="k")
+    assert sb.commit("req_1", "0x" + "ab" * 32)["status"] == "ok"
+    sb.release("req_2")
+    assert seen == [("/v1/actions/req_1/commit", {"tx_hash": "0x" + "ab" * 32}),
+                    ("/v1/actions/req_2/release", None)]
+    assert srv.last_auth == "Bearer k"
+
+
+def test_commit_and_release_fail_closed():
+    sb = client(serve(lambda path, body: (404, {"code": "NOT_FOUND"})))
+    with pytest.raises(StopbarUnavailable):
+        sb.commit("req_1", "0x" + "ab" * 32)
+    sb = client(serve(lambda path, body: (403, {"code": "FORBIDDEN_SCOPE"})))
+    with pytest.raises(StopbarAuthError):
+        sb.release("req_1")

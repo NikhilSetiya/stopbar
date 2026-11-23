@@ -17,6 +17,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from .encoding import detect
 from .errors import (
     StopbarAuthError,
     StopbarDenied,
@@ -83,10 +84,10 @@ class Client:
 
     def session(self, labels: list[str] | None = None) -> "Session":
         """A Session accumulates provenance labels (monotonic taint) that ride
-        on every request it evaluates — e.g. add ``untrusted_web`` after the
-        agent reads web content, and it stays attached for the rest of the
-        session."""
-        return Session(self, list(labels or []))
+        on every request it evaluates — e.g. ``add(page, "untrusted_web")``
+        after the agent reads web content, and it stays attached for the rest
+        of the session."""
+        return Session(self, list(dict.fromkeys(labels or [])))
 
     # ---- actions ----
 
@@ -120,6 +121,7 @@ class Client:
         action: dict[str, Any],
         *,
         labels: list[str] | None = None,
+        sources: list[dict[str, str]] | None = None,
         request_id: str | None = None,
         nonce: str | None = None,
         ttl_seconds: int = 60,
@@ -135,8 +137,10 @@ class Client:
             "ttl_seconds": ttl_seconds,
             "actor": {"agent_id": self.agent_id, "session_id": self.session_id},
             "action": action,
-            "provenance": {"labels": list(labels or [])},
+            "provenance": {"labels": list(dict.fromkeys(labels or []))},
         }
+        if sources:
+            body["provenance"]["sources"] = list(sources)
         status, decoded = self._post("/v1/evaluate", body)
         return self._decision(status, decoded)
 
@@ -147,7 +151,26 @@ class Client:
         status, decoded = self._post(f"/v1/approvals/{request_id}", None)
         return self._decision(status, decoded)
 
+    def commit(self, request_id: str, tx_hash: str) -> dict[str, Any]:
+        """Report that an allowed action was broadcast, committing its limiter
+        reservation (LLD §4.1 ``POST /v1/actions/{id}/commit``). Raises
+        StopbarAuthError or StopbarUnavailable on anything but a 2xx."""
+        return self._ack(*self._post(f"/v1/actions/{request_id}/commit", {"tx_hash": tx_hash}))
+
+    def release(self, request_id: str) -> dict[str, Any]:
+        """Abandon an allowed action, releasing its limiter reservation (LLD
+        §4.1 ``POST /v1/actions/{id}/release``)."""
+        return self._ack(*self._post(f"/v1/actions/{request_id}/release", None))
+
     # ---- internals ----
+
+    def _ack(self, status: int, decoded: dict[str, Any]) -> dict[str, Any]:
+        if 200 <= status < 300:
+            return decoded
+        if status in (401, 403):
+            raise StopbarAuthError(f"Stopbar auth failed (HTTP {status}): {decoded.get('code') or decoded.get('message')}")
+        raise StopbarUnavailable(f"Stopbar returned HTTP {status}: {decoded.get('code') or decoded.get('message') or decoded}")
+
 
     def _decision(self, status: int, decoded: dict[str, Any]) -> Decision:
         if status == 200:
@@ -182,16 +205,34 @@ class Session:
 
     client: Client
     labels: list[str]
+    sources: list[dict[str, str]] = field(default_factory=list)
 
     def add_label(self, label: str) -> "Session":
         if label not in self.labels:
             self.labels.append(label)
         return self
 
+    def add(self, content: str, label: str, ref: str | None = None) -> "Session":
+        """Record content entering the agent's context under ``label`` (LLD
+        §8.2). Any input not labelled ``trusted_*`` is scanned for encoded
+        content (base64, hex, Morse, ROT-n, zero-width); if any is found the
+        session also gains ``decoded`` (CS-183). ``ref`` (a URL, tx hash…) is
+        recorded as a provenance source."""
+        self.add_label(label)
+        decoded = not label.startswith("trusted_") and bool(detect(content))
+        if decoded:
+            self.add_label("decoded")
+        if ref is not None:
+            self.sources.append({"label": label, "ref": ref})
+            if decoded:
+                self.sources.append({"label": "decoded", "ref": ref})
+        return self
+
     def evaluate(self, action: dict[str, Any], **kw: Any) -> Decision:
         extra = kw.pop("labels", None) or []
         merged = list(dict.fromkeys([*self.labels, *extra]))
-        return self.client.evaluate(action, labels=merged, **kw)
+        sources = [*self.sources, *(kw.pop("sources", None) or [])]
+        return self.client.evaluate(action, labels=merged, sources=sources, **kw)
 
     def approve(self, request_id: str) -> Decision:
         return self.client.approve(request_id)
