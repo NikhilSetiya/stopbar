@@ -214,10 +214,70 @@ const (
 	AuditRelease      AuditRecordType = "release"
 	AuditOverride     AuditRecordType = "override"
 	AuditAuthReject   AuditRecordType = "auth_reject" // CS-103: a request rejected at the gateway (identity mismatch, scope)
+	AuditBreaker      AuditRecordType = "breaker"     // CS-124: circuit breaker trip, reset vote or reset (body.event)
 )
 
 // ErrNoPending means no escalation with that id is awaiting approval (CS-151).
 var ErrNoPending = errors.New("no pending escalation for that id")
+
+// ErrBreakerNotOpen means a reset was asked for a tenant whose circuit breaker
+// is not open (CS-124).
+var ErrBreakerNotOpen = errors.New("circuit breaker is not open for that tenant")
+
+// BreakerStatus is a tenant's circuit breaker (CS-124, LLD §7.3), as served by
+// GET /v1/breakers/{tenant} and POST /v1/breakers/{tenant}/reset. While open,
+// every evaluation for the tenant is denied CIRCUIT_OPEN. It closes only when
+// Quorum distinct approvers have voted to reset this trip.
+type BreakerStatus struct {
+	Tenant string `json:"tenant"`
+	Open   bool   `json:"open"`
+	// Set exactly while open: when and by which request it tripped, and why.
+	TrippedAt     *time.Time `json:"tripped_at,omitempty"`
+	TripRequestID string     `json:"trip_request_id,omitempty"`
+	Reason        string     `json:"reason,omitempty"`
+	// Votes to reset this trip, one per approver identity (API key id).
+	Votes  []BreakerVote `json:"votes"`
+	Quorum int           `json:"quorum"`
+}
+
+// BreakerVote is one approver's vote to reset a tripped breaker.
+type BreakerVote struct {
+	Approver string    `json:"approver"`
+	At       time.Time `json:"at"`
+}
+
+// Validate checks a status's invariants, reporting every problem at once.
+func (b BreakerStatus) Validate() error {
+	var p []string
+	if b.Tenant == "" {
+		p = append(p, "tenant is required")
+	}
+	if b.Quorum < 1 {
+		p = append(p, "quorum must be at least 1")
+	}
+	if b.Open != (b.TrippedAt != nil) || b.Open != (b.TripRequestID != "") || b.Open != (b.Reason != "") {
+		p = append(p, "tripped_at, trip_request_id and reason are set exactly when open")
+	}
+	if !b.Open && len(b.Votes) > 0 {
+		p = append(p, "a closed breaker has no reset votes")
+	}
+	if b.Open && b.Quorum >= 1 && len(b.Votes) >= b.Quorum {
+		p = append(p, "an open breaker cannot already hold a quorum of reset votes")
+	}
+	seen := map[string]bool{}
+	for i, v := range b.Votes {
+		if v.Approver == "" {
+			p = append(p, fmt.Sprintf("votes[%d].approver is required", i))
+		} else if seen[v.Approver] {
+			p = append(p, fmt.Sprintf("votes[%d]: approver %q voted twice", i, v.Approver))
+		}
+		seen[v.Approver] = true
+	}
+	if len(p) > 0 {
+		return &ValidationError{Problems: p}
+	}
+	return nil
+}
 
 // AuditEntry is an audit record before the log assigns its sequence number,
 // timestamp and hashes. State stores take one so that the record is written

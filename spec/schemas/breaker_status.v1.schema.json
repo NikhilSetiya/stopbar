@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NikhilSetiya/stopbar/spec/schemas/breaker_status.v1.schema.json",
+  "title": "Stopbar circuit breaker status v1",
+  "description": "LLD §7.3 (CS-124). Mirrors internal/model.BreakerStatus. Served by GET /v1/breakers/{tenant} and POST /v1/breakers/{tenant}/reset.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tenant",
+    "open",
+    "votes",
+    "quorum"
+  ],
+  "properties": {
+    "tenant": {
+      "type": "string",
+      "minLength": 1
+    },
+    "open": {
+      "type": "boolean",
+      "description": "While true, every evaluation for the tenant is denied CIRCUIT_OPEN."
+    },
+    "tripped_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "trip_request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "votes": {
+      "type": "array",
+      "description": "Reset votes for this trip, one per approver identity.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "approver",
+          "at"
+        ],
+        "properties": {
+          "approver": {
+            "type": "string",
+            "minLength": 1
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "quorum": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Distinct approvers needed to reset (M of N)."
+    }
+  },
+  "if": {
+    "properties": {
+      "open": {
+        "const": true
+      }
+    }
+  },
+  "then": {
+    "required": [
+      "tripped_at",
+      "trip_request_id",
+      "reason"
+    ]
+  },
+  "else": {
+    "properties": {
+      "votes": {
+        "maxItems": 0
+      }
+    },
+    "not": {
+      "anyOf": [
+        {
+          "required": [
+            "tripped_at"
+          ]
+        },
+        {
+          "required": [
+            "trip_request_id"
+          ]
+        },
+        {
+          "required": [
+            "reason"
+          ]
+        }
+      ]
+    }
+  }
+}

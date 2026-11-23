@@ -10,7 +10,8 @@ before expected.at_step must be allowed (200). The stopping step must have
 the expected outcome as its HTTP status (allow 200 / escalate 202 / deny 403 /
 reject 400, refused by the gateway and never evaluated),
 exactly the expected policy IDs and the expected reason code if one is
-given. After shutdown, `stopbar audit verify --require-covered` must pass over
+given, and so must every step after it (a tripped circuit breaker keeps
+denying). Counters in expected.metrics must match /metrics. After shutdown, `stopbar audit verify --require-covered` must pass over
 the run's own audit log, the stopping decision must be audited (a reject must
 not reach the engine), and every signed tx must have a commit record. stopbard runs in gatekeeper mode: every allowed step must
 return a signed tx, which `stopbar decode-tx` decodes independently. Its
@@ -91,17 +92,30 @@ for path in sorted(glob.glob("corpus/attacks/*.yaml")):
                     continue
                 problems += check_signed(i, sent, d)
                 signed += 1
-            status, d = post(addr, tpl.render(steps[stop_at]))
-            if status == 400:  # gateway error body: normalise to a rejection
-                d = {"outcome": "reject", "reasons": [{"code": d.get("code")}], "request_id": d.get("request_id")}
-            got_ids = sorted(r["policy_id"] for r in d.get("reasons", []) if r.get("policy_id"))
-            codes = [r.get("code") for r in d.get("reasons", [])]
-            if status != STATUS[want["outcome"]] or d.get("outcome") != want["outcome"]:
-                problems.append(f"step {stop_at}: HTTP {status} {d.get('outcome')}, want {STATUS[want['outcome']]} {want['outcome']}")
-            if got_ids != sorted(want.get("policy_ids", [])):
-                problems.append(f"policy_ids {got_ids}, want {want.get('policy_ids', [])}")
-            if want.get("code") and want["code"] not in codes:
-                problems.append(f"reason codes {codes}, want {want['code']}")
+            # The stopping step, and every step after it, must be stopped the
+            # same way (e.g. a tripped circuit breaker keeps denying).
+            for j in range(stop_at, len(steps)):
+                st, dj = post(addr, tpl.render(steps[j]))
+                if st == 400:  # gateway error body: normalise to a rejection
+                    dj = {"outcome": "reject", "reasons": [{"code": dj.get("code")}], "request_id": dj.get("request_id")}
+                ids = sorted(r["policy_id"] for r in dj.get("reasons", []) if r.get("policy_id"))
+                cs = [r.get("code") for r in dj.get("reasons", [])]
+                if st != STATUS[want["outcome"]] or dj.get("outcome") != want["outcome"]:
+                    problems.append(f"step {j}: HTTP {st} {dj.get('outcome')}, want {STATUS[want['outcome']]} {want['outcome']}")
+                if ids != sorted(want.get("policy_ids", [])):
+                    problems.append(f"step {j}: policy_ids {ids}, want {want.get('policy_ids', [])}")
+                if want.get("code") and want["code"] not in cs:
+                    problems.append(f"step {j}: reason codes {cs}, want {want['code']}")
+                if j == stop_at:
+                    status, d, got_ids, codes = st, dj, ids, cs
+            if want.get("metrics"):
+                with urllib.request.urlopen(f"http://{addr}/metrics", timeout=5) as r:
+                    lines = dict(l.rsplit(" ", 1) for l in r.read().decode().splitlines() if l and not l.startswith("#"))
+                for name, v in want["metrics"].items():
+                    if lines.get(name) != str(v):
+                        problems.append(f"metric {name} = {lines.get(name)}, want {v}")
+                    else:
+                        print(f"     /metrics: {name} {v}")
             with urllib.request.urlopen(f"http://{addr}/v1/keys", timeout=5) as r:
                 open(keys, "wb").write(r.read())  # published keys: all verify needs, besides the file
         finally:

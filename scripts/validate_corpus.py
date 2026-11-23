@@ -15,6 +15,8 @@ for f in glob.glob("corpus/attacks/*.yaml"):
         checks.append((req, f if i == 0 and "request" in entry else f"{f}#{i}", pick))
 checks += [(req, f, lambda d: d) for f in glob.glob("spec/fixtures/action_request.*.json")]
 checks += [(dec, f, lambda d: d) for f in glob.glob("spec/fixtures/decision.*.json")]
+brk = V(json.load(open("spec/schemas/breaker_status.v1.schema.json")))
+checks += [(brk, f, lambda d: d) for f in glob.glob("spec/fixtures/breaker_status.*.json")]
 bad = 0
 for v, f, pick in sorted(checks, key=lambda c: c[1]):
     errs = list(v.iter_errors(pick(yaml.safe_load(open(f.split("#")[0])))))

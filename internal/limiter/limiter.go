@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"regexp"
 	"sort"
@@ -87,6 +88,11 @@ type Rule struct {
 	// UnknownDestinationsOnly applies a destination rule only when the
 	// destination is not known (salami draining, FR-LIM-2a).
 	UnknownDestinationsOnly bool `json:"unknown_destinations_only,omitempty"`
+	// CircuitBreaker makes a tenant-scope rule the tenant's outflow circuit
+	// breaker (CS-124, FR-LIM-3): a request that would exceed it trips the
+	// breaker, and from then on every request for the tenant is denied
+	// CIRCUIT_OPEN until a quorum of approvers resets it.
+	CircuitBreaker bool `json:"circuit_breaker,omitempty"`
 }
 
 type rule struct {
@@ -98,14 +104,24 @@ type rule struct {
 	maxPct   *big.Rat
 }
 
+// DefaultBreakerQuorum is how many distinct approvers must vote to reset a
+// tripped breaker when Config.BreakerQuorum is unset.
+const DefaultBreakerQuorum = 2
+
 // Config wires a Limiter.
 type Config struct {
 	Rules []Rule
 	Store Store // nil: in-memory only (tests, dev)
 	Clock func() time.Time
+	// BreakerQuorum is M in the M-of-N breaker reset: distinct approver
+	// identities needed. 0 means DefaultBreakerQuorum.
+	BreakerQuorum int
+	// Logger receives the high-severity alert when a breaker trips.
+	Logger *slog.Logger
 }
 
-// Limiter implements engine.Limiter and engine.Enricher (velocity context).
+// Limiter implements engine.Limiter, engine.Enricher (velocity context) and
+// engine.Breaker (the tenant circuit breaker).
 type Limiter struct {
 	mu    sync.Mutex
 	rules []rule
@@ -113,6 +129,13 @@ type Limiter struct {
 	clock func() time.Time
 	recs  map[string]*entry
 	usage map[string]*keyUsage
+	// breakers holds every open breaker, by tenant. A closed breaker has no
+	// entry. Changes are durable (and audited) before they are applied, except
+	// a trip whose write fails, which still opens in memory: failing closed.
+	breakers      map[string]*model.BreakerStatus
+	quorum        int
+	log           *slog.Logger
+	trips, resets uint64
 	// Sweeping is proportional to what lapsed, not to what is retained:
 	// live reservations sit in a heap by expiry, and every record in a
 	// queue by creation time (retention pruning).
@@ -149,12 +172,30 @@ type bucket struct {
 
 // New validates the rules and rebuilds state from the store.
 func New(cfg Config) (*Limiter, error) {
-	l := &Limiter{store: cfg.Store, clock: cfg.Clock, recs: map[string]*entry{}, usage: map[string]*keyUsage{}}
+	l := &Limiter{store: cfg.Store, clock: cfg.Clock, recs: map[string]*entry{}, usage: map[string]*keyUsage{},
+		breakers: map[string]*model.BreakerStatus{}, quorum: cfg.BreakerQuorum, log: cfg.Logger}
 	if l.store == nil {
 		l.store = MemStore{}
 	}
 	if l.clock == nil {
 		l.clock = time.Now
+	}
+	if l.log == nil {
+		l.log = slog.New(slog.DiscardHandler)
+	}
+	switch {
+	case l.quorum == 0:
+		l.quorum = DefaultBreakerQuorum
+	case l.quorum < 0:
+		return nil, errors.New("limiter: breaker quorum must be ≥ 1")
+	}
+	open, err := l.store.LoadBreakers()
+	if err != nil {
+		return nil, fmt.Errorf("limiter: loading breakers: %w", err)
+	}
+	for _, b := range open {
+		b.Quorum = l.quorum // the configured quorum, not the one at trip time
+		l.breakers[b.Tenant] = &b
 	}
 	for i, r := range cfg.Rules {
 		cr, err := compile(r)
@@ -244,6 +285,9 @@ func compile(r Rule) (rule, error) {
 	}
 	if r.UnknownDestinationsOnly && r.Scope != ScopeDestination {
 		return cr, errors.New("unknown_destinations_only is only meaningful on destination scope")
+	}
+	if r.CircuitBreaker && (r.Scope != ScopeTenant || cr.perTx) {
+		return cr, errors.New("circuit_breaker is a tenant outflow cap: tenant scope with a 1m, 1h or 24h window")
 	}
 	return cr, nil
 }
@@ -360,6 +404,25 @@ func checkTx(r rule, amt amount, er model.EnrichedRequest) error {
 	return nil
 }
 
+// checkWindow applies a sliding-window rule given the key's current usage.
+func checkWindow(r rule, used bucket, amt amount) error {
+	if r.maxUSD != nil {
+		if amt.usd == nil {
+			return fmt.Errorf("%w (%s %s cap)", ErrUnpriced, r.Scope, r.Window)
+		}
+		if new(big.Int).Add(used.usd, amt.usd).Cmp(r.maxUSD) > 0 {
+			return fmt.Errorf("%w: %s %s USD cap %s", engine.ErrCapExceeded, r.Scope, r.Window, microToDecimal(r.maxUSD))
+		}
+	}
+	if r.MaxCount > 0 && used.count+amt.count > r.MaxCount {
+		return fmt.Errorf("%w: %s %s count cap %d", engine.ErrCapExceeded, r.Scope, r.Window, r.MaxCount)
+	}
+	if r.maxUnits != nil && new(big.Int).Add(used.units, amt.units).Cmp(r.maxUnits) > 0 {
+		return fmt.Errorf("%w: %s %s unit cap %s", engine.ErrCapExceeded, r.Scope, r.Window, r.maxUnits)
+	}
+	return nil
+}
+
 // Reserve implements engine.Limiter: all caps checked on all keys, then all
 // keys updated, or nothing.
 func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest, ttl time.Duration, ae *model.AuditEntry) error {
@@ -380,9 +443,27 @@ func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest
 		}
 		return fmt.Errorf("%w: %s (%s)", ErrDuplicateReservation, id, e.State)
 	}
+	tenant := er.Request.Tenant
+	if b := l.breakers[tenant]; b != nil {
+		return fmt.Errorf("%w: tenant %q: %s", engine.ErrCircuitOpen, tenant, b.Reason)
+	}
 	ks := keys(er)
+	// Breaker rules first: a request that would push the tenant's outflow
+	// over one trips the breaker, whatever other caps it also breaks.
 	for _, r := range l.rules {
-		if r.UnknownDestinationsOnly && er.Destination.Known {
+		if !r.CircuitBreaker {
+			continue
+		}
+		err := checkWindow(r, l.used(ks[r.Scope], r.window, now), amt)
+		if errors.Is(err, engine.ErrCapExceeded) {
+			return l.trip(id, tenant, strings.TrimPrefix(err.Error(), engine.ErrCapExceeded.Error()+": ")+" (circuit breaker)", now)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	for _, r := range l.rules {
+		if r.CircuitBreaker || (r.UnknownDestinationsOnly && er.Destination.Known) {
 			continue
 		}
 		if r.perTx {
@@ -391,21 +472,8 @@ func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest
 			}
 			continue
 		}
-		key := ks[r.Scope]
-		used := l.used(key, r.window, now)
-		if r.maxUSD != nil {
-			if amt.usd == nil {
-				return fmt.Errorf("%w (%s %s cap)", ErrUnpriced, r.Scope, r.Window)
-			}
-			if new(big.Int).Add(used.usd, amt.usd).Cmp(r.maxUSD) > 0 {
-				return fmt.Errorf("%w: %s %s USD cap %s", engine.ErrCapExceeded, r.Scope, r.Window, microToDecimal(r.maxUSD))
-			}
-		}
-		if r.MaxCount > 0 && used.count+amt.count > r.MaxCount {
-			return fmt.Errorf("%w: %s %s count cap %d", engine.ErrCapExceeded, r.Scope, r.Window, r.MaxCount)
-		}
-		if r.maxUnits != nil && new(big.Int).Add(used.units, amt.units).Cmp(r.maxUnits) > 0 {
-			return fmt.Errorf("%w: %s %s unit cap %s", engine.ErrCapExceeded, r.Scope, r.Window, r.maxUnits)
+		if err := checkWindow(r, l.used(ks[r.Scope], r.window, now), amt); err != nil {
+			return err
 		}
 	}
 	keyList := make([]string, 0, len(scopes))

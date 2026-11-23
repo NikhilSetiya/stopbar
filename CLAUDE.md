@@ -14,7 +14,7 @@ Status is pre-alpha. Implemented so far:
 - `internal/engine`: pipeline orchestration with fail-closed mapping and invariants between stages (LLD §2, §12). It consumes components through interfaces; the real ones arrive in CS-111/121/141/161/171.
 - `internal/decision`: the payload binding (`PayloadHash`), which covers **every** EVM tx field (nonce, gas, fees).
 - `internal/policy`: Cedar bundle loader and outcome combiner (CS-111/112, LLD §5). The spike tests stay as a regression gate on cedar-go behaviour.
-- `internal/limiter`: sliding-window caps with reserve/commit/release, written to bbolt before being applied (CS-121/122, LLD §7.3a). Its property test is the acceptance bar.
+- `internal/limiter`: sliding-window caps with reserve/commit/release, written to bbolt before being applied (CS-121/122, LLD §7.3a). Its property test is the acceptance bar. Also hard per-tx caps (`window: tx`: USD, units, % of balance; CS-123) and the tenant circuit breaker (trip → `CIRCUIT_OPEN` for the tenant until an M-of-N approver reset via `stopbar breaker reset`; CS-124, LLD §7.3).
 - `internal/decision`: also the production token signer and verifier, the key ring with rotation, and the JWK type (CS-161). Trusted core, stdlib only.
 - `internal/signer`: the gatekeeper adapter and `Gatekeeper` wrapper (CS-162). This is **edge** code, so go-ethereum is allowed here and only here, and it touches no key until the core verifier has accepted the token.
 - `internal/store` and `internal/audit`: one bbolt state file, with each audit record written **in the same transaction** as the state change it describes. Checkpoints are signed with the decision key, and `stopbar audit verify` checks the log offline (CS-171/172, LLD §11).

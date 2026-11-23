@@ -222,6 +222,8 @@ Canonicalisation: RFC 8785 (JCS).
 | POST | `/v1/actions/{request_id}/commit` | Report broadcast tx hash → commit reservation |
 | POST | `/v1/actions/{request_id}/release` | Abandon → release reservation |
 | POST | `/v1/approvals/{escalation_id}` | Submit signed approval |
+| GET | `/v1/breakers/{tenant}` | Circuit breaker status (CS-124, §7.3) |
+| POST | `/v1/breakers/{tenant}/reset` | One approver's reset vote: `200` closed (quorum met), `202` recorded but still open |
 | POST | `/v1/events/deploy` | Ingest deploy/change event (Phase 4) |
 | GET | `/v1/audit?from=&to=` | Export audit range |
 | GET | `/v1/keys` | JWKS of decision-signing keys |
@@ -431,6 +433,22 @@ Amount is two-dimensional `{usd, count}`; caps can be set on either. Token-count
 
 `tenant` scope with a hard outflow cap per 1h. On breach: all subsequent `evaluate` → deny `CIRCUIT_OPEN` until M-of-N reset. Emits high-severity alert.
 
+Implemented in CS-124 (`internal/limiter/breaker.go`):
+
+- **Config:** a tenant-scope rule with `circuit_breaker: true` (window 1m, 1h or 24h, never `tx`). Breaker rules are checked before every other cap.
+- **Trip:** a `Reserve` that would push the tenant over that rule trips the breaker and returns `ErrCircuitOpen`, so the request is denied `CIRCUIT_OPEN`.
+  - The trip is written to bbolt (`limiter_breakers_v1`) in the same transaction as an audit record of type `breaker` (`event: trip`).
+  - The trip logs at high severity and increments `stopbar_circuit_breaker_trips_total` on `/metrics`. Alert on any increase.
+  - If the trip can't be written, the breaker still opens in memory (failing closed) and the request denies `FAIL_CLOSED_AUDIT`.
+- **While open:** the engine asks `Breaker.CircuitOpen(tenant)` right after normalize, before decode or policy. Every request for the tenant is denied `CIRCUIT_OPEN`, including ones policy would only escalate and approvals of earlier escalations, and `Reserve` refuses too. Other tenants are unaffected. An open breaker survives restart and the window rolling over: only a reset closes it.
+- **Reset (M of N):**
+  - `POST /v1/breakers/{tenant}/reset` records one vote per authenticated approver. Voters use the CS-151 approver API keys (`approve` scope, same tenant). Keys without that scope or tenant get 403, and the rejection is audited.
+  - Each vote is durable and audited (`event: reset_vote`) before it counts. Votes are bound to the current trip, and a repeat vote by the same identity counts once.
+  - When `-breaker-quorum` (default 2) distinct identities have voted, the breaker closes (`event: reset`, `stopbar_circuit_breaker_resets_total`).
+  - The endpoint answers 200 when the vote closed the breaker, 202 when it was recorded below quorum (still open), and 404 when the breaker isn't open. Reset needs auth even on loopback. `GET /v1/breakers/{tenant}` returns `model.BreakerStatus` (`spec/schemas/breaker_status.v1.schema.json`).
+- **CLI:** `stopbar breaker status --tenant T` and `stopbar breaker reset --tenant T --key K [--key K2 …]`. The reset fails ("reset refused: n of M") while the quorum isn't met.
+- **Tests:** corpus CS-2026-0011 trips the breaker over HTTP, and the replay checks that every later step keeps denying and that `/metrics` reports the trip. `scripts/e2e_breaker.py` runs the 1-of-2 refusal and the 2-of-2 reset against the live binaries.
+
 ### 7.3a Implementation (`internal/limiter`, CS-121/122)
 
 - **One process, one mutex.** `Reserve`, `Commit` and `Release` are serialised. All caps are checked on all five scope keys before anything changes, so a reserve is all-or-nothing.
@@ -570,7 +588,7 @@ Implemented in `internal/audit` (CS-171/172), per `spec/audit-hash-v1.md`.
 | `FAIL_CLOSED_AUDIT` | Audit append fails | deny (no unaudited decisions) |
 | `FAIL_CLOSED_ENGINE` | Panic outside any component | deny |
 | `CAP_EXCEEDED` | Reserve failed | deny |
-| `CIRCUIT_OPEN` | Breaker tripped | deny |
+| `CIRCUIT_OPEN` | Breaker tripped: the tripping request, then every request for the tenant until an M-of-N reset (§7.3) | deny |
 | `NONCE_REPLAYED` / `EXPIRED` | Gateway | 400 |
 
 Panics recovered at the engine boundary → `deny`.
@@ -651,7 +669,7 @@ limits:                     # internal/limiter Rule; window ∈ 1m | 1h | 24h | 
   - {scope: wallet, window: 1h, max_usd: "5000", max_count: 50}
   - {scope: wallet+asset, window: 24h, max_units: "1000000000000000000000000"}   # raw units; holds with no price
   - {scope: destination, window: 24h, max_count: 5, unknown_destinations_only: true}
-  - {scope: tenant, window: 1h, max_usd: "20000", circuit_breaker: true}
+  - {scope: tenant, window: 1h, max_usd: "20000", circuit_breaker: true}   # reset: -breaker-quorum approvers (CS-124)
 prices: {sources: [chainlink, coingecko], staleness: 15s}
 decision_key: {provider: local, path: ./keys/decision.ed25519}
 signer: {adapter: local, keystore: ./keys/agent-wallet.json}

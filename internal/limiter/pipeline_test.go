@@ -51,10 +51,11 @@ func (p *memPending) Delete(_ context.Context, id string) error {
 }
 
 type pipeline struct {
-	eng *engine.Engine
-	lim *limiter.Limiter
-	db  *store.DB
-	log *audit.Log
+	eng  *engine.Engine
+	lim  *limiter.Limiter
+	db   *store.DB
+	log  *audit.Log
+	keys map[string]ed25519.PublicKey
 }
 
 // openClawWorld is corpus CS-2026-0002's setup: 52,430,000 LOBSTAR at $0.00477.
@@ -103,7 +104,7 @@ func newPipeline(t *testing.T, w *devstub.World, cfg limiter.Config) *pipeline {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &pipeline{eng: eng, lim: lim, db: db, log: lg}
+	return &pipeline{eng: eng, lim: lim, db: db, log: lg, keys: ring.PublicKeys()}
 }
 
 // transfer builds a LOBSTAR transfer to the known destination. tokens is the
@@ -135,6 +136,72 @@ func reasonIDs(d model.Decision) (ids, codes []string) {
 		codes = append(codes, r.Code)
 	}
 	return ids, codes
+}
+
+// CS-124 acceptance through the whole pipeline: an outflow breach trips the
+// tenant breaker; from then on every request for the tenant (a tiny transfer,
+// one that would only escalate, an approval) is denied CIRCUIT_OPEN, the trip
+// metric is up, one approver cannot reset it, and two can. The audit chain
+// (trip, vote, reset in the same transactions) verifies.
+func TestCircuitBreakerThroughEngine(t *testing.T) {
+	w := openClawWorld(
+		limiter.Rule{Scope: limiter.ScopeTenant, Window: "1h", MaxUSD: "30000", CircuitBreaker: true},
+		limiter.Rule{Scope: limiter.ScopeWallet, Window: "1h", MaxUSD: "1000000"},
+	)
+	p := newPipeline(t, w, limiter.Config{BreakerQuorum: 2})
+	code := func(d model.Decision) string { _, c := reasonIDs(d); return c[len(c)-1] }
+
+	d, _ := p.eng.Evaluate(bg, transfer("req_0", "test", tenthOfBal))
+	if d.Outcome != model.Allow {
+		t.Fatalf("first transfer: %s %v", d.Outcome, d.Reasons)
+	}
+	if err := p.eng.Commit(bg, "req_0", "0xabc"); err != nil {
+		t.Fatal(err)
+	}
+	// An escalation recorded before the trip, to approve after it.
+	if d, _ := p.eng.Evaluate(bg, transfer("req_esc", "test", fullBalance)); d.Outcome != model.Escalate {
+		t.Fatalf("pre-trip escalation: %s %v", d.Outcome, d.Reasons)
+	}
+	d, _ = p.eng.Evaluate(bg, transfer("req_1", "test", tenthOfBal)) // $50k > $30k: trips
+	if d.Outcome != model.Deny || code(d) != engine.CodeCircuitOpen {
+		t.Fatalf("breach: %s %v, want deny CIRCUIT_OPEN", d.Outcome, d.Reasons)
+	}
+	for _, id := range []string{"req_2", "req_3"} {
+		amt := map[string]string{"req_2": tinyAmount, "req_3": fullBalance}[id]
+		if d, _ := p.eng.Evaluate(bg, transfer(id, "test", amt)); d.Outcome != model.Deny || code(d) != engine.CodeCircuitOpen {
+			t.Fatalf("%s after trip: %s %v, want deny CIRCUIT_OPEN", id, d.Outcome, d.Reasons)
+		}
+	}
+	if d, _, _ := p.eng.Approve(bg, "req_esc", "ak_alice"); d.Outcome != model.Deny || code(d) != engine.CodeCircuitOpen {
+		t.Fatalf("approval after trip: %s %v, want deny CIRCUIT_OPEN", d.Outcome, d.Reasons)
+	}
+	if d, _ := p.eng.Evaluate(bg, transfer("req_other", "other-tenant", tinyAmount)); d.Outcome != model.Allow {
+		t.Fatalf("another tenant was halted: %s %v", d.Outcome, d.Reasons)
+	}
+	if got := p.lim.Counters()["stopbar_circuit_breaker_trips_total"]; got != 1 {
+		t.Fatalf("trip metric %d, want 1", got)
+	}
+
+	if st, err := p.lim.ResetBreaker(bg, "test", "ak_alice"); err != nil || !st.Open {
+		t.Fatalf("one vote: %+v %v", st, err)
+	}
+	if d, _ := p.eng.Evaluate(bg, transfer("req_4", "test", tinyAmount)); code(d) != engine.CodeCircuitOpen {
+		t.Fatalf("after one of two votes: %s %v", d.Outcome, d.Reasons)
+	}
+	if st, err := p.lim.ResetBreaker(bg, "test", "ak_bob"); err != nil || st.Open {
+		t.Fatalf("quorum: %+v %v", st, err)
+	}
+	if d, _ := p.eng.Evaluate(bg, transfer("req_5", "test", tinyAmount)); d.Outcome != model.Allow {
+		t.Fatalf("after reset: %s %v", d.Outcome, d.Reasons)
+	}
+
+	if err := p.log.Checkpoint(); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := audit.Verify(p.db, p.keys, 1, 0)
+	if err != nil || rep.Uncovered != 0 {
+		t.Fatalf("audit verify: %+v %v", rep, err)
+	}
 }
 
 // CS-123 acceptance: the OpenClaw fixture (CS-2026-0002, agent sends its whole
