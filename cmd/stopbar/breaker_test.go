@@ -71,10 +71,14 @@ func TestBreakerCmd(t *testing.T) {
 	if err := breakerCmd([]string{"status", "--tenant", "acme", "--url", srv.URL, "--key", "sk_alice"}); err != nil {
 		t.Fatal(err)
 	}
-	// Insufficient signatures: refused, and the same key twice is still one.
-	err = breakerCmd([]string{"reset", "--tenant", "acme", "--url", srv.URL, "--key", "sk_alice", "--key", "sk_alice"})
+	// Insufficient signatures: refused; the same identity again is refused too.
+	err = breakerCmd([]string{"reset", "--tenant", "acme", "--url", srv.URL, "--key", "sk_alice"})
 	if err == nil || !strings.Contains(err.Error(), "reset refused: 1 of 2") {
 		t.Fatalf("one approver: %v", err)
+	}
+	err = breakerCmd([]string{"reset", "--tenant", "acme", "--url", srv.URL, "--key", "sk_alice"})
+	if err == nil || !strings.Contains(err.Error(), "409") || !strings.Contains(err.Error(), "DUPLICATE_VOTE") {
+		t.Fatalf("same approver twice: %v", err)
 	}
 	if !lim.BreakerStatus("acme").Open {
 		t.Fatal("breaker closed on one signature")

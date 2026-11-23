@@ -9,10 +9,11 @@ package limiter
 // CircuitOpen refuse every request for the tenant (the engine denies
 // CIRCUIT_OPEN before policy, so escalations and approvals stop too).
 //
-// Only a quorum of distinct approver identities can close it (M of N, the same
-// approver keys that approve escalations, CS-151). Each vote is durable and
-// audited before it counts, votes are bound to the trip they were cast on, and
-// one identity voting twice counts once.
+// Only a quorum (at least 2) of distinct approver identities can close it (M of
+// N, the same approver keys that approve escalations, CS-151). Each vote is
+// durable and audited before it counts, is bound to the trip it was cast on,
+// and expires after model.BreakerVoteTTL (1h). An identity with a live vote
+// cannot vote again.
 
 import (
 	"context"
@@ -29,7 +30,10 @@ import (
 const (
 	BreakerTrip      = "trip"
 	BreakerResetVote = "reset_vote"
-	BreakerReset     = "reset"
+	// BreakerVoteExpired discards votes older than model.BreakerVoteTTL, in
+	// the same transaction as the vote that found them.
+	BreakerVoteExpired = "vote_expired"
+	BreakerReset       = "reset"
 )
 
 // trip opens the tenant's breaker (l.mu held). It opens in memory even if the
@@ -67,19 +71,46 @@ func (l *Limiter) BreakerStatus(tenant string) model.BreakerStatus {
 }
 
 func (l *Limiter) status(tenant string) model.BreakerStatus {
-	if b := l.breakers[tenant]; b != nil {
-		out := *b
-		out.Votes = slices.Clone(b.Votes)
-		return out
+	b := l.breakers[tenant]
+	if b == nil {
+		return model.BreakerStatus{Tenant: tenant, Votes: []model.BreakerVote{}, Quorum: l.quorum}
 	}
-	return model.BreakerStatus{Tenant: tenant, Votes: []model.BreakerVote{}, Quorum: l.quorum}
+	out := *b
+	out.Votes, out.ExpiredVotes = splitVotes(b.Votes, l.clock())
+	out.Quorum = l.quorum
+	return out
+}
+
+// splitVotes separates live votes from those past their expiry. The stored
+// breaker keeps expired votes until the next vote discards them (audited);
+// only live ones ever count.
+func splitVotes(votes []model.BreakerVote, now time.Time) (live, expired []model.BreakerVote) {
+	live = []model.BreakerVote{}
+	for _, v := range votes {
+		if now.Before(v.ExpiresAt) {
+			live = append(live, v)
+		} else {
+			expired = append(expired, v)
+		}
+	}
+	return live, expired
+}
+
+func approverIDs(votes []model.BreakerVote) []string {
+	ids := make([]string, len(votes))
+	for i, v := range votes {
+		ids[i] = v.Approver
+	}
+	return ids
 }
 
 // ResetBreaker records approver's vote to reset the tenant's open breaker and
-// closes it once Quorum distinct approvers have voted. It returns the status
-// after the vote: still open (vote recorded, quorum not met) or closed. A
-// repeat vote by the same approver changes nothing. A closed breaker returns
-// model.ErrBreakerNotOpen.
+// closes it once Quorum distinct approvers hold live votes. A vote counts for
+// model.BreakerVoteTTL (1h); votes that have expired are discarded with this
+// one, and the discard is audited in the same transaction. It returns the
+// status after the vote: still open (quorum not met) or closed. An approver
+// who already holds a live vote is refused (model.ErrDuplicateVote), and a
+// closed breaker returns model.ErrBreakerNotOpen.
 func (l *Limiter) ResetBreaker(_ context.Context, tenant, approver string) (model.BreakerStatus, error) {
 	if approver == "" {
 		return model.BreakerStatus{}, errors.New("limiter: a breaker reset vote needs an authenticated approver identity")
@@ -90,15 +121,20 @@ func (l *Limiter) ResetBreaker(_ context.Context, tenant, approver string) (mode
 	if b == nil {
 		return l.status(tenant), model.ErrBreakerNotOpen
 	}
-	if slices.ContainsFunc(b.Votes, func(v model.BreakerVote) bool { return v.Approver == approver }) {
-		return l.status(tenant), nil
+	now := l.clock()
+	live, expired := splitVotes(b.Votes, now)
+	if slices.ContainsFunc(live, func(v model.BreakerVote) bool { return v.Approver == approver }) {
+		return l.status(tenant), model.ErrDuplicateVote
+	}
+	var entries []*model.AuditEntry
+	if len(expired) > 0 {
+		entries = append(entries, &model.AuditEntry{Type: model.AuditBreaker, Body: map[string]any{
+			"event": BreakerVoteExpired, "tenant": tenant, "trip_request_id": b.TripRequestID,
+			"expired": expired, "vote_ttl": model.BreakerVoteTTL.String()}})
 	}
 	next := *b
-	next.Votes = append(slices.Clone(b.Votes), model.BreakerVote{Approver: approver, At: l.clock()})
-	approvers := make([]string, len(next.Votes))
-	for i, v := range next.Votes {
-		approvers[i] = v.Approver
-	}
+	next.Votes = append(live, model.BreakerVote{Approver: approver, At: now, ExpiresAt: now.Add(model.BreakerVoteTTL)})
+	approvers := approverIDs(next.Votes)
 	body := map[string]any{"event": BreakerResetVote, "tenant": tenant, "trip_request_id": b.TripRequestID,
 		"approver": approver, "approvers": approvers, "votes": len(next.Votes), "quorum": l.quorum}
 	closing := len(next.Votes) >= l.quorum
@@ -107,8 +143,9 @@ func (l *Limiter) ResetBreaker(_ context.Context, tenant, approver string) (mode
 		body["event"] = BreakerReset
 		stored = model.BreakerStatus{Tenant: tenant, Votes: []model.BreakerVote{}, Quorum: l.quorum}
 	}
+	entries = append(entries, &model.AuditEntry{Type: model.AuditBreaker, Body: body})
 	// Durable before visible: closing loosens, so it must never happen unrecorded.
-	if err := l.store.PutBreaker(stored, &model.AuditEntry{Type: model.AuditBreaker, Body: body}); err != nil {
+	if err := l.store.PutBreaker(stored, entries...); err != nil {
 		return l.status(tenant), fmt.Errorf("%w: breaker %s not recorded: %v", engine.ErrAuditUnavailable, body["event"], err)
 	}
 	if closing {

@@ -37,6 +37,7 @@ import (
 	"github.com/NikhilSetiya/stopbar/internal/enrich"
 	"github.com/NikhilSetiya/stopbar/internal/gateway"
 	"github.com/NikhilSetiya/stopbar/internal/limiter"
+	"github.com/NikhilSetiya/stopbar/internal/model"
 	"github.com/NikhilSetiya/stopbar/internal/nonce"
 	"github.com/NikhilSetiya/stopbar/internal/policy"
 	"github.com/NikhilSetiya/stopbar/internal/signer"
@@ -56,7 +57,7 @@ func main() {
 	tenant := flag.String("tenant", "test", "tenant this deployment serves (decision tokens are scoped to it)")
 	authKeys := flag.String("auth-keys", "", "API key store (JSON array of `stopbar keygen api-key` records); enables authentication and non-loopback listening")
 	ratePerMin := flag.Int("rate-per-min", 0, "per-identity request cap per minute (0: no gateway cap)")
-	breakerQuorum := flag.Int("breaker-quorum", limiter.DefaultBreakerQuorum, "distinct approver keys needed to reset a tripped circuit breaker (M of N)")
+	breakerQuorum := flag.Int("breaker-quorum", limiter.DefaultBreakerQuorum, "distinct approver keys needed to reset a tripped circuit breaker (M of N, at least 2; each vote counts for 1h)")
 	configPath := flag.String("config", "", "config file (JSON); its fields set any flag not also given on the command line")
 	flag.Parse()
 	if *showVersion {
@@ -73,8 +74,8 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	if *breakerQuorum < 1 {
-		log.Error("stopbard config", "err", "-breaker-quorum must be at least 1")
+	if *breakerQuorum < model.MinBreakerQuorum {
+		log.Error("stopbard config", "err", fmt.Sprintf("-breaker-quorum must be at least %d distinct approvers", model.MinBreakerQuorum))
 		os.Exit(1)
 	}
 	if err := serve(*listen, *stateDir, devOpts{world: *devWorld, policies: *policies, decisionKey: *decisionKey,

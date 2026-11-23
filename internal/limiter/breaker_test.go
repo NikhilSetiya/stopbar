@@ -3,6 +3,7 @@ package limiter
 import (
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -87,12 +88,14 @@ func TestCircuitBreakerTripAndQuorumReset(t *testing.T) {
 		t.Fatalf("status %+v %v", st, err)
 	}
 
-	// Insufficient signatures: one vote (twice) is refused.
-	for range 2 {
-		st, err := l.ResetBreaker(bg, "acme", "ak_alice")
-		if err != nil || !st.Open || len(st.Votes) != 1 {
-			t.Fatalf("one vote: %+v %v", st, err)
-		}
+	// Insufficient signatures: one vote leaves it open; the same identity
+	// voting again is refused and writes nothing.
+	st, err := l.ResetBreaker(bg, "acme", "ak_alice")
+	if err != nil || !st.Open || len(st.Votes) != 1 {
+		t.Fatalf("one vote: %+v %v", st, err)
+	}
+	if st, err := l.ResetBreaker(bg, "acme", "ak_alice"); !errors.Is(err, model.ErrDuplicateVote) || len(st.Votes) != 1 {
+		t.Fatalf("repeat vote: %+v %v", st, err)
 	}
 	wantErr(t, l.Reserve(bg, "r6", req(walletA, dest, "1", "1", true), time.Minute, nil), engine.ErrCircuitOpen)
 	if _, err := l.ResetBreaker(bg, "acme", ""); err == nil {
@@ -103,7 +106,7 @@ func TestCircuitBreakerTripAndQuorumReset(t *testing.T) {
 	_ = db.Close()
 	l, db = openBolt(t, path, c, 2)
 	defer func() { _ = db.Close() }()
-	st, err := l.ResetBreaker(bg, "acme", "ak_bob")
+	st, err = l.ResetBreaker(bg, "acme", "ak_bob")
 	if err != nil || st.Open || len(st.Votes) != 0 {
 		t.Fatalf("quorum vote: %+v %v", st, err)
 	}
@@ -132,6 +135,66 @@ func TestCircuitBreakerTripAndQuorumReset(t *testing.T) {
 	}
 }
 
+// Votes expire after model.BreakerVoteTTL: an expired vote no longer counts
+// (and shows as expired in the status), so a vote, a wait of more than an hour
+// and a second vote leave the breaker open. The next vote discards the expired
+// one, audited in the same transaction. Two fresh distinct votes close it.
+func TestBreakerVotesExpire(t *testing.T) {
+	c := newClock()
+	l, db := openBolt(t, filepath.Join(t.TempDir(), "state.db"), c, 2)
+	defer func() { _ = db.Close() }()
+	wantErr(t, l.Reserve(bg, "trip", req(walletA, dest, "101", "1", true), time.Minute, nil), engine.ErrCircuitOpen)
+
+	if _, err := l.ResetBreaker(bg, "acme", "ak_alice"); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(model.BreakerVoteTTL - time.Second)
+	if st := l.BreakerStatus("acme"); len(st.Votes) != 1 || len(st.ExpiredVotes) != 0 {
+		t.Fatalf("vote expired early: %+v", st)
+	}
+	c.Advance(2 * time.Second) // > 1h after alice voted
+	st := l.BreakerStatus("acme")
+	if len(st.Votes) != 0 || len(st.ExpiredVotes) != 1 || st.ExpiredVotes[0].Approver != "ak_alice" || st.Validate() != nil {
+		t.Fatalf("expiry not visible in status: %+v %v", st, st.Validate())
+	}
+	st, err := l.ResetBreaker(bg, "acme", "ak_bob")
+	if err != nil || !st.Open || len(st.Votes) != 1 || len(st.ExpiredVotes) != 0 {
+		t.Fatalf("second vote after the first expired must leave it open: %+v %v", st, err)
+	}
+	wantErr(t, l.Reserve(bg, "r1", req(walletA, dest, "1", "1", true), time.Minute, nil), engine.ErrCircuitOpen)
+	// Alice's vote expired, so she may vote afresh: two live distinct votes close it.
+	st, err = l.ResetBreaker(bg, "acme", "ak_alice")
+	if err != nil || st.Open {
+		t.Fatalf("two fresh distinct votes: %+v %v", st, err)
+	}
+	mustReserve(t, l, "r2", req(walletA, dest, "1", "1", true))
+
+	recs, err := audit.Records(db, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []string
+	for _, r := range recs {
+		if r.Type == model.AuditBreaker {
+			events = append(events, r.Body.(map[string]any)["event"].(string))
+		}
+	}
+	want := []string{BreakerTrip, BreakerResetVote, BreakerVoteExpired, BreakerResetVote, BreakerReset}
+	if !slices.Equal(events, want) {
+		t.Fatalf("breaker audit events %v, want %v", events, want)
+	}
+	// The discard and the vote that found it share one transaction: adjacent
+	// records, the discard followed by bob's vote.
+	for i, r := range recs {
+		if r.Type == model.AuditBreaker && r.Body.(map[string]any)["event"] == BreakerVoteExpired {
+			next := recs[i+1].Body.(map[string]any)
+			if next["event"] != BreakerResetVote || next["approver"] != "ak_bob" {
+				t.Fatalf("discard not written with bob's vote: %+v", next)
+			}
+		}
+	}
+}
+
 // A trip that cannot be recorded still opens the breaker (failing closed) and
 // reports the audit failure; a reset that cannot be recorded changes nothing.
 func TestCircuitBreakerFailsClosedWithoutAudit(t *testing.T) {
@@ -154,6 +217,8 @@ func TestCircuitBreakerConfig(t *testing.T) {
 		"breaker off tenant scope": {Rules: []Rule{{Scope: ScopeWallet, Window: "1h", MaxUSD: "1", CircuitBreaker: true}}},
 		"breaker per tx":           {Rules: []Rule{{Scope: ScopeTenant, Window: WindowTx, MaxUSD: "1", CircuitBreaker: true}}},
 		"negative quorum":          {BreakerQuorum: -1},
+		"quorum of one":            {BreakerQuorum: 1},
+		"breaker as soft cap":      {Rules: []Rule{{Scope: ScopeTenant, Window: "1h", MaxUSD: "1", CircuitBreaker: true, Escalate: true}}},
 	} {
 		if _, err := New(cfg); err == nil {
 			t.Errorf("%s: accepted", name)

@@ -77,7 +77,7 @@ func TestBreakerStatusValidate(t *testing.T) {
 	at := time.Now()
 	open := func() BreakerStatus {
 		return BreakerStatus{Tenant: "t", Open: true, TrippedAt: &at, TripRequestID: "req_1", Reason: "cap",
-			Votes: []BreakerVote{{Approver: "ak_1", At: at}}, Quorum: 2}
+			Votes: []BreakerVote{{Approver: "ak_1", At: at, ExpiresAt: at.Add(BreakerVoteTTL)}}, Quorum: 2}
 	}
 	cases := map[string]struct {
 		mut  func(*BreakerStatus)
@@ -88,11 +88,18 @@ func TestBreakerStatusValidate(t *testing.T) {
 		"everything wrong": {func(b *BreakerStatus) {
 			b.Tenant, b.Quorum, b.TrippedAt = "", 0, nil
 			b.Votes = append(b.Votes, BreakerVote{Approver: "ak_1"}, BreakerVote{})
-		}, []string{"tenant", "quorum", "exactly when open", "voted twice", "approver is required"}},
+		}, []string{"tenant", "quorum", "exactly when open", "voted twice", "approver is required", "expires_at must be after at"}},
+		"quorum below two": {func(b *BreakerStatus) { b.Quorum = 1 }, []string{"quorum must be at least 2"}},
+		"open at quorum": {func(b *BreakerStatus) {
+			b.Votes = append(b.Votes, BreakerVote{Approver: "ak_2", At: at, ExpiresAt: at.Add(BreakerVoteTTL)})
+		}, []string{"quorum of live reset votes"}},
+		"expired votes do not count": {func(b *BreakerStatus) {
+			b.ExpiredVotes = []BreakerVote{{Approver: "ak_2", At: at.Add(-2 * time.Hour), ExpiresAt: at.Add(-time.Hour)}}
+		}, nil},
+		"bad expired vote": {func(b *BreakerStatus) { b.ExpiredVotes = []BreakerVote{{Approver: "ak_2"}} }, []string{"expired_votes[0]"}},
 		"closed with votes": {func(b *BreakerStatus) {
 			b.Open, b.TrippedAt, b.TripRequestID, b.Reason = false, nil, "", ""
 		}, []string{"no reset votes"}},
-		"open at quorum": {func(b *BreakerStatus) { b.Quorum = 1 }, []string{"quorum of reset votes"}},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

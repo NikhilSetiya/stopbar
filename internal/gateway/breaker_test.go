@@ -31,7 +31,7 @@ func (f *fakeBreaker) BreakerStatus(tenant string) model.BreakerStatus {
 		at := time.Unix(0, 0).UTC()
 		st.Open, st.TrippedAt, st.TripRequestID, st.Reason = true, &at, "req_1", "tenant 1h USD cap 100 (circuit breaker)"
 		for _, v := range f.votes {
-			st.Votes = append(st.Votes, model.BreakerVote{Approver: v, At: at})
+			st.Votes = append(st.Votes, model.BreakerVote{Approver: v, At: at, ExpiresAt: at.Add(model.BreakerVoteTTL)})
 		}
 	}
 	return st
@@ -43,9 +43,10 @@ func (f *fakeBreaker) ResetBreaker(ctx context.Context, tenant, approver string)
 	if !f.open || tenant != "acme" {
 		return f.BreakerStatus(tenant), model.ErrBreakerNotOpen
 	}
-	if !slices.Contains(f.votes, approver) {
-		f.votes = append(f.votes, approver)
+	if slices.Contains(f.votes, approver) {
+		return f.BreakerStatus(tenant), model.ErrDuplicateVote
 	}
+	f.votes = append(f.votes, approver)
 	if len(f.votes) >= 2 {
 		f.open, f.votes = false, nil
 	}
@@ -118,20 +119,22 @@ func TestBreakerEndpoints(t *testing.T) {
 		t.Fatalf("rejections audited %v, votes %v", audited, fb.votes)
 	}
 
-	// Insufficient signatures: one approver (twice) is 202, breaker still open.
-	for range 2 {
-		status, b := call(t, gw, http.MethodPost, reset, "sk_alice")
-		var st model.BreakerStatus
-		if err := json.Unmarshal(b, &st); err != nil || status != http.StatusAccepted || !st.Open || len(st.Votes) != 1 {
-			t.Fatalf("one vote: %d %s", status, b)
-		}
+	// Insufficient signatures: one approver is 202, breaker still open; the
+	// same approver again is refused (409 DUPLICATE_VOTE).
+	status, b := call(t, gw, http.MethodPost, reset, "sk_alice")
+	var st model.BreakerStatus
+	if err := json.Unmarshal(b, &st); err != nil || status != http.StatusAccepted || !st.Open || len(st.Votes) != 1 {
+		t.Fatalf("one vote: %d %s", status, b)
+	}
+	if status, b := call(t, gw, http.MethodPost, reset, "sk_alice"); status != http.StatusConflict || errCode(t, b) != CodeDuplicateVote {
+		t.Fatalf("repeat vote: %d %s", status, b)
 	}
 	if status, b := call(t, gw, http.MethodGet, "/v1/breakers/acme", "sk_bob"); status != http.StatusOK || !json.Valid(b) {
 		t.Fatalf("status: %d %s", status, b)
 	}
 	// Quorum: the second distinct approver closes it (200).
-	status, b := call(t, gw, http.MethodPost, reset, "sk_bob")
-	var st model.BreakerStatus
+	status, b = call(t, gw, http.MethodPost, reset, "sk_bob")
+	st = model.BreakerStatus{}
 	if err := json.Unmarshal(b, &st); err != nil || status != http.StatusOK || st.Open || st.Validate() != nil {
 		t.Fatalf("quorum vote: %d %s", status, b)
 	}

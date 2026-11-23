@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -61,13 +62,13 @@ func fromRecord(r Record) (*entry, error) {
 // transaction as r: both durable, or neither.
 //
 // PutBreaker stores a tenant's circuit breaker (an open one is kept, a closed
-// one removed) with its audit record in the same transaction. LoadBreakers
+// one removed) with its audit records in the same transaction. LoadBreakers
 // returns every open breaker.
 type Store interface {
 	Put(r Record, entry *model.AuditEntry) error
 	Delete(ids []string) error
 	Load() ([]Record, error)
-	PutBreaker(b model.BreakerStatus, entry *model.AuditEntry) error
+	PutBreaker(b model.BreakerStatus, entries ...*model.AuditEntry) error
 	LoadBreakers() ([]model.BreakerStatus, error)
 }
 
@@ -87,7 +88,7 @@ func (MemStore) Load() ([]Record, error) { return nil, nil }
 
 // PutBreaker refuses: every breaker change is audited, and MemStore cannot
 // audit. A trip still opens in memory (failing closed); a reset is refused.
-func (MemStore) PutBreaker(model.BreakerStatus, *model.AuditEntry) error {
+func (MemStore) PutBreaker(model.BreakerStatus, ...*model.AuditEntry) error {
 	return errors.New("limiter: MemStore cannot record circuit breaker changes")
 }
 func (MemStore) LoadBreakers() ([]model.BreakerStatus, error) { return nil, nil }
@@ -114,8 +115,8 @@ func NewBoltStore(db *store.DB, log *audit.Log) (*BoltStore, error) {
 	return &BoltStore{db: db, log: log}, nil
 }
 
-func (s *BoltStore) PutBreaker(b model.BreakerStatus, entry *model.AuditEntry) error {
-	if entry == nil || s.log == nil {
+func (s *BoltStore) PutBreaker(b model.BreakerStatus, entries ...*model.AuditEntry) error {
+	if len(entries) == 0 || slices.Contains(entries, nil) || s.log == nil {
 		return errors.New("limiter: circuit breaker changes must be audited")
 	}
 	v, err := json.Marshal(b)
@@ -132,7 +133,12 @@ func (s *BoltStore) PutBreaker(b model.BreakerStatus, entry *model.AuditEntry) e
 		if err != nil {
 			return err
 		}
-		return s.log.AppendTx(tx, *entry)
+		for _, e := range entries {
+			if err := s.log.AppendTx(tx, *e); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 

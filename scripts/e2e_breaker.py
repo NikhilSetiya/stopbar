@@ -9,7 +9,7 @@ denied CIRCUIT_OPEN); the second approver closes it and the same transfer is
 allowed and signed. After shutdown the audit log must verify, covered, with
 the breaker's trip, vote and reset recorded. Needs: pyyaml.
 """
-import json, os, subprocess, sys, tempfile, urllib.error, urllib.request
+import datetime, json, os, subprocess, sys, tempfile, urllib.error, urllib.request
 import yaml
 from corpus_template import Templater
 
@@ -46,6 +46,9 @@ def codes(d):
     return [r.get("code") for r in d.get("reasons", [])]
 
 
+q1 = subprocess.run([stopbard, "-listen", "127.0.0.1:0", "-breaker-quorum", "1"], capture_output=True, text=True, timeout=10)
+expect(q1.returncode != 0 and "at least 2" in q1.stderr, "stopbard refuses -breaker-quorum 1 (a reset needs 2 distinct approvers)")
+
 with tempfile.TemporaryDirectory() as tmp:
     world, wallet, keys_file, state, jwks = (os.path.join(tmp, f) for f in ("world.json", "wallet", "api-keys.json", "state", "keys.json"))
     json.dump(entry["setup"], open(world, "w"))
@@ -76,6 +79,14 @@ with tempfile.TemporaryDirectory() as tmp:
 
         r = breaker("reset", "--key", alice)
         expect(r.returncode != 0 and "reset refused: 1 of 2" in r.stderr, "reset with 1 of 2 approver signatures refused")
+        r = breaker("reset", "--key", alice)
+        expect(r.returncode != 0 and "409" in r.stderr and "DUPLICATE_VOTE" in r.stderr, "the same approver voting again is refused (409 DUPLICATE_VOTE)")
+        req = urllib.request.Request(f"{url}/v1/breakers/test", headers={"Authorization": "Bearer " + bob})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            vs = json.loads(resp.read())["votes"]
+        at, exp = (datetime.datetime.fromisoformat(vs[0][k].replace("Z", "+00:00")) for k in ("at", "expires_at"))
+        expect(len(vs) == 1 and exp - at == datetime.timedelta(hours=1),
+               "GET /v1/breakers/test shows the live vote expiring 1h after it was cast (expired votes stop counting)")
         st, d = evaluate(addr, agent, steps[2])
         expect(st == 403 and "CIRCUIT_OPEN" in codes(d), "a $0.48 transfer is still denied CIRCUIT_OPEN")
         r = breaker("reset", "--key", agent)

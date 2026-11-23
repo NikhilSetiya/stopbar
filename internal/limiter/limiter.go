@@ -117,7 +117,7 @@ type rule struct {
 
 // DefaultBreakerQuorum is how many distinct approvers must vote to reset a
 // tripped breaker when Config.BreakerQuorum is unset.
-const DefaultBreakerQuorum = 2
+const DefaultBreakerQuorum = model.MinBreakerQuorum
 
 // Config wires a Limiter.
 type Config struct {
@@ -197,8 +197,8 @@ func New(cfg Config) (*Limiter, error) {
 	switch {
 	case l.quorum == 0:
 		l.quorum = DefaultBreakerQuorum
-	case l.quorum < 0:
-		return nil, errors.New("limiter: breaker quorum must be ≥ 1")
+	case l.quorum < model.MinBreakerQuorum:
+		return nil, fmt.Errorf("limiter: breaker quorum must be at least %d distinct approvers", model.MinBreakerQuorum)
 	}
 	open, err := l.store.LoadBreakers()
 	if err != nil {

@@ -116,6 +116,7 @@ const (
 	CodeIdentityMismatch  Code = "IDENTITY_MISMATCH" // body tenant/agent != authenticated identity
 	CodeForbiddenScope    Code = "FORBIDDEN_SCOPE"   // the key lacks the required scope
 	CodeRateLimited       Code = "RATE_LIMITED"      // per-identity rate limit exceeded
+	CodeDuplicateVote     Code = "DUPLICATE_VOTE"    // CS-124: the approver already holds a live breaker reset vote
 )
 
 // ClockSkew is how far issued_at may lead or trail the gateway clock (LLD §4).
@@ -151,6 +152,7 @@ var codeStatus = map[Code]int{
 	CodeIdentityMismatch:  http.StatusForbidden,
 	CodeForbiddenScope:    http.StatusForbidden,
 	CodeRateLimited:       http.StatusTooManyRequests,
+	CodeDuplicateVote:     http.StatusConflict,
 }
 
 // ErrorBody is the wire shape of every non-2xx response (LLD §4.1).
@@ -393,6 +395,9 @@ func (g *Gateway) breakerReset(w http.ResponseWriter, r *http.Request) error {
 	st, err := g.breaker.ResetBreaker(auth.WithIdentity(r.Context(), id), tenant, id.KeyID)
 	if errors.Is(err, model.ErrBreakerNotOpen) {
 		return fail(CodeNotFound, "the circuit breaker for tenant %q is not open", tenant)
+	}
+	if errors.Is(err, model.ErrDuplicateVote) {
+		return fail(CodeDuplicateVote, "approver %s already holds a live reset vote on this trip; a second distinct approver must vote", id.KeyID)
 	}
 	if err != nil {
 		g.log.Error("breaker reset failed", "tenant", tenant, "approver", id.KeyID, "err", err)
