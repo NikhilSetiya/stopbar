@@ -18,7 +18,8 @@
 //
 // Sliding windows use 60 sub-buckets each, counted conservatively: a spend
 // stays in a window for up to one sub-bucket (window/60) longer than the
-// window itself, and never for less.
+// window itself, and never for less. Rules with window "tx" are hard
+// per-transaction caps (USD, units, share of balance; CS-123).
 package limiter
 
 import (
@@ -63,15 +64,26 @@ var (
 	ErrReservationExpired   = engine.ErrReservationExpired
 	ErrDuplicateReservation = errors.New("limiter: request ID was already used for a finished reservation")
 	ErrAlreadyCommitted     = errors.New("limiter: reservation is already committed")
+	// ErrNoBalance: a max_pct_of_balance cap applies to a request that moves
+	// value, but its share of the balance is unknown. It fails closed.
+	ErrNoBalance = errors.New("limiter: a balance-share cap applies but the request has no pct_of_balance")
 )
 
-// Rule is one cap. At least one of MaxUSD, MaxCount and MaxUnits must be set.
+// WindowTx is the per-transaction window: a rule with it caps one request on
+// its own (CS-123, FR-LIM-1) and accumulates nothing.
+const WindowTx = "tx"
+
+// Rule is one cap. At least one of MaxUSD, MaxCount, MaxUnits and
+// MaxPctOfBalance must be set.
 type Rule struct {
 	Scope    Scope  `json:"scope"`
-	Window   string `json:"window"`              // "1m", "1h" or "24h"
+	Window   string `json:"window"`              // "1m", "1h", "24h", or "tx" (per transaction)
 	MaxUSD   string `json:"max_usd,omitempty"`   // decimal string, ≤ 6 fractional digits
-	MaxCount int64  `json:"max_count,omitempty"` // transactions
+	MaxCount int64  `json:"max_count,omitempty"` // transactions; not on "tx"
 	MaxUnits string `json:"max_units,omitempty"` // raw token units; wallet+asset only
+	// MaxPctOfBalance caps one request's share of the wallet's balance of the
+	// moved asset (decimal fraction, e.g. "0.5" = 50%). "tx" window only.
+	MaxPctOfBalance string `json:"max_pct_of_balance,omitempty"`
 	// UnknownDestinationsOnly applies a destination rule only when the
 	// destination is not known (salami draining, FR-LIM-2a).
 	UnknownDestinationsOnly bool `json:"unknown_destinations_only,omitempty"`
@@ -79,9 +91,11 @@ type Rule struct {
 
 type rule struct {
 	Rule
-	window   int // index into Windows
+	window   int // index into Windows; -1 for a per-transaction rule
+	perTx    bool
 	maxUSD   *big.Int
 	maxUnits *big.Int
+	maxPct   *big.Rat
 }
 
 // Config wires a Limiter.
@@ -178,17 +192,34 @@ func compile(r Rule) (rule, error) {
 	if !valid {
 		return cr, fmt.Errorf("unknown scope %q", r.Scope)
 	}
-	d, err := time.ParseDuration(r.Window)
-	if err != nil {
-		return cr, fmt.Errorf("window: %w", err)
-	}
-	for i, w := range Windows {
-		if w == d {
-			cr.window = i
+	if r.Window == WindowTx {
+		cr.perTx = true
+		if r.MaxCount != 0 {
+			return cr, errors.New("max_count is meaningless on a per-transaction (tx) rule")
+		}
+	} else {
+		d, err := time.ParseDuration(r.Window)
+		if err != nil {
+			return cr, fmt.Errorf("window: %w", err)
+		}
+		for i, w := range Windows {
+			if w == d {
+				cr.window = i
+			}
+		}
+		if cr.window < 0 {
+			return cr, fmt.Errorf("window %s: must be one of 1m, 1h, 24h, tx", r.Window)
+		}
+		if r.MaxPctOfBalance != "" {
+			return cr, errors.New("max_pct_of_balance applies to one transaction: use window tx")
 		}
 	}
-	if cr.window < 0 {
-		return cr, fmt.Errorf("window %s: must be one of 1m, 1h, 24h", r.Window)
+	var err error
+	if r.MaxPctOfBalance != "" {
+		if !reUSD.MatchString(r.MaxPctOfBalance) {
+			return cr, fmt.Errorf("max_pct_of_balance %q: not a non-negative decimal string", r.MaxPctOfBalance)
+		}
+		cr.maxPct, _ = new(big.Rat).SetString(r.MaxPctOfBalance)
 	}
 	if r.MaxUSD != "" {
 		if cr.maxUSD, err = parseUSD(r.MaxUSD, false); err != nil {
@@ -208,7 +239,7 @@ func compile(r Rule) (rule, error) {
 	if r.MaxCount < 0 {
 		return cr, errors.New("max_count must be ≥ 0")
 	}
-	if cr.maxUSD == nil && cr.maxUnits == nil && r.MaxCount == 0 {
+	if cr.maxUSD == nil && cr.maxUnits == nil && cr.maxPct == nil && r.MaxCount == 0 {
 		return cr, errors.New("rule sets no cap")
 	}
 	if r.UnknownDestinationsOnly && r.Scope != ScopeDestination {
@@ -299,6 +330,36 @@ func amountOf(er model.EnrichedRequest) (amount, error) {
 	return amt, nil
 }
 
+// checkTx applies a per-transaction rule to one request on its own: its USD
+// spend (value + max fee), its raw units, and its share of the balance. These
+// are hard caps: unlike a policy escalation, a human approval cannot lift them.
+func checkTx(r rule, amt amount, er model.EnrichedRequest) error {
+	if r.maxUSD != nil {
+		if amt.usd == nil {
+			return fmt.Errorf("%w (%s per-tx cap)", ErrUnpriced, r.Scope)
+		}
+		if amt.usd.Cmp(r.maxUSD) > 0 {
+			return fmt.Errorf("%w: %s per-tx USD cap %s", engine.ErrCapExceeded, r.Scope, microToDecimal(r.maxUSD))
+		}
+	}
+	if r.maxUnits != nil && amt.units.Cmp(r.maxUnits) > 0 {
+		return fmt.Errorf("%w: %s per-tx unit cap %s", engine.ErrCapExceeded, r.Scope, r.maxUnits)
+	}
+	if r.maxPct != nil && amt.units.Sign() > 0 { // a call that moves nothing has no share
+		if er.PctOfBalance == nil {
+			return fmt.Errorf("%w (%s per-tx cap)", ErrNoBalance, r.Scope)
+		}
+		if !reUSD.MatchString(*er.PctOfBalance) {
+			return fmt.Errorf("limiter: pct_of_balance %q is not a non-negative decimal string", *er.PctOfBalance)
+		}
+		pct, _ := new(big.Rat).SetString(*er.PctOfBalance)
+		if pct.Cmp(r.maxPct) > 0 {
+			return fmt.Errorf("%w: %s per-tx balance-share cap %s", engine.ErrCapExceeded, r.Scope, r.MaxPctOfBalance)
+		}
+	}
+	return nil
+}
+
 // Reserve implements engine.Limiter: all caps checked on all keys, then all
 // keys updated, or nothing.
 func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest, ttl time.Duration, ae *model.AuditEntry) error {
@@ -322,6 +383,12 @@ func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest
 	ks := keys(er)
 	for _, r := range l.rules {
 		if r.UnknownDestinationsOnly && er.Destination.Known {
+			continue
+		}
+		if r.perTx {
+			if err := checkTx(r, amt, er); err != nil {
+				return err
+			}
 			continue
 		}
 		key := ks[r.Scope]

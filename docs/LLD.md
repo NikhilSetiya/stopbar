@@ -400,6 +400,13 @@ Template per `kind`, amounts formatted with decimals and USD, addresses shortene
 
 Key = `(tenant, scope, id, window)` where scope ∈ {`agent`, `wallet`, `wallet+asset`, `destination`, `tenant`}. `destination` scope carries a `max_count` by default (e.g. 5 per 24h for non-allowlisted destinations) so salami draining below per-tx caps is bounded. Windows: 1m, 1h, 24h (configurable).
 
+**Per-transaction caps** (CS-123, FR-LIM-1) use window `tx`: they judge one request on its own and accumulate nothing. They take `max_usd` (value + max fee, like every USD cap), `max_units` (wallet+asset) and `max_pct_of_balance` (`tx` only; a decimal fraction of the wallet's balance of the moved asset). A `tx` rule can't take `max_count`. An unknown balance on a request that moves value is `ErrNoBalance` and fails closed (`FAIL_CLOSED_LIMITER`), like `ErrUnpriced`.
+
+Size is capped twice, on purpose:
+
+- **Soft, in policy context.** `amount_usd` and `pct_of_balance` (§3.3) let a policy escalate, as the starter pack's `large-share-of-balance` does above 20%. That's how the OpenClaw fixture (CS-2026-0002) escalates.
+- **Hard, in limiter config.** A `tx` rule denies with `CAP_EXCEEDED`. Escalations reserve nothing, so a hard cap doesn't change an escalation, but approval (CS-151) re-runs the limiter. A human can waive an escalation, never a cap. Hard caps hold at T3/T4. Policy thresholds hold only as far as the policy author's numbers.
+
 ### 7.2 Algorithm — sliding window with sub-buckets
 
 Each window is stored as 60 sub-buckets (e.g. 1h → 60 × 1m). Current usage = sum of committed + reserved in live sub-buckets.
@@ -639,7 +646,8 @@ tenant: acme
 listen: 127.0.0.1:7777
 store: {kind: bbolt, path: ./data/cs.db}
 policy: {bundle: ./policies, cooling_off_loosen: 24h, activation_quorum: 1}
-limits:                     # internal/limiter Rule; window ∈ 1m | 1h | 24h
+limits:                     # internal/limiter Rule; window ∈ 1m | 1h | 24h | tx (per transaction)
+  - {scope: wallet, window: tx, max_usd: "2500", max_pct_of_balance: "0.5"}   # hard per-tx caps (CS-123)
   - {scope: wallet, window: 1h, max_usd: "5000", max_count: 50}
   - {scope: wallet+asset, window: 24h, max_units: "1000000000000000000000000"}   # raw units; holds with no price
   - {scope: destination, window: 24h, max_count: 5, unknown_destinations_only: true}
