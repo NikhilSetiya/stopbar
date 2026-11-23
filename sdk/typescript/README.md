@@ -48,7 +48,7 @@ an allow. An unreachable server, a timeout or any non-decision response rejects
 with `StopbarUnavailable`: treat it as a deny.
 
 Outside gatekeeper mode, report what happened to an allowed action so its limiter
-reservation is committed or released: `sb.commit(requestId, txHash)` /
+reservation is committed or released: `sb.commit(requestId, txRef)` /
 `sb.release(requestId)` (`POST /v1/actions/{id}/commit|release`, LLD §4.1).
 
 ### Provenance labels (taint)

@@ -151,16 +151,16 @@ class Client:
         status, decoded = self._post(f"/v1/approvals/{request_id}", None)
         return self._decision(status, decoded)
 
-    def commit(self, request_id: str, tx_hash: str) -> dict[str, Any]:
+    def commit(self, request_id: str, tx_ref: str) -> dict[str, Any]:
         """Report that an allowed action was broadcast, committing its limiter
         reservation (LLD §4.1 ``POST /v1/actions/{id}/commit``). Raises
         StopbarAuthError or StopbarUnavailable on anything but a 2xx."""
-        return self._ack(*self._post(f"/v1/actions/{request_id}/commit", {"tx_hash": tx_hash}))
+        return self._ack(*self._post(f"/v1/actions/{request_id}/commit", {"tx_ref": tx_ref}))
 
-    def release(self, request_id: str) -> dict[str, Any]:
+    def release(self, request_id: str, reason: str | None = None) -> dict[str, Any]:
         """Abandon an allowed action, releasing its limiter reservation (LLD
         §4.1 ``POST /v1/actions/{id}/release``)."""
-        return self._ack(*self._post(f"/v1/actions/{request_id}/release", None))
+        return self._ack(*self._post(f"/v1/actions/{request_id}/release", {} if reason is None else {"reason": reason}))
 
     # ---- internals ----
 

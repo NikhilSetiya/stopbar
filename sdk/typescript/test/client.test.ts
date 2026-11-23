@@ -96,15 +96,22 @@ test("timeout fails closed", async () => {
 });
 
 test("commit and release hit the LLD routes", async () => {
-  const m = await serve((p) => [200, { request_id: p.split("/")[3], status: "ok" }]);
+  const m = await serve((p) => [200, { state: p.endsWith("/commit") ? "committed" : "released" }]);
   const sb = client(m, { apiKey: "k" });
-  assert.equal((await sb.commit("req_1", "0x" + "ab".repeat(32))).status, "ok");
-  await sb.release("req_2");
-  assert.deepEqual(m.seen, [["/v1/actions/req_1/commit", { tx_hash: "0x" + "ab".repeat(32) }], ["/v1/actions/req_2/release", null]]);
+  assert.equal((await sb.commit("req_1", "0x" + "ab".repeat(32))).state, "committed");
+  assert.equal((await sb.release("req_2")).state, "released");
+  await sb.release("req_3", "broadcast failed");
+  assert.deepEqual(m.seen, [
+    ["/v1/actions/req_1/commit", { tx_ref: "0x" + "ab".repeat(32) }],
+    ["/v1/actions/req_2/release", {}],
+    ["/v1/actions/req_3/release", { reason: "broadcast failed" }],
+  ]);
   assert.equal(m.last.auth, "Bearer k");
 });
 
 test("commit and release fail closed", async () => {
-  await assert.rejects(client(await serve(() => [404, { code: "NOT_FOUND" }])).commit("req_1", "0x" + "ab".repeat(32)), StopbarUnavailable);
+  for (const [status, code] of [[404, "NOT_FOUND"], [409, "CONFLICT"], [410, "RESERVATION_EXPIRED"]] as const) {
+    await assert.rejects(client(await serve(() => [status, { code }])).commit("req_1", "0x" + "ab".repeat(32)), StopbarUnavailable);
+  }
   await assert.rejects(client(await serve(() => [403, { code: "FORBIDDEN_SCOPE" }])).release("req_1"), StopbarAuthError);
 });

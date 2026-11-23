@@ -120,16 +120,18 @@ export class Client {
   }
 
   /** Report that an allowed action was broadcast, committing its limiter
-   * reservation (LLD §4.1 `POST /v1/actions/{id}/commit`). Rejects with
-   * StopbarAuthError or StopbarUnavailable on anything but a 2xx. */
-  async commit(requestId: string, txHash: string): Promise<Record<string, unknown>> {
-    return this.ack(...(await this.post(`/v1/actions/${encodeURIComponent(requestId)}/commit`, { tx_hash: txHash })));
+   * reservation (LLD §4.1 `POST /v1/actions/{id}/commit`, body `{tx_ref}`).
+   * Idempotent for the same txRef. Rejects with StopbarAuthError, or
+   * StopbarUnavailable on anything else but a 2xx (e.g. 409 for a different
+   * txRef, 404 for a released/unknown id). */
+  async commit(requestId: string, txRef: string): Promise<Record<string, unknown>> {
+    return this.ack(...(await this.post(`/v1/actions/${encodeURIComponent(requestId)}/commit`, { tx_ref: txRef })));
   }
 
   /** Abandon an allowed action, releasing its limiter reservation (LLD §4.1
-   * `POST /v1/actions/{id}/release`). */
-  async release(requestId: string): Promise<Record<string, unknown>> {
-    return this.ack(...(await this.post(`/v1/actions/${encodeURIComponent(requestId)}/release`)));
+   * `POST /v1/actions/{id}/release`, optional body `{reason}`). */
+  async release(requestId: string, reason?: string): Promise<Record<string, unknown>> {
+    return this.ack(...(await this.post(`/v1/actions/${encodeURIComponent(requestId)}/release`, reason === undefined ? {} : { reason })));
   }
 
   private decision(status: number, body: Record<string, unknown>): Decision {

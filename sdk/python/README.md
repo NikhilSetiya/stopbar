@@ -64,7 +64,7 @@ Base64 and hex count only when they decode to readable text, so addresses, hashe
 and calldata don't trip it. `stopbar.detect_encodings(text)` exposes the detector.
 
 Outside gatekeeper mode, report what happened to an allowed action so its limiter
-reservation is committed or released: `sb.commit(request_id, tx_hash)` /
+reservation is committed or released: `sb.commit(request_id, tx_ref)` /
 `sb.release(request_id)` (`POST /v1/actions/{id}/commit|release`, LLD §4.1).
 
 > Labels are *claims* from the requester. In v1 they hold against an injected

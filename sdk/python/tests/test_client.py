@@ -128,8 +128,10 @@ def test_commit_and_release_hit_the_lld_routes():
     sb = client(srv, api_key="k")
     assert sb.commit("req_1", "0x" + "ab" * 32)["status"] == "ok"
     sb.release("req_2")
-    assert seen == [("/v1/actions/req_1/commit", {"tx_hash": "0x" + "ab" * 32}),
-                    ("/v1/actions/req_2/release", None)]
+    sb.release("req_3", "broadcast failed")
+    assert seen == [("/v1/actions/req_1/commit", {"tx_ref": "0x" + "ab" * 32}),
+                    ("/v1/actions/req_2/release", {}),
+                    ("/v1/actions/req_3/release", {"reason": "broadcast failed"})]
     assert srv.last_auth == "Bearer k"
 
 
