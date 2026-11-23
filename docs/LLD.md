@@ -21,7 +21,7 @@ stopbar/
 │   ├── model/               # ActionRequest, Decision, IntentSummary, AuditRecord
 │   ├── normalize/           # raw → ActionRequest
 │   ├── decode/evm/          # ABI decode, risk flags
-│   ├── enrich/              # price, balance, velocity snapshot, provenance, deploy age
+│   ├── enrich/              # price, balance, destination registry, slippage, provenance, deploy age
 │   ├── policy/              # Cedar schema, loader, evaluator, bundle hashing
 │   ├── limiter/             # sliding windows, reserve/commit, circuit breaker
 │   ├── escalate/            # routing, approvals, channels (cli, slack, telegram)
@@ -144,9 +144,12 @@ Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decod
   "destination": "0x…",
   "flags": ["new_destination"],          // see §6.2
   "human": "Transfer 50,000 DRB (~$174,000) on Base to 0x9f3…c21 (never seen before).",
+  "swap": null,                          // swaps only: {exact_in, token_in, amount_in, token_out, amount_out}
   "payload_hash": "sha256:…"
 }
 ```
+
+`swap` carries a swap's terms in raw units (token `""` = native) so the enricher can price both sides for `excessive_slippage` (§6.2). Exact-in: `amount_in` is exact and `amount_out` the minimum accepted. Exact-out: `amount_out` is exact and `amount_in` the most paid. Enrichers may append to `flags` (the registry and limiter flags below) but never change anything else in the intent.
 
 ### 3.3 EnrichedRequest (policy context)
 
@@ -156,8 +159,8 @@ Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decod
 | `pct_of_balance` | decimal | balance provider |
 | `approval_usd?` | decimal | price oracle. It's the value a **bounded** approval lets the spender move. It's absent for unlimited approvals and for anything that isn't an approval, so a policy must test `context has approval_usd`. An approval itself counts as $0 of spend (`amount_usd`); its risk lives in this field and in the decoder's flags. The starter pack's `bounded-approval` permits ≤ $1,000 to a known spender. |
 | `velocity.{1m,1h,24h}.usd` / `.count` | decimal/int | limiter snapshot |
-| `destination.known` | bool | destination registry |
-| `destination.similar_to_known` | bool | address-similarity check |
+| `destination.known` | bool | destination registry (§6.4). The sending wallet itself always counts as known. |
+| `destination.similar_to_known` | bool | address-similarity check against the registry (§6.4); false when known |
 | `taint` | set<string> | provenance |
 | `minutes_since_code_change` | int/null | deploy events (Phase 4) |
 | `intent.flags` | set<string> | decoder |
@@ -383,10 +386,12 @@ Implemented in `internal/decode/evm` (CS-141/142). It is stdlib-only, like the t
 | `wallet_admin` | Safe owner, threshold, module or guard change |
 | `third_party_from` | `transferFrom`-style move whose source isn't the sender (e.g. spending someone's allowance) |
 | `multi_transfer` | more than one outflow in one transaction |
-| `new_destination` / `similar_destination` / `first_time_contract` | need the tenant's registry, so they're added by the enricher (CS-133), not the decoder |
+| `new_destination` / `similar_destination` | added by the destination registry enricher (§6.4, CS-133), not the decoder: destination not registered (and not the sender) / not registered but similar to a registered address |
+| `first_time_contract` | needs a per-tenant record of contracts called (CS-142) |
 | `opaque` | nesting > depth, or a Universal Router command that isn't decoded |
 | `min_out_zero` | exact-in swap with minimum output 0 (Uniswap V2/V3 routers, SwapRouter02, Universal Router) |
-| `excessive_slippage` | swap minimum output below quoted output × (1 − tenant max slippage, default 3%). Needs a quote, so it's not implemented yet. |
+| `excessive_slippage` | added by the price enricher (CS-145): for any swap at any depth (`IntentSummary.swap`), the out side is worth less than (1 − tenant max slippage, default 3%) of the in side at oracle prices. Exact-in compares the minimum output with the input; exact-out the output with the maximum input. Wrapped native is priced as native. A swap whose tokens can't both be priced sets `price_stale`, so the starter pack escalates instead of trusting an unchecked limit. |
+| `soft_cap_exceeded` | added by the limiter: the request would cross a soft (`escalate`) cap (§7.3a) |
 | `excessive_fee` | fee terms above the chain's limits (`evm.Chains`) |
 | `unknown_call` | selector unknown |
 
@@ -394,11 +399,20 @@ Implemented in `internal/decode/evm` (CS-141/142). It is stdlib-only, like the t
 
 Template per `kind`, amounts formatted with decimals and USD, addresses shortened `0x9f3…c21` **plus** a 6-word checksum phrase derived from the full address (defeats visual look-alike). The rendered text and `payload_hash` are sent together; approvals sign over `payload_hash`.
 
+### 6.4 Destination registry (CS-133, FR-IR-2)
+
+Implemented in `internal/enrich` (`Registry`). It is an engine `Enricher`, wired after the price/balance enricher and before the limiter (whose unknown-destination caps read `destination.known`), in both the chain and the devstub configuration.
+
+- **Storage:** bucket `destinations_v1` in the shared state file, keyed by quoted tenant + lowercase address, value `{address, label, source, added_at}`. It is read on every evaluation, so a change applies to the next request.
+- **Audit:** every add or remove writes a `destination_change` record (`{op, tenant, address, label?, source}`) **in the same transaction** as the change. A no-op change (adding a registered address, removing an absent one) writes nothing.
+- **Facts:** `known` = the destination is registered for the request's tenant, or is the sending wallet. `similar_to_known` = not known, and it shares at least 4 leading **and** 4 trailing hex digits with a registered address, or at least 8 at either end (what wallets and explorers show; a random address matches by chance with probability ~3 × 16⁻⁸). A request with no destination is neither, and tool calls are skipped. The starter pack escalates `address-poisoning` (`dest_similar_to_known && !dest_known`).
+- **Changes:** `stopbar contacts add|remove <address> --state-dir DIR --tenant T [--label L] [--decision-key FILE]` and `stopbar contacts list`. They edit the state file directly, never over the API: registering a destination loosens policy, so it requires the operator's state directory, not a requester credential (a compromised requester, T3, could otherwise allowlist its own address). stopbard holds the file lock, so it must be stopped. `--decision-key` signs an audit checkpoint over the change; otherwise stopbard's next exit checkpoint covers it. With `-dev-world`, the world's `known_destinations` seed the registry for `-tenant` (added if missing, `source: dev-world`, audited).
+
 ## 7. Limiter
 
 ### 7.1 Keys and windows
 
-Key = `(tenant, scope, id, window)` where scope ∈ {`agent`, `wallet`, `wallet+asset`, `destination`, `tenant`}. `destination` scope carries a `max_count` by default (e.g. 5 per 24h for non-allowlisted destinations) so salami draining below per-tx caps is bounded. Windows: 1m, 1h, 24h (configurable).
+Key = `(tenant, scope, id, window)` where scope ∈ {`agent`, `wallet`, `wallet+asset`, `destination`, `tenant`}. `destination` scope carries a `max_count` by default (5 per 24h for destinations not in the registry, as a soft cap that escalates; CS-145) so salami draining below per-tx caps is bounded. Windows: 1m, 1h, 24h (configurable).
 
 ### 7.2 Algorithm — sliding window with sub-buckets
 
@@ -440,6 +454,8 @@ Amount is two-dimensional `{usd, count}`; caps can be set on either. Token-count
   - The engine treats unknown or expired IDs on its own best-effort release as "nothing held".
 - **Keys** quote each component, so requester-chosen tenant or agent IDs can't collide. Agent and tenant scopes are only as strong as authentication (CS-103), while wallet scopes are bound to the signing address.
 - **Velocity:** the limiter is also an `Enricher`. It supplies `velocity.{1m,1h,24h}` (committed + reserved, wallet scope) to policy.
+- **Soft caps (`escalate: true`, CS-145):** a rule that escalates instead of denying. The limiter's `Enrich` adds `soft_cap_exceeded` to the intent's flags when the request would exceed one (an unpriced request under a USD soft cap counts as exceeding it), and the starter pack escalates on it (`soft-cap-exceeded`). Approval re-runs enrichment and policy, so an approved request reaches `Reserve` flagged and is let past its soft caps; hard caps still apply. `Reserve` denies an **unflagged** request that would exceed a soft cap (one that raced past `Enrich`), so a soft cap is never crossed without a policy decision that saw the flag. The flag is only a fact: a bundle with no policy on it lets flagged requests through, so its soft caps are advisory (the starter pack escalates). The dev default is the salami cap `{scope: destination, window: 24h, max_count: 5, unknown_destinations_only: true, escalate: true}` (FR-LIM-2a).
+- **Destination rules** skip a request with no destination (nothing to count per destination), and `unknown_destinations_only` rules skip destinations the registry knows (§6.4).
 - **Sweeping costs O(lapsed):** an expiry heap plus a creation-ordered queue for retention (24h + one sub-bucket + max TTL).
 
 ### 7.4 Properties to test
@@ -542,6 +558,7 @@ Implemented in `internal/audit` (CS-171/172), per `spec/audit-hash-v1.md`.
   | `request` | the consumed nonce (gateway) |
   | `decision` (allow) | its reservation |
   | `commit` / `release` | the limiter commit or release |
+  | `destination_change` | the registry add or remove (§6.4) |
   | `decision` (deny/escalate) | nothing, so its own transaction |
 
 - **Append-only.** Records are keyed by big-endian `seq`, and `hash = sha256(JCS({v, seq, ts, type, body, prev_hash}))` via `canon.RecordHash`. No code path updates or deletes a record.
@@ -642,7 +659,8 @@ policy: {bundle: ./policies, cooling_off_loosen: 24h, activation_quorum: 1}
 limits:                     # internal/limiter Rule; window ∈ 1m | 1h | 24h
   - {scope: wallet, window: 1h, max_usd: "5000", max_count: 50}
   - {scope: wallet+asset, window: 24h, max_units: "1000000000000000000000000"}   # raw units; holds with no price
-  - {scope: destination, window: 24h, max_count: 5, unknown_destinations_only: true}
+  - {scope: destination, window: 24h, max_count: 5, unknown_destinations_only: true, escalate: true}   # salami soft cap
+max_slippage: "0.03"        # excessive_slippage threshold (fraction of the swap's value)
   - {scope: tenant, window: 1h, max_usd: "20000", circuit_breaker: true}
 prices: {sources: [chainlink, coingecko], staleness: 15s}
 decision_key: {provider: local, path: ./keys/decision.ed25519}
