@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"math/rand/v2"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -258,6 +259,69 @@ func TestUnknownDestinationCountCap(t *testing.T) {
 	wantErr(t, l.Reserve(bg, "u3", req(walletA, dest, "1", "1", false), time.Minute, nil), engine.ErrCapExceeded)
 	for i := range 5 {
 		mustReserve(t, l, fmt.Sprintf("k%d", i), req(walletA, "0xknown", "1", "1", true))
+	}
+}
+
+// The salami soft cap (CS-145, FR-LIM-2a): the 6th transfer in 24h to a new
+// destination is flagged soft_cap_exceeded by Enrich (policy escalates it),
+// not denied. Reserve lets a flagged request through (policy allowed it, i.e.
+// a human approved), but denies an unflagged one that would exceed the cap,
+// so a request that raced past Enrich can't cross it. Known destinations and
+// requests with no destination are not counted against it.
+func TestSoftCapFlagsInsteadOfDenying(t *testing.T) {
+	salami := Rule{Scope: ScopeDestination, Window: "24h", MaxCount: 5, UnknownDestinationsOnly: true, Escalate: true}
+	c := newClock()
+	l := newLimiter(t, c, salami)
+	enrich := func(er model.EnrichedRequest) model.EnrichedRequest {
+		t.Helper()
+		if err := l.Enrich(bg, &er); err != nil {
+			t.Fatal(err)
+		}
+		return er
+	}
+	flagged := func(er model.EnrichedRequest) bool { return slices.Contains(er.Intent.Flags, FlagSoftCap) }
+	for i := range 5 {
+		er := enrich(req(walletA, dest, "1", "1", false))
+		if flagged(er) {
+			t.Fatalf("transfer %d flagged under the cap", i+1)
+		}
+		id := fmt.Sprintf("s%d", i)
+		mustReserve(t, l, id, er)
+		if err := l.Commit(bg, id, "0x"+id, nil); err != nil {
+			t.Fatal(err)
+		}
+		c.Advance(time.Minute)
+	}
+	sixth := enrich(req(walletA, dest, "1", "1", false))
+	if !flagged(sixth) {
+		t.Fatal("6th transfer to a new destination not flagged")
+	}
+	// An unflagged copy (as if it raced past Enrich) is denied outright.
+	wantErr(t, l.Reserve(bg, "raced", req(walletA, dest, "1", "1", false), time.Minute, nil), engine.ErrCapExceeded)
+	// The flagged request reaches Reserve only if policy allowed it (approved).
+	mustReserve(t, l, "approved", sixth)
+
+	if er := enrich(req(walletA, "0xknown", "1", "1", true)); flagged(er) {
+		t.Fatal("known destination flagged")
+	}
+	noDest := req(walletA, "", "1", "1", false)
+	for i := range 7 {
+		er := enrich(noDest)
+		if flagged(er) {
+			t.Fatal("request with no destination flagged")
+		}
+		mustReserve(t, l, fmt.Sprintf("nd%d", i), er)
+	}
+	// After 24h (+ one sub-bucket) the window has rolled over.
+	c.Advance(24*time.Hour + 24*time.Minute)
+	if er := enrich(req(walletA, dest, "1", "1", false)); flagged(er) {
+		t.Fatal("still flagged after the window rolled over")
+	}
+	// A USD soft cap flags an unpriced request (it can't be shown to be under).
+	l2 := newLimiter(t, newClock(), Rule{Scope: ScopeWallet, Window: "1h", MaxUSD: "100", Escalate: true})
+	er := req(walletA, dest, "", "1", true)
+	if err := l2.Enrich(bg, &er); err != nil || !flagged(er) {
+		t.Fatalf("unpriced request under a USD soft cap: flags %v err %v", er.Intent.Flags, err)
 	}
 }
 
