@@ -91,6 +91,14 @@ gateway → normalize → decode intent (`decode/evm`) → enrich (price, balanc
 - `model` types expose `Validate()`, which reports every problem at once rather than stopping at the first. Round-trip tests run against `spec/fixtures`.
 - The highest-value outside contribution is an attack in `corpus/attacks/` (see `corpus/README.md`). Every real incident becomes a regression test.
 
+## Build discipline
+
+- **Build the specified component, not the smallest fix.** A task is done when it meets its acceptance criteria in `docs/TASKS.md` and the LLD section behind it. Don't shrink it to the issue in front of you, ship a workaround in place of the real component, or leave a devstub where the spec names a production part.
+- **No reasons for not building.** Don't argue a task out of scope, defer part of it, or explain why it can wait. If something truly blocks, state the blocker in one line and keep building everything else.
+- **Product first.** Phase 1 exit criteria (PRD §10) come before demos, research harnesses and release polish. The Phase 1R pilots (#98–#110) and demo work (#111–#123) are where the build drifted. Don't repeat it.
+- **Least code that fully meets the spec.** Reuse existing packages and helpers, delete what a change makes dead, and don't add speculative abstraction.
+- **Orchestration.** The lead session keeps the overview, splits work into one task per agent (own worktree and branch), and verifies each result against its acceptance criteria and `make e2e` before a PR goes up.
+
 ## Working with the maintainer
 
 Be brief and direct. Challenge weak reasoning. Prefer small, verified increments over big plans.
