@@ -56,6 +56,7 @@ func main() {
 	tenant := flag.String("tenant", "test", "tenant this deployment serves (decision tokens are scoped to it)")
 	authKeys := flag.String("auth-keys", "", "API key store (JSON array of `stopbar keygen api-key` records); enables authentication and non-loopback listening")
 	ratePerMin := flag.Int("rate-per-min", 0, "per-identity request cap per minute (0: no gateway cap)")
+	coolingOff := flag.Duration("contact-cooling-off", enrich.DefaultCoolingOff, "how long an approved destination-registry addition waits before it counts as known (CS-134)")
 	configPath := flag.String("config", "", "config file (JSON); its fields set any flag not also given on the command line")
 	flag.Parse()
 	if *showVersion {
@@ -67,13 +68,14 @@ func main() {
 		if err := applyConfigFile(*configPath, map[string]*string{
 			"listen": listen, "dev-world": devWorld, "policies": policies, "state-dir": stateDir,
 			"decision-key": decisionKey, "dev-wallet": devWallet, "tenant": tenant, "auth-keys": authKeys,
-		}, checkpointEvery, ratePerMin); err != nil {
+		}, checkpointEvery, ratePerMin, coolingOff); err != nil {
 			log.Error("stopbard config", "err", err)
 			os.Exit(1)
 		}
 	}
 	if err := serve(*listen, *stateDir, devOpts{world: *devWorld, policies: *policies, decisionKey: *decisionKey,
-		wallet: *devWallet, tenant: *tenant, checkpointEvery: *checkpointEvery, authKeys: *authKeys, ratePerMin: *ratePerMin}, log); err != nil {
+		wallet: *devWallet, tenant: *tenant, checkpointEvery: *checkpointEvery, authKeys: *authKeys, ratePerMin: *ratePerMin,
+		coolingOff: *coolingOff}, log); err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
 	}
@@ -85,7 +87,7 @@ func main() {
 // instead of a flag soup. It still selects dev-mode components when they are
 // named — a production config needs auth, a real key provider and real
 // enrichers (none of which exist yet).
-func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint64, ratePerMin *int) error {
+func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint64, ratePerMin *int, coolingOff *time.Duration) error {
 	set := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	b, err := os.ReadFile(path)
@@ -103,6 +105,7 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 		AuthKeys             string `json:"auth_keys"`
 		AuditCheckpointEvery uint64 `json:"audit_checkpoint_every"`
 		RatePerMin           int    `json:"rate_per_min"`
+		ContactCoolingOff    string `json:"contact_cooling_off"` // Go duration, e.g. "24h"
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -120,6 +123,13 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 	}
 	if c.RatePerMin != 0 && !set["rate-per-min"] {
 		*ratePerMin = c.RatePerMin
+	}
+	if c.ContactCoolingOff != "" && !set["contact-cooling-off"] {
+		d, err := time.ParseDuration(c.ContactCoolingOff)
+		if err != nil {
+			return fmt.Errorf("config %s: contact_cooling_off: %w", path, err)
+		}
+		*coolingOff = d
 	}
 	return nil
 }
@@ -163,7 +173,11 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 		authn = gateway.BearerAuthenticator{Store: ks}
 		log.Info("authentication enabled", "auth_keys", o.authKeys, "rate_per_min", o.ratePerMin)
 	}
-	runErr := run(addr, rt.eval, nonces, rt.keys, rt.counters, authn, rt.audit, rt.approver, o.ratePerMin, log)
+	if rt.contacts != nil && authn == nil {
+		log.Warn("contacts API disabled: it needs -auth-keys (approval is separated by API key)")
+	}
+	runErr := run(addr, gateway.Config{Evaluator: rt.eval, Nonces: nonces, Keys: rt.keys, Counters: rt.counters, Logger: log,
+		Authenticator: authn, Audit: rt.audit, RatePerMin: o.ratePerMin, Approver: rt.approver, Contacts: rt.contacts}, log)
 	if rt.signed {
 		if err := rt.audit.Checkpoint(); err != nil {
 			log.Error("final audit checkpoint failed", "severity", "high", "err", err)
@@ -179,6 +193,7 @@ type devOpts struct {
 	ratePerMin                                   int
 	world, policies, decisionKey, wallet, tenant string
 	checkpointEvery                              uint64
+	coolingOff                                   time.Duration
 	db                                           *store.DB
 }
 
@@ -186,6 +201,7 @@ type devOpts struct {
 type runtime struct {
 	eval     gateway.Evaluator
 	approver gateway.Approver
+	contacts gateway.Contacts
 	keys     func() []decision.JWK
 	counters func() map[string]uint64
 	audit    *audit.Log
@@ -265,16 +281,24 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 	if err != nil {
 		return runtime{}, err
 	}
-	// The destination registry (CS-133) lives in the state file. The world's
-	// known_destinations seed it for this tenant (added if missing, audited);
-	// `stopbar contacts` edits it while stopbard is stopped.
+	// The destination registry (CS-133/134) lives in the state file. The
+	// world's known_destinations seed it for this tenant, active at once
+	// (added if missing, audited); /v1/contacts edits it live, with approval
+	// and cooling-off for additions.
+	if o.coolingOff < 0 {
+		return runtime{}, errors.New("-contact-cooling-off must not be negative")
+	}
 	reg, err := enrich.OpenRegistry(o.db, lg)
 	if err != nil {
 		return runtime{}, err
 	}
+	reg.CoolingOff = o.coolingOff
+	if o.coolingOff == 0 {
+		log.Warn("-contact-cooling-off 0: an approved destination is known at once, with no window to notice and remove it")
+	}
 	seeded := 0
 	for _, d := range w.KnownDestinations {
-		added, err := reg.Add(o.tenant, d, "", "dev-world", time.Now())
+		added, err := reg.Seed(o.tenant, d, time.Now())
 		if err != nil {
 			return runtime{}, err
 		}
@@ -331,11 +355,11 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 	}
 	log.Warn("DEV STUBS ENABLED: decoder and price/balance enricher are stand-ins; local key providers. Not for production.",
 		"world", o.world, "policies", o.policies, "bundle_hash", b.Hash(), "mode", mode, "decision_kid", ring.ActiveKid())
-	return runtime{eval: eval, approver: approver, keys: ring.JWKS, counters: e.Counters, audit: lg, signed: true}, nil
+	return runtime{eval: eval, approver: approver, contacts: reg, keys: ring.JWKS, counters: e.Counters, audit: lg, signed: true}, nil
 }
 
-func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys func() []decision.JWK, counters func() map[string]uint64, authn gateway.Authenticator, auditSink gateway.AuditSink, approver gateway.Approver, ratePerMin int, log *slog.Logger) error {
-	if err := requireLoopbackUnlessAuth(addr, authn != nil); err != nil {
+func run(addr string, cfg gateway.Config, log *slog.Logger) error {
+	if err := requireLoopbackUnlessAuth(addr, cfg.Authenticator != nil); err != nil {
 		return err
 	}
 	ln, err := net.Listen("tcp", addr)
@@ -343,8 +367,7 @@ func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys fu
 		return err
 	}
 	srv := &http.Server{
-		Handler: gateway.New(gateway.Config{Evaluator: eval, Nonces: nonces, Keys: keys, Counters: counters, Logger: log,
-			Authenticator: authn, Audit: auditSink, RatePerMin: ratePerMin, Approver: approver}),
+		Handler:           gateway.New(cfg),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -354,7 +377,7 @@ func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys fu
 	}
 	// The resolved address goes to stdout so callers using :0 can find it.
 	fmt.Printf("stopbard %s listening on %s\n", version.Version, ln.Addr())
-	log.Info("listening", "addr", ln.Addr().String(), "version", version.Version, "engine", eval != nil)
+	log.Info("listening", "addr", ln.Addr().String(), "version", version.Version, "engine", cfg.Evaluator != nil)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

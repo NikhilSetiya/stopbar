@@ -1,135 +1,153 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/NikhilSetiya/stopbar/internal/audit"
-	"github.com/NikhilSetiya/stopbar/internal/decision"
-	"github.com/NikhilSetiya/stopbar/internal/enrich"
-	"github.com/NikhilSetiya/stopbar/internal/store"
+	"github.com/NikhilSetiya/stopbar/internal/model"
 )
 
-const contactsUsage = "usage: stopbar contacts add|remove <address> --state-dir DIR --tenant T [--label L] [--decision-key FILE]\n       stopbar contacts list --state-dir DIR --tenant T"
+const contactsUsage = `usage: stopbar contacts add <address> [--label L] --url URL --key KEY
+       stopbar contacts approve <id> --url URL --key APPROVER_KEY
+       stopbar contacts remove <address> --url URL --key KEY
+       stopbar contacts list --url URL --key KEY`
 
-// contactsCmd edits or lists a tenant's destination registry (CS-133) in the
-// state file. It works on the file directly, never over the API: vetting a
-// destination loosens policy, so it takes access to the operator's state
-// directory, not a requester credential. stopbard holds the file's lock, so
-// stop it first.
+// contactsCmd edits or lists the tenant's destination registry (CS-134) on a
+// running stopbard over its authenticated API. The tenant and the acting
+// identity come from the API key. An addition is pending until a different
+// key approves it and active only after the server's cooling-off period; a
+// removal applies at once.
 func contactsCmd(args []string) error {
-	return runContacts(args, os.Stdout, time.Now)
+	return runContacts(args, os.Stdout)
 }
 
-func runContacts(args []string, out io.Writer, now func() time.Time) error {
+func runContacts(args []string, out io.Writer) error {
 	if len(args) == 0 {
 		return errors.New(contactsUsage)
 	}
 	op, rest := args[0], args[1:]
-	var addr string
-	if op == "add" || op == "remove" {
-		// The address comes before the flags (the flag package stops at the
+	var arg string
+	switch op {
+	case "add", "approve", "remove":
+		// The argument comes before the flags (the flag package stops at the
 		// first non-flag argument).
 		if len(rest) == 0 || strings.HasPrefix(rest[0], "-") {
 			return errors.New(contactsUsage)
 		}
-		addr, rest = rest[0], rest[1:]
-	} else if op != "list" {
+		arg, rest = rest[0], rest[1:]
+	case "list":
+	default:
 		return errors.New(contactsUsage)
 	}
 	fs := flag.NewFlagSet("contacts "+op, flag.ContinueOnError)
-	stateDir := fs.String("state-dir", "", "stopbard state directory (holds state.db)")
-	tenant := fs.String("tenant", "", "tenant whose registry to use (stopbard's -tenant)")
+	base := fs.String("url", "http://127.0.0.1:7777", "stopbard base URL")
+	key := fs.String("key", "", "API key ('contacts' scope; 'approve' to approve)")
 	label := fs.String("label", "", "add: a name for the address")
-	keyFile := fs.String("decision-key", "", "add/remove: sign an audit checkpoint over the change with this decision key")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
-	if fs.NArg() != 0 || *stateDir == "" || *tenant == "" {
+	if fs.NArg() != 0 || (*label != "" && op != "add") {
 		return errors.New(contactsUsage)
 	}
-	path := filepath.Join(*stateDir, "state.db")
-
+	root := strings.TrimRight(*base, "/") + "/v1/contacts"
+	var status int
+	var body []byte
+	var err error
+	switch op {
+	case "add":
+		status, body, err = callAPI(http.MethodPost, root, *key, model.ContactRequest{Address: arg, Label: *label})
+	case "approve":
+		status, body, err = callAPI(http.MethodPost, root+"/"+url.PathEscape(arg)+"/approve", *key, nil)
+	case "remove":
+		status, body, err = callAPI(http.MethodDelete, root+"/"+url.PathEscape(arg), *key, nil)
+	default:
+		status, body, err = callAPI(http.MethodGet, root, *key, nil)
+	}
+	if err != nil {
+		return err
+	}
+	if status/100 != 2 {
+		return fmt.Errorf("HTTP %d: %s", status, strings.TrimSpace(string(body)))
+	}
+	var cs []model.Contact
 	if op == "list" {
-		db, err := store.OpenReadOnly(path)
-		if err != nil {
-			return lockHint(err)
+		var doc struct {
+			Contacts []model.Contact `json:"contacts"`
 		}
-		defer func() { _ = db.Close() }()
-		reg, err := enrich.OpenRegistry(db, nil)
-		if err != nil {
-			return err
+		if err := json.Unmarshal(body, &doc); err != nil {
+			return fmt.Errorf("unexpected response: %w", err)
 		}
-		cs, err := reg.List(*tenant)
-		if err != nil {
-			return err
-		}
-		for _, c := range cs {
-			_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\n", c.Address, c.AddedAt.Format(time.RFC3339), c.Source, c.Label)
-		}
-		_, _ = fmt.Fprintf(out, "%d known destinations for tenant %q\n", len(cs), *tenant)
-		return nil
-	}
-
-	var ring *decision.KeyRing
-	if *keyFile != "" {
-		k, err := decision.LoadKeyFile(*keyFile)
-		if err != nil {
-			return err
-		}
-		ring = decision.NewKeyRing(k)
-	}
-	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("no state file at %s: %w", path, err)
-	}
-	db, err := store.Open(path)
-	if err != nil {
-		return lockHint(err)
-	}
-	defer func() { _ = db.Close() }()
-	cfg := audit.Config{DB: db}
-	if ring != nil {
-		cfg.Signer = ring
-	}
-	lg, err := audit.New(cfg)
-	if err != nil {
-		return err
-	}
-	reg, err := enrich.OpenRegistry(db, lg)
-	if err != nil {
-		return err
-	}
-	var changed bool
-	if op == "add" {
-		changed, err = reg.Add(*tenant, addr, *label, "cli", now())
+		cs = doc.Contacts
 	} else {
-		changed, err = reg.Remove(*tenant, addr, "cli", now())
-	}
-	if err != nil {
-		return err
-	}
-	a, _ := enrich.NormalizeAddress(addr)
-	if !changed {
-		_, _ = fmt.Fprintf(out, "%s: no change (%s for tenant %q)\n", a, map[string]string{"add": "already registered", "remove": "not registered"}[op], *tenant)
-		return nil
-	}
-	_, _ = fmt.Fprintf(out, "%s: %s for tenant %q (audited)\n", a, map[string]string{"add": "added", "remove": "removed"}[op], *tenant)
-	if ring != nil {
-		if err := lg.Checkpoint(); err != nil {
-			return fmt.Errorf("change recorded, but the audit checkpoint failed: %w", err)
+		var c model.Contact
+		if err := json.Unmarshal(body, &c); err != nil {
+			return fmt.Errorf("unexpected response: %w", err)
 		}
-		_, _ = fmt.Fprintln(out, "audit checkpoint signed")
+		cs = []model.Contact{c}
+	}
+	for _, c := range cs {
+		printContact(out, c)
+	}
+	switch op {
+	case "add":
+		_, _ = fmt.Fprintf(out, "requested %s (id %s): pending until another key approves it with `stopbar contacts approve %s`\n", cs[0].Address, cs[0].ID, cs[0].ID)
+	case "approve":
+		_, _ = fmt.Fprintf(out, "approved %s: known from %s\n", cs[0].Address, cs[0].ActiveFrom.Format(time.RFC3339))
+	case "remove":
+		_, _ = fmt.Fprintf(out, "removed %s (effective now)\n", cs[0].Address)
+	default:
+		_, _ = fmt.Fprintf(out, "%d entries\n", len(cs))
 	}
 	return nil
 }
 
-// lockHint explains the usual cause of a failure to open the state file.
-func lockHint(err error) error {
-	return fmt.Errorf("%w (is stopbard running? it holds the state file; stop it first)", err)
+// printContact prints one entry, and every existing entry it looks like, so
+// an approver sees an address-poisoning attempt before approving.
+func printContact(out io.Writer, c model.Contact) {
+	when := ""
+	if c.ActiveFrom != nil {
+		when = "active_from=" + c.ActiveFrom.Format(time.RFC3339)
+	}
+	_, _ = fmt.Fprintf(out, "%s\t%s\t%s\trequested_by=%s\t%s\t%s\n", c.ID, c.Address, c.Status, c.RequestedBy, when, c.Label)
+	for _, s := range c.SimilarTo {
+		_, _ = fmt.Fprintf(out, "  WARNING: looks like existing entry %s %q (possible address poisoning)\n", s.Address, s.Label)
+	}
+}
+
+// callAPI sends one request to stopbard and returns the status and body.
+func callAPI(method, u, key string, body any) (int, []byte, error) {
+	var rd io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return 0, nil, err
+		}
+		rd = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, u, rd)
+	if err != nil {
+		return 0, nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, b, err
 }
