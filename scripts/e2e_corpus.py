@@ -181,6 +181,7 @@ for entry, step, approve in cases:
     setup = dict(entry.get("setup", {}))
     tpl = Templater(setup.pop("issued_at_offset", "0s"))
     if approve:  # the approval re-run re-checks the caps, which this full-balance transfer exceeds; identity is under test here
+        setup.pop("limits", None)  # CS-2026-0002 carries hard per-tx caps (CS-123) that would deny the approval
         setup["limits_disabled"] = True
     body = tpl.render((entry.get("requests") or [entry["request"]])[step])
     secret, approver = ("e2e-" + os.urandom(16).hex() for _ in range(2))
