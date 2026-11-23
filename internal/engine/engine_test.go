@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/gateway"
 	"github.com/NikhilSetiya/stopbar/internal/model"
@@ -125,8 +126,16 @@ func (f breakerFunc) CircuitOpen(ctx context.Context, tenant string) (bool, erro
 
 type signFunc func(context.Context, model.Decision) (string, error)
 
-func (f signFunc) Sign(ctx context.Context, _ model.ActionRequest, d model.Decision) (string, error) {
+func (f signFunc) Sign(ctx context.Context, _ auth.Identity, _ model.ActionRequest, d model.Decision) (string, error) {
 	return f(ctx, d)
+}
+
+// recordSigner records the requester identity each token was issued for.
+type recordSigner struct{ ids []auth.Identity }
+
+func (s *recordSigner) Sign(_ context.Context, id auth.Identity, _ model.ActionRequest, _ model.Decision) (string, error) {
+	s.ids = append(s.ids, id)
+	return "aGVhZA.cGF5bG9hZA.c2ln", nil
 }
 
 var goodSigner = signFunc(func(context.Context, model.Decision) (string, error) { return "aGVhZA.cGF5bG9hZA.c2ln", nil })
@@ -569,12 +578,18 @@ func TestApprove(t *testing.T) {
 	t.Run("escalate records a pending entry; approve promotes to allow and signs", func(t *testing.T) {
 		r := newRig()
 		pend := newFakePending()
+		signer := &recordSigner{}
 		r.cfg.Policy = outcome(model.Escalate)
 		r.cfg.Pending = pend
+		r.cfg.Signer = signer
 		e := r.engine(t)
 
 		req := fixtureRequest(t, "action_request.evm_tx.json")
-		d := evaluate(t, e, req)
+		requester := auth.Identity{Method: auth.MethodAPIKey, Tenant: req.Tenant, AgentID: req.Actor.AgentID, KeyID: "ak_requester"}
+		d, err := e.Evaluate(auth.WithIdentity(context.Background(), requester), req)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if d.Outcome != model.Escalate {
 			t.Fatalf("Outcome = %v, want escalate", d.Outcome)
 		}
@@ -586,7 +601,8 @@ func TestApprove(t *testing.T) {
 		}
 
 		// A human approves: the single escalation reason is now waived.
-		ad, areq, err := e.Approve(context.Background(), req.ID, "ops@example.com")
+		approverCtx := auth.WithIdentity(context.Background(), auth.Identity{Method: auth.MethodAPIKey, Tenant: req.Tenant, KeyID: "ops@example.com"})
+		ad, areq, by, err := e.Approve(approverCtx, req.ID, "ops@example.com")
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -605,6 +621,10 @@ func TestApprove(t *testing.T) {
 		if areq.ID != req.ID {
 			t.Fatalf("returned request ID = %q, want %q", areq.ID, req.ID)
 		}
+		// decision-token v2: the token binds the requester, never the approver.
+		if by.KeyID != requester.KeyID || len(signer.ids) != 1 || signer.ids[0].KeyID != requester.KeyID {
+			t.Fatalf("token identity %+v, returned requester %+v; want %s", signer.ids, by, requester.KeyID)
+		}
 		if pend.len() != 0 {
 			t.Fatalf("pending entries after allow = %d, want 0 (deleted)", pend.len())
 		}
@@ -618,7 +638,7 @@ func TestApprove(t *testing.T) {
 		r.cfg.Pending = pend
 		e := r.engine(t)
 
-		d, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, _, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -643,7 +663,7 @@ func TestApprove(t *testing.T) {
 		r.cfg.Pending = pend
 		e := r.engine(t)
 
-		d, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, _, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -664,7 +684,7 @@ func TestApprove(t *testing.T) {
 		r.limiter.reserveErr = ErrCapExceeded // the cap filled while it waited
 		e := r.engine(t)
 
-		d, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, _, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -686,7 +706,7 @@ func TestApprove(t *testing.T) {
 		e := r.engine(t)
 
 		before := len(r.audit.records)
-		d, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, _, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -707,14 +727,14 @@ func TestApprove(t *testing.T) {
 	t.Run("the requester may not approve their own escalation", func(t *testing.T) {
 		pend := newFakePending()
 		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"),
-			Reasons: []string{escReason}, IssuedAt: rigNow, RequestedBy: "ak_requester"}
+			Reasons: []string{escReason}, IssuedAt: rigNow, Requester: auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", KeyID: "ak_requester"}}
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate)
 		r.cfg.Pending = pend
 		e := r.engine(t)
 
 		// same identity as the requester → refused, record kept for a real approver.
-		d, _, err := e.Approve(context.Background(), "r1", "ak_requester")
+		d, _, _, err := e.Approve(context.Background(), "r1", "ak_requester")
 		if err != nil {
 			t.Fatalf("Approve(self): %v", err)
 		}
@@ -725,7 +745,7 @@ func TestApprove(t *testing.T) {
 			t.Fatalf("pending after self-approval = %d, want 1 (kept for another approver)", pend.len())
 		}
 		// a different identity may still approve it.
-		d2, _, err := e.Approve(context.Background(), "r1", "ak_operator")
+		d2, _, _, err := e.Approve(context.Background(), "r1", "ak_operator")
 		if err != nil {
 			t.Fatalf("Approve(operator): %v", err)
 		}
@@ -749,7 +769,7 @@ func TestApprove(t *testing.T) {
 		r.cfg.Pending = pend
 		e := r.engine(t)
 
-		d, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, _, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -762,7 +782,7 @@ func TestApprove(t *testing.T) {
 		r := newRig()
 		r.cfg.Pending = newFakePending()
 		e := r.engine(t)
-		if _, _, err := e.Approve(context.Background(), "nope", "ops@example.com"); !errors.Is(err, model.ErrNoPending) {
+		if _, _, _, err := e.Approve(context.Background(), "nope", "ops@example.com"); !errors.Is(err, model.ErrNoPending) {
 			t.Fatalf("Approve(unknown) err = %v, want ErrNoPending", err)
 		}
 	})

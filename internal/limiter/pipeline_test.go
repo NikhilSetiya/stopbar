@@ -172,7 +172,7 @@ func TestCircuitBreakerThroughEngine(t *testing.T) {
 			t.Fatalf("%s after trip: %s %v, want deny CIRCUIT_OPEN", id, d.Outcome, d.Reasons)
 		}
 	}
-	if d, _, _ := p.eng.Approve(bg, "req_esc", "ak_alice"); d.Outcome != model.Deny || code(d) != engine.CodeCircuitOpen {
+	if d, _, _, _ := p.eng.Approve(bg, "req_esc", "ak_alice"); d.Outcome != model.Deny || code(d) != engine.CodeCircuitOpen {
 		t.Fatalf("approval after trip: %s %v, want deny CIRCUIT_OPEN", d.Outcome, d.Reasons)
 	}
 	if d, _ := p.eng.Evaluate(bg, transfer("req_other", "other-tenant", tinyAmount)); d.Outcome != model.Allow {
@@ -225,7 +225,7 @@ func TestOpenClawEscalatesAndPerTxCapsSurviveApproval(t *testing.T) {
 			if d.Outcome != model.Escalate || len(ids) != 1 || ids[0] != "large-share-of-balance" {
 				t.Fatalf("OpenClaw: %s %v, want escalate [large-share-of-balance]", d.Outcome, d.Reasons)
 			}
-			d, _, err := p.eng.Approve(bg, "req_openclaw", "ak_approver")
+			d, _, _, err := p.eng.Approve(bg, "req_openclaw", "ak_approver")
 			if err != nil {
 				t.Fatal(err)
 			}

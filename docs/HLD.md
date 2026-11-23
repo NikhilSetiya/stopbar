@@ -96,6 +96,10 @@ flowchart TB
 
 v1 assumes the **harness** (agent framework + Provenance SDK) is trusted and the **model** is not. That covers T1 and T2 (PRD §2.4). It does not cover T3 or T4: a compromised requester or a scheming agent that controls code can forge, strip or launder labels. Against T3/T4 only controls that live inside Stopbar hold: caps, allowlists, circuit breaker, gatekeeper mode.
 
+### Trust boundary: authenticated identity
+
+Who is asking comes from the gateway's authenticator (API key now, mTLS/SPIFFE next), never the request body: a body whose tenant or agent disagrees with the credential is rejected (CS-103). The identity goes into every audit record and into the decision token (decision-token v2), and the gatekeeper adapter refuses a token whose identity is not that of the request it is signing. The credential is the limit: a compromised requester holding its own key is still that caller, so this stops token theft and cross-caller reuse, not T3.
+
 ### Note on provenance trust
 
 The Provenance SDK runs inside the requester. A fully compromised requester can lie about taint. Therefore:
@@ -186,6 +190,7 @@ Controls are rated by tier (PRD §2.4): T1 injected model, T2 agent error, T3 co
 | Agent error (no adversary) | OpenClaw | % of balance caps, escalation |
 | Malicious insider changes policy | Raise caps before attack | M-of-N policy changes, policy-change audit, cooling-off period for cap increases |
 | Replays old approval | Reuse decision token | Nonce, TTL, payload-hash binding |
+| Uses another caller's approval | Present a decision token issued to a different authenticated caller | Token binds the authenticated requester identity; the signer adapter checks it against the request it signs (decision-token v2) |
 | Compromises Stopbar host | — | Isolated trust domain, co-signer mode (needs two compromises), minimal surface, external audit |
 | Stale/manipulated prices | Oracle attack to under-value transfer | Multiple sources, staleness bound → escalate, caps also on token count |
 | DoS on Stopbar | Flood requests | Fail closed (safety over liveness); per-requester API limits; HA in Phase 4 |

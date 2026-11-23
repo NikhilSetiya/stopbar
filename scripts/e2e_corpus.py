@@ -15,10 +15,13 @@ denying). Counters in expected.metrics must match /metrics. After shutdown, `sto
 the run's own audit log, the stopping decision must be audited (a reject must
 not reach the engine), and every signed tx must have a commit record. stopbard runs in gatekeeper mode: every allowed step must
 return a signed tx, which `stopbar decode-tx` decodes independently. Its
-recovered sender must equal `from` and its payload hash the decision's.
+recovered sender must equal `from` and its payload hash the decision's. Its
+decision token must be v2 and bind the requester identity: method "none" here
+(auth off), and, in a final run with -auth-keys, the authenticated API key
+(CS-103, spec/decision-token-v2.md).
 Needs: pyyaml.
 """
-import glob, json, os, subprocess, sys, tempfile, urllib.error, urllib.request
+import base64, glob, hashlib, json, os, subprocess, sys, tempfile, urllib.error, urllib.request
 import yaml
 from corpus_template import Templater
 
@@ -30,11 +33,14 @@ ANVIL_KEY = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 failures = 0
 
 
-def post(addr, body):
-    raw = json.dumps(body, separators=(",", ":")).encode()
-    print("     sent:", raw.decode())  # the rewritten bytes, so every run is reproducible from its log
-    req = urllib.request.Request(f"http://{addr}/v1/evaluate", data=raw,
-                                 method="POST", headers={"Content-Type": "application/json"})
+def post(addr, body, bearer=None, path="/v1/evaluate"):
+    raw = json.dumps(body, separators=(",", ":")).encode() if body is not None else None
+    if raw:
+        print("     sent:", raw.decode())  # the rewritten bytes, so every run is reproducible from its log
+    headers = {"Content-Type": "application/json"}
+    if bearer:
+        headers["Authorization"] = "Bearer " + bearer
+    req = urllib.request.Request(f"http://{addr}{path}", data=raw, method="POST", headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
             return r.status, json.loads(r.read())
@@ -42,10 +48,19 @@ def post(addr, body):
         return e.code, json.loads(e.read())
 
 
-def check_signed(i, sent, d):
-    """An allow must carry a signed tx that does exactly what was approved."""
+def token_claims(tok):
+    seg = tok.split(".")[1]
+    return json.loads(base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4)))
+
+
+def check_signed(i, sent, d, identity=("none", "", "")):
+    """An allow must carry a signed tx that does exactly what was approved,
+    and a v2 token bound to the requester identity (method, key_id, agent_id)."""
     if not d.get("signed_tx") or not d.get("token"):
         return [f"step {i}: allow without signed_tx/token"]
+    c = token_claims(d["token"])
+    if c.get("v") != 2 or (c.get("auth_method"), c.get("key_id"), c.get("agent_id")) != identity:
+        return [f"step {i}: token v{c.get('v')} binds {c.get('auth_method')}/{c.get('key_id')}/{c.get('agent_id')}, want v2 {'/'.join(identity)}"]
     out = subprocess.run([stopbar_cli, "decode-tx", d["signed_tx"]], capture_output=True, text=True)
     if out.returncode != 0:
         return [f"step {i}: decode-tx failed: {out.stderr.strip()}"]
@@ -58,8 +73,24 @@ def check_signed(i, sent, d):
     if tx["tx_hash"] != d.get("tx_hash"):
         errs.append(f"step {i}: tx_hash mismatch")
     if not errs:
-        print(f"     step {i}: signed by {tx['action']['from']}, tx {tx['tx_hash'][:18]}…, payload bound")
+        print(f"     step {i}: signed by {tx['action']['from']}, tx {tx['tx_hash'][:18]}…, payload and requester ({identity[0]}) bound")
     return errs
+
+
+def start(tmp, world_setup, *extra):
+    """Start a gatekeeper-mode stopbard on world_setup; returns (proc, addr, state, keys)."""
+    world, wallet, keys, state = (os.path.join(tmp, f) for f in ("world.json", "wallet", "keys.json", "state"))
+    json.dump(world_setup, open(world, "w"))
+    with open(os.open(wallet, os.O_CREAT | os.O_WRONLY, 0o600), "w") as f:
+        f.write("stopbar-dev-wallet-secp256k1-v1\n" + ANVIL_KEY + "\n")
+    proc = subprocess.Popen([stopbard, "-listen", "127.0.0.1:0", "-dev-world", world, "-dev-wallet", wallet,
+                             "-state-dir", state, "-audit-checkpoint-every", "2", *extra],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    line = proc.stdout.readline()
+    if "listening on" not in line:
+        proc.kill()
+        raise RuntimeError(f"stopbard did not start: {line!r} {proc.stderr.read()}")
+    return proc, line.rsplit(" ", 1)[1].strip(), state, keys
 
 
 for path in sorted(glob.glob("corpus/attacks/*.yaml")):
@@ -71,18 +102,8 @@ for path in sorted(glob.glob("corpus/attacks/*.yaml")):
     setup = dict(entry.get("setup", {}))
     tpl = Templater(setup.pop("issued_at_offset", "0s"))
     with tempfile.TemporaryDirectory() as tmp:
-        world, wallet, keys, state = (os.path.join(tmp, f) for f in ("world.json", "wallet", "keys.json", "state"))
-        json.dump(setup, open(world, "w"))
-        with open(os.open(wallet, os.O_CREAT | os.O_WRONLY, 0o600), "w") as f:
-            f.write("stopbar-dev-wallet-secp256k1-v1\n" + ANVIL_KEY + "\n")
-        proc = subprocess.Popen([stopbard, "-listen", "127.0.0.1:0", "-dev-world", world, "-dev-wallet", wallet,
-                                 "-state-dir", state, "-audit-checkpoint-every", "2"],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc, addr, state, keys = start(tmp, setup)
         try:
-            line = proc.stdout.readline()
-            if "listening on" not in line:
-                raise RuntimeError(f"stopbard did not start: {line!r} {proc.stderr.read()}")
-            addr = line.rsplit(" ", 1)[1].strip()
             signed = 0
             for i, body in enumerate(steps[:stop_at]):
                 sent = tpl.render(body)
@@ -148,5 +169,40 @@ for path in sorted(glob.glob("corpus/attacks/*.yaml")):
     seq = f" at step {stop_at + 1}/{len(steps)}" if len(steps) > 1 else ""
     print("ok  " if not problems else "FAIL",
           f"{entry['id']}: HTTP {status} {d.get('outcome')}{seq} {got_ids or codes}", "; ".join(problems))
+
+# Authenticated gatekeeper (CS-103 increment 2). With -auth-keys, an allowed
+# step sent with an API key is signed only under a v2 token that binds that key
+# and its agent (never the body's claim). An escalation approved by another key
+# is signed under a token that binds the requester, not the approver.
+entries = [yaml.safe_load(open(p)) for p in sorted(glob.glob("corpus/attacks/*.yaml"))]
+cases = [(next(e for e in entries if e["expected"].get("at_step", 0) > 0), 0, False),
+         (next(e for e in entries if e["expected"]["outcome"] == "escalate" and "requests" not in e), 0, True)]
+for entry, step, approve in cases:
+    setup = dict(entry.get("setup", {}))
+    tpl = Templater(setup.pop("issued_at_offset", "0s"))
+    if approve:  # the approval re-run re-checks the caps, which this full-balance transfer exceeds; identity is under test here
+        setup["limits_disabled"] = True
+    body = tpl.render((entry.get("requests") or [entry["request"]])[step])
+    secret, approver = ("e2e-" + os.urandom(16).hex() for _ in range(2))
+    keyrec = lambda kid, agent, scope, sec: {"id": kid, "tenant": body["tenant"], "agent_id": agent, "scopes": [scope],
+                                             "sha256": hashlib.sha256(sec.encode()).hexdigest()}
+    want_id = ("api_key", "ak_e2e", body["actor"]["agent_id"])
+    with tempfile.TemporaryDirectory() as tmp:
+        keyfile = os.path.join(tmp, "api-keys.json")
+        json.dump([keyrec("ak_e2e", body["actor"]["agent_id"], "evaluate", secret),
+                   keyrec("ak_e2e_approver", "ops", "approve", approver)], open(keyfile, "w"))
+        proc, addr, _, _ = start(tmp, setup, "-auth-keys", keyfile)
+        try:
+            status, d = post(addr, body, bearer=secret)
+            if approve and status == 202:
+                status, d = post(addr, None, bearer=approver, path=f"/v1/approvals/{body['id']}")
+            problems = [f"HTTP {status} {d.get('reasons')}, want 200"] if status != 200 else check_signed(step, body, d, want_id)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+    failures += bool(problems)
+    what = "escalate -> approved by ak_e2e_approver" if approve else "allow"
+    print("ok  " if not problems else "FAIL", f"authenticated gatekeeper, {entry['id']} {what}: token binds requester ak_e2e",
+          "; ".join(problems))
 
 sys.exit(failures)

@@ -19,24 +19,25 @@ type Config struct {
 	// Chainlink USD feed (address + the feed's documented heartbeat). An asset
 	// with no feed prices as stale.
 	Feeds map[string]Feed
-	// KnownDestinations is the allowlist used for Destination.Known /
-	// SimilarToKnown until the CS-133 registry replaces it.
-	KnownDestinations []string
-	RPCTimeout        time.Duration
-	PriceMaxAge       time.Duration // default bound for a feed that sets no max_age (default 1h)
-	PriceTTL          time.Duration // price cache (default 15s)
-	BalanceTTL        time.Duration // balance cache (default 10s)
-	Clock             func() time.Time
+	// MaxSlippage is the tenant max slippage fraction for excessive_slippage
+	// (default DefaultMaxSlippage, 3%).
+	MaxSlippage string
+	RPCTimeout  time.Duration
+	PriceMaxAge time.Duration // default bound for a feed that sets no max_age (default 1h)
+	PriceTTL    time.Duration // price cache (default 15s)
+	BalanceTTL  time.Duration // balance cache (default 10s)
+	Clock       func() time.Time
 }
 
 // ChainEnricher fills the policy context from the chain (CS-131/132): USD
 // amount, fee and approval value from Chainlink feeds, pct-of-balance from
-// native/ERC-20 balance reads, and destination facts from the allowlist. It
+// native/ERC-20 balance reads, and excessive_slippage from the same feeds.
+// Destination facts come from the Registry, a separate enricher. It
 // implements engine.Enricher.
 type ChainEnricher struct {
-	prices *PriceOracle
-	bals   *BalanceProvider
-	known  []string
+	prices      *PriceOracle
+	bals        *BalanceProvider
+	maxSlippage *big.Rat
 }
 
 // New builds a ChainEnricher from cfg.
@@ -51,11 +52,11 @@ func New(cfg Config) (*ChainEnricher, error) {
 		prices.clock = cfg.Clock
 		bals.clock = cfg.Clock
 	}
-	known := make([]string, len(cfg.KnownDestinations))
-	for i, k := range cfg.KnownDestinations {
-		known[i] = strings.ToLower(k)
+	ms, err := ParseMaxSlippage(cfg.MaxSlippage)
+	if err != nil {
+		return nil, fmt.Errorf("enrich: %w", err)
 	}
-	return &ChainEnricher{prices: prices, bals: bals, known: known}, nil
+	return &ChainEnricher{prices: prices, bals: bals, maxSlippage: ms}, nil
 }
 
 // Enrich reads prices and balances for the request's asset and fills the policy
@@ -128,17 +129,21 @@ func (e *ChainEnricher) Enrich(ctx context.Context, er *model.EnrichedRequest) e
 		er.PctOfBalance = decimalString(new(big.Rat).Quo(tokens, balTokens))
 	}
 
-	// Destination facts (allowlist; CS-133 adds the real registry + similarity).
-	dest := strings.ToLower(er.Intent.Destination)
-	for _, k := range e.known {
-		switch {
-		case k == dest:
-			er.Destination.Known = true
-		case len(k) == 42 && len(dest) == 42 && k[:6] == dest[:6] && k[38:] == dest[38:]:
-			er.Destination.SimilarToKnown = true
+	return CheckSlippage(ctx, er, e.maxSlippage, e.quote)
+}
+
+// quote prices token ("" native) from its feed, for the slippage check.
+func (e *ChainEnricher) quote(ctx context.Context, token string) (*big.Rat, int, bool, error) {
+	key, decimals := NativeKey, 18
+	if token != "" {
+		d, err := e.bals.Decimals(ctx, token)
+		if err != nil {
+			return nil, 0, false, fmt.Errorf("enrich: token %s decimals: %w", token, err)
 		}
+		key, decimals = token, d
 	}
-	return nil
+	price, stale := e.prices.Price(ctx, key)
+	return price, decimals, !stale, nil
 }
 
 // maxFeeWei is gas_limit × max_fee_per_gas.
