@@ -251,6 +251,7 @@ Error body: `{"code": "NONCE_REPLAYED", "message": "…", "request_id": "…", "
 | `EXPIRED` | 400 | `now ≥ issued_at + ttl_seconds + 30 s` |
 | `ISSUED_IN_FUTURE` | 400 | `issued_at > now + 30 s` |
 | `NONCE_REPLAYED` | 400 | Nonce already used by this tenant and agent within retention |
+| `DUPLICATE_VOTE` | 409 | Breaker reset: the approver already holds a live vote on this trip (CS-124, §7.3) |
 | `ENGINE_UNAVAILABLE` | 503 | No engine configured |
 | `INTERNAL` | 500 | Engine error or panic, the engine returned an invalid decision or one for a different request, or the nonce store failed |
 
@@ -459,11 +460,24 @@ Implemented in CS-124 (`internal/limiter/breaker.go`):
 - **While open:** the engine asks `Breaker.CircuitOpen(tenant)` right after normalize, before decode or policy. Every request for the tenant is denied `CIRCUIT_OPEN`, including ones policy would only escalate and approvals of earlier escalations, and `Reserve` refuses too. Other tenants are unaffected. An open breaker survives restart and the window rolling over: only a reset closes it.
 - **Reset (M of N):**
   - `POST /v1/breakers/{tenant}/reset` records one vote per authenticated approver. Voters use the CS-151 approver API keys (`approve` scope, same tenant). Keys without that scope or tenant get 403, and the rejection is audited.
-  - Each vote is durable and audited (`event: reset_vote`) before it counts. Votes are bound to the current trip, and a repeat vote by the same identity counts once.
-  - When `-breaker-quorum` (default 2) distinct identities have voted, the breaker closes (`event: reset`, `stopbar_circuit_breaker_resets_total`).
-  - The endpoint answers 200 when the vote closed the breaker, 202 when it was recorded below quorum (still open), and 404 when the breaker isn't open. Reset needs auth even on loopback. `GET /v1/breakers/{tenant}` returns `model.BreakerStatus` (`spec/schemas/breaker_status.v1.schema.json`).
+  - Each vote is durable and audited (`event: reset_vote`) before it counts, and is bound to the current trip.
+  - An identity that already holds a live vote is refused with `409 DUPLICATE_VOTE`, and nothing is written.
+  - **Votes expire 1 hour after they're cast** (`model.BreakerVoteTTL`; each vote carries `expires_at`). An expired vote no longer counts. `GET` lists it under `expired_votes`, separate from the live `votes`. The next vote discards it and writes an `event: vote_expired` record in the same bbolt transaction as that vote, so a quorum has to be assembled within one hour. `GET` writes nothing.
+  - When `-breaker-quorum` distinct identities hold live votes, the breaker closes (`event: reset`, `stopbar_circuit_breaker_resets_total`). The quorum defaults to 2. stopbard and the limiter both refuse anything below 2 (`model.MinBreakerQuorum`).
+  - The endpoint answers 200 when the vote closed the breaker, 202 when it was recorded below quorum (still open), 404 when the breaker isn't open and 409 for a repeat vote. Reset needs auth even on loopback. `GET /v1/breakers/{tenant}` returns `model.BreakerStatus` (`spec/schemas/breaker_status.v1.schema.json`).
 - **CLI:** `stopbar breaker status --tenant T` and `stopbar breaker reset --tenant T --key K [--key K2 …]`. The reset fails ("reset refused: n of M") while the quorum isn't met.
-- **Tests:** corpus CS-2026-0014 trips the breaker over HTTP, and the replay checks that every later step keeps denying and that `/metrics` reports the trip. `scripts/e2e_breaker.py` runs the 1-of-2 refusal and the 2-of-2 reset against the live binaries.
+- **Tests:**
+  - Corpus CS-2026-0014 trips the breaker over HTTP. The replay checks that every later step keeps denying and that `/metrics` reports the trip.
+  - `scripts/e2e_breaker.py` runs against the live binaries. It checks the quorum-1 refusal, the 1-of-2 refusal, the repeat-vote 409, the 1-hour `expires_at` in `GET` and the 2-of-2 reset.
+  - Expiry itself (vote, more than 1 hour, second vote → still open; two fresh distinct votes → closed; the discard audited with the vote) is unit-tested with an injected clock. stopbard has no clock override, so the e2e can't wait the hour.
+
+**Demo configs** (`research/walletagent/demo.py`, `demo_live.py`, `demo_testnet.py`) each carry a hard per-tx cap (`window: tx`), sized so each journey keeps its outcomes:
+
+| Demo | Per-tx cap | Why the journey is unchanged |
+|---|---|---|
+| `make demo` | `max_usd: 5000`, `max_pct_of_balance: 0.25` | The 0.01 ETH payments fit. The 5 ETH transfer escalates in policy before the limiter runs. The 24h count cap still denies the second payment. |
+| `make demo-live` | `max_usd: 20000`, `max_pct_of_balance: 0.25` | The approved 5 ETH is a tiny share of the 10,000 ETH fork balance and fits under the same $20k as the 1h cap. |
+| `make demo-testnet` | `max_usd: 50000`, `max_pct_of_balance: 0.75` | The approved transfer is 60% of the real balance. |
 
 ### 7.3a Implementation (`internal/limiter`, CS-121/122)
 

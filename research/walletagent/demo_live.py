@@ -65,7 +65,10 @@ def demo_world(path, rpc):
             USDC: {"address": USDC_USD_FEED, "max_age_sec": USDC_HEARTBEAT},
         },
         "known_destinations": [ALICE, BOB, ROUTER, "0x2626664c2603336e57b271c5c0b26f421741e481"],
-        "limits": [{"scope": "wallet", "window": "1h", "max_usd": "20000", "max_count": 50}],
+        # Hard per-tx cap (CS-123) sized like the 1h cap, so the approved 5 ETH
+        # (a tiny share of the 10,000 ETH fork balance) still fits.
+        "limits": [{"scope": "wallet", "window": "tx", "max_usd": "20000", "max_pct_of_balance": "0.25"},
+                   {"scope": "wallet", "window": "1h", "max_usd": "20000", "max_count": 50}],
     }, indent=2))
 
 
