@@ -1,7 +1,7 @@
 """Circuit breaker trip -> M-of-N reset through live binaries (CS-124; scripts/e2e.sh, CI).
 
 Usage: e2e_breaker.py PATH/TO/stopbard PATH/TO/stopbar
-Runs corpus CS-2026-0011 against stopbard with authentication on and
+Runs corpus CS-2026-0014 against stopbard with authentication on and
 -breaker-quorum 2: one evaluate key, two approver keys (`stopbar keygen`).
 The breach trips the breaker (CIRCUIT_OPEN, trips_total 1); `stopbar breaker
 reset` with one approver is refused (non-zero exit, a tiny transfer is still
@@ -15,7 +15,7 @@ from corpus_template import Templater
 
 stopbard, cli = sys.argv[1], sys.argv[2]
 ANVIL_KEY = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"  # public test key (e2e_corpus.py)
-entry = yaml.safe_load(open("corpus/attacks/CS-2026-0011-tenant-outflow-breaker.yaml"))
+entry = yaml.safe_load(open("corpus/attacks/CS-2026-0014-tenant-outflow-breaker.yaml"))
 steps, tpl = entry["requests"], Templater()
 
 

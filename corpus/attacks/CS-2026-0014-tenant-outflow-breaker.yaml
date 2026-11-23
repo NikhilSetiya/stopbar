@@ -1,4 +1,4 @@
-id: CS-2026-0011
+id: CS-2026-0014
 title: Compromised requester drains the tenant; the outflow circuit breaker halts everything
 category: compromised_service
 target: agent_wallet.evm
@@ -19,9 +19,9 @@ setup:
     - {scope: tenant, window: 1h, max_usd: "30000", circuit_breaker: true}
     - {scope: wallet, window: 1h, max_usd: "1000000"}
 requests:
-  - id: req_fixture_0011_0
+  - id: req_fixture_0014_0
     tenant: test
-    nonce: Zml4dHVyZS1ub25jZS0wMDExLWE
+    nonce: Zml4dHVyZS1ub25jZS0wMDE0LWE
     issued_at: "2026-11-23T09:00:00Z"
     ttl_seconds: 60
     actor: {agent_id: defi-agent}
@@ -39,9 +39,9 @@ requests:
       max_fee_per_gas: "2000000000"
       max_priority_fee_per_gas: "1000000000"
     provenance: {labels: [trusted_user]}
-  - id: req_fixture_0011_1
+  - id: req_fixture_0014_1
     tenant: test
-    nonce: Zml4dHVyZS1ub25jZS0wMDExLWI
+    nonce: Zml4dHVyZS1ub25jZS0wMDE0LWI
     issued_at: "2026-11-23T09:01:00Z"
     ttl_seconds: 60
     actor: {agent_id: defi-agent}
@@ -59,9 +59,9 @@ requests:
       max_fee_per_gas: "2000000000"
       max_priority_fee_per_gas: "1000000000"
     provenance: {labels: [trusted_user]}
-  - id: req_fixture_0011_2
+  - id: req_fixture_0014_2
     tenant: test
-    nonce: Zml4dHVyZS1ub25jZS0wMDExLWM
+    nonce: Zml4dHVyZS1ub25jZS0wMDE0LWM
     issued_at: "2026-11-23T09:02:00Z"
     ttl_seconds: 60
     actor: {agent_id: defi-agent}
@@ -79,9 +79,9 @@ requests:
       max_fee_per_gas: "2000000000"
       max_priority_fee_per_gas: "1000000000"
     provenance: {labels: [trusted_user]}
-  - id: req_fixture_0011_3
+  - id: req_fixture_0014_3
     tenant: test
-    nonce: Zml4dHVyZS1ub25jZS0wMDExLWQ
+    nonce: Zml4dHVyZS1ub25jZS0wMDE0LWQ
     issued_at: "2026-11-23T09:03:00Z"
     ttl_seconds: 60
     actor: {agent_id: defi-agent}

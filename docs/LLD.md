@@ -447,7 +447,7 @@ Implemented in CS-124 (`internal/limiter/breaker.go`):
   - When `-breaker-quorum` (default 2) distinct identities have voted, the breaker closes (`event: reset`, `stopbar_circuit_breaker_resets_total`).
   - The endpoint answers 200 when the vote closed the breaker, 202 when it was recorded below quorum (still open), and 404 when the breaker isn't open. Reset needs auth even on loopback. `GET /v1/breakers/{tenant}` returns `model.BreakerStatus` (`spec/schemas/breaker_status.v1.schema.json`).
 - **CLI:** `stopbar breaker status --tenant T` and `stopbar breaker reset --tenant T --key K [--key K2 …]`. The reset fails ("reset refused: n of M") while the quorum isn't met.
-- **Tests:** corpus CS-2026-0011 trips the breaker over HTTP, and the replay checks that every later step keeps denying and that `/metrics` reports the trip. `scripts/e2e_breaker.py` runs the 1-of-2 refusal and the 2-of-2 reset against the live binaries.
+- **Tests:** corpus CS-2026-0014 trips the breaker over HTTP, and the replay checks that every later step keeps denying and that `/metrics` reports the trip. `scripts/e2e_breaker.py` runs the 1-of-2 refusal and the 2-of-2 reset against the live binaries.
 
 ### 7.3a Implementation (`internal/limiter`, CS-121/122)
 

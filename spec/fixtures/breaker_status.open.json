@@ -2,7 +2,7 @@
   "tenant": "acme",
   "open": true,
   "tripped_at": "2026-11-23T10:00:00Z",
-  "trip_request_id": "req_fixture_0011_1",
+  "trip_request_id": "req_fixture_0014_1",
   "reason": "tenant 1h USD circuit breaker 30000",
   "votes": [
     {"approver": "ak_1a2b3c4d", "at": "2026-11-23T10:05:00Z"}
