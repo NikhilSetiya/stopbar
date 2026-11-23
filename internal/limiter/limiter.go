@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"math/big"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,7 +76,17 @@ type Rule struct {
 	// UnknownDestinationsOnly applies a destination rule only when the
 	// destination is not known (salami draining, FR-LIM-2a).
 	UnknownDestinationsOnly bool `json:"unknown_destinations_only,omitempty"`
+	// Escalate makes the rule a soft cap: a request that would exceed it is
+	// flagged soft_cap_exceeded (FlagSoftCap) for policy to escalate, instead
+	// of being denied. Reserve still denies an unflagged request that would
+	// exceed it (one that raced past the check), so the cap is never crossed
+	// without a policy decision that saw the flag.
+	Escalate bool `json:"escalate,omitempty"`
 }
+
+// FlagSoftCap is the intent flag the limiter adds when a request would exceed
+// an Escalate rule. The starter pack escalates on it (soft-cap-exceeded).
+const FlagSoftCap = "soft_cap_exceeded"
 
 type rule struct {
 	Rule
@@ -320,25 +331,13 @@ func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest
 		return fmt.Errorf("%w: %s (%s)", ErrDuplicateReservation, id, e.State)
 	}
 	ks := keys(er)
+	flagged := slices.Contains(er.Intent.Flags, FlagSoftCap)
 	for _, r := range l.rules {
-		if r.UnknownDestinationsOnly && er.Destination.Known {
-			continue
+		if !applies(r, er) || (r.Escalate && flagged) {
+			continue // a flagged request reached here only because policy allowed it
 		}
-		key := ks[r.Scope]
-		used := l.used(key, r.window, now)
-		if r.maxUSD != nil {
-			if amt.usd == nil {
-				return fmt.Errorf("%w (%s %s cap)", ErrUnpriced, r.Scope, r.Window)
-			}
-			if new(big.Int).Add(used.usd, amt.usd).Cmp(r.maxUSD) > 0 {
-				return fmt.Errorf("%w: %s %s USD cap %s", engine.ErrCapExceeded, r.Scope, r.Window, microToDecimal(r.maxUSD))
-			}
-		}
-		if r.MaxCount > 0 && used.count+amt.count > r.MaxCount {
-			return fmt.Errorf("%w: %s %s count cap %d", engine.ErrCapExceeded, r.Scope, r.Window, r.MaxCount)
-		}
-		if r.maxUnits != nil && new(big.Int).Add(used.units, amt.units).Cmp(r.maxUnits) > 0 {
-			return fmt.Errorf("%w: %s %s unit cap %s", engine.ErrCapExceeded, r.Scope, r.Window, r.maxUnits)
+		if err := l.check(r, ks[r.Scope], amt, now); err != nil {
+			return err
 		}
 	}
 	keyList := make([]string, 0, len(scopes))
@@ -436,6 +435,36 @@ func (l *Limiter) Owner(id string) (tenant, agent string, ok bool) {
 	return e.Tenant, e.Agent, true
 }
 
+// applies reports whether rule r covers request er. Destination rules skip
+// a request with no destination (nothing to count per destination), and
+// unknown_destinations_only rules skip registered destinations.
+func applies(r rule, er model.EnrichedRequest) bool {
+	if r.Scope == ScopeDestination && er.Intent.Destination == "" {
+		return false
+	}
+	return !r.UnknownDestinationsOnly || !er.Destination.Known
+}
+
+// check returns why adding amt to key would exceed rule r, or nil.
+func (l *Limiter) check(r rule, key string, amt amount, now time.Time) error {
+	used := l.used(key, r.window, now)
+	if r.maxUSD != nil {
+		if amt.usd == nil {
+			return fmt.Errorf("%w (%s %s cap)", ErrUnpriced, r.Scope, r.Window)
+		}
+		if new(big.Int).Add(used.usd, amt.usd).Cmp(r.maxUSD) > 0 {
+			return fmt.Errorf("%w: %s %s USD cap %s", engine.ErrCapExceeded, r.Scope, r.Window, microToDecimal(r.maxUSD))
+		}
+	}
+	if r.MaxCount > 0 && used.count+amt.count > r.MaxCount {
+		return fmt.Errorf("%w: %s %s count cap %d", engine.ErrCapExceeded, r.Scope, r.Window, r.MaxCount)
+	}
+	if r.maxUnits != nil && new(big.Int).Add(used.units, amt.units).Cmp(r.maxUnits) > 0 {
+		return fmt.Errorf("%w: %s %s unit cap %s", engine.ErrCapExceeded, r.Scope, r.Window, r.maxUnits)
+	}
+	return nil
+}
+
 // persist writes rec (and its audit entry, in the same transaction). With an
 // entry, a failure means the state change AND its record are both absent:
 // reported as engine.ErrAuditUnavailable, because the decision cannot be
@@ -451,16 +480,37 @@ func (l *Limiter) persist(rec Record, ae *model.AuditEntry) error {
 }
 
 // Enrich implements engine.Enricher: wallet-scope velocity (committed +
-// reserved) for the policy context.
+// reserved) for the policy context, and FlagSoftCap when the request would
+// exceed an Escalate rule (an unpriced request under a USD soft cap counts as
+// exceeding it). It must run after the enrichers that set the amount and the
+// destination facts.
 func (l *Limiter) Enrich(_ context.Context, er *model.EnrichedRequest) error {
+	var amt amount
+	if er.Request.Action.Kind != model.KindToolCall {
+		var err error
+		if amt, err = amountOf(*er); err != nil {
+			return err
+		}
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.clock()
 	l.sweep(now)
-	key := keys(*er)[ScopeWallet]
+	ks := keys(*er)
 	for i, name := range []string{"1m", "1h", "24h"} {
-		u := l.used(key, i, now)
+		u := l.used(ks[ScopeWallet], i, now)
 		er.Velocity[name] = model.Velocity{USD: microToDecimal(u.usd), Count: int(u.count)}
+	}
+	if er.Request.Action.Kind == model.KindToolCall {
+		return nil
+	}
+	for _, r := range l.rules {
+		if r.Escalate && applies(r, *er) && l.check(r, ks[r.Scope], amt, now) != nil {
+			if !slices.Contains(er.Intent.Flags, FlagSoftCap) {
+				er.Intent.Flags = append(slices.Clip(er.Intent.Flags), FlagSoftCap)
+			}
+			break
+		}
 	}
 	return nil
 }

@@ -77,6 +77,7 @@
       "type": "object",
       "properties": {
         "known_destinations": {
+          "description": "Seeds the tenant's destination registry (dest_known, address-poisoning similarity, unknown-destination caps). The sending wallet itself always counts as known.",
           "type": "array",
           "items": {
             "type": "string"
@@ -100,6 +101,11 @@
         },
         "price_stale": {
           "type": "boolean"
+        },
+        "max_slippage": {
+          "description": "Tenant max slippage for excessive_slippage, a fraction in [0, 1). Omitted: 0.03.",
+          "type": "string",
+          "pattern": "^0(\\.[0-9]+)?$"
         },
         "tokens": {
           "description": "ERC-20 contracts referenced by the request: lower-case contract address -> symbol and decimals. Balances and prices are keyed by symbol; the native asset is ETH with 18 decimals.",
@@ -163,6 +169,10 @@
                 "pattern": "^[0-9]+$"
               },
               "unknown_destinations_only": {
+                "type": "boolean"
+              },
+              "escalate": {
+                "description": "Soft cap: a request that would exceed it is flagged soft_cap_exceeded and escalated by policy, instead of denied.",
                 "type": "boolean"
               }
             }

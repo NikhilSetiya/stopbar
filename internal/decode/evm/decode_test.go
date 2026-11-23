@@ -256,3 +256,32 @@ func TestSwapAndMulticallRecipientIsPolicyDestination(t *testing.T) {
 		t.Fatalf("multicall: contract %s leaked into the policy destination", router)
 	}
 }
+
+// Swap intents carry their terms, so the enricher can check slippage against
+// a price quote (excessive_slippage, CS-145). Native in is token "".
+func TestSwapTerms(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		a    model.Action
+		want model.Swap
+	}{
+		{"v2 exact-in", tx(router, "0", calldata(selV2SwapExactTokensForTokens, u(1000), u(990), arrV{addrV(token), addrV(token2)}, addrV(wallet), u(1))),
+			model.Swap{ExactIn: true, TokenIn: token, AmountIn: "1000", TokenOut: token2, AmountOut: "990"}},
+		{"v2 ETH in", tx(router, "500", calldata(selV2SwapExactETHForTokens, u(7), arrV{addrV(weth), addrV(token)}, addrV(wallet), u(1))),
+			model.Swap{ExactIn: true, TokenIn: "", AmountIn: "500", TokenOut: token, AmountOut: "7"}},
+		{"v2 exact-out", tx(router, "0", calldata(selV2SwapTokensForExactTokens, u(10), u(2000), arrV{addrV(token), addrV(token2)}, addrV(wallet), u(1))),
+			model.Swap{ExactIn: false, TokenIn: token, AmountIn: "2000", TokenOut: token2, AmountOut: "10"}},
+		{"v3 exactOutput reverses the path", tx(router, "0", calldata(selR02ExactOutput, tupV{bytesV(v3path(token2, weth, token)), addrV(wallet), u(5), u(99)})),
+			model.Swap{ExactIn: false, TokenIn: token, AmountIn: "99", TokenOut: token2, AmountOut: "5"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			in := decode(t, tt.a)
+			if in.Swap == nil || *in.Swap != tt.want {
+				t.Fatalf("swap terms %+v, want %+v", in.Swap, tt.want)
+			}
+		})
+	}
+	if in := decode(t, tx(token, "0", calldata(selTransfer, addrV(friend), u(1)))); in.Swap != nil {
+		t.Fatalf("a transfer has swap terms %+v", in.Swap)
+	}
+}

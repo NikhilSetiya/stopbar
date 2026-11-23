@@ -126,8 +126,16 @@ func (l *fakeLimiter) Owner(id string) (string, string, bool) {
 
 type signFunc func(context.Context, model.Decision) (string, error)
 
-func (f signFunc) Sign(ctx context.Context, _ model.ActionRequest, d model.Decision) (string, error) {
+func (f signFunc) Sign(ctx context.Context, _ auth.Identity, _ model.ActionRequest, d model.Decision) (string, error) {
 	return f(ctx, d)
+}
+
+// recordSigner records the requester identity each token was issued for.
+type recordSigner struct{ ids []auth.Identity }
+
+func (s *recordSigner) Sign(_ context.Context, id auth.Identity, _ model.ActionRequest, _ model.Decision) (string, error) {
+	s.ids = append(s.ids, id)
+	return "aGVhZA.cGF5bG9hZA.c2ln", nil
 }
 
 var goodSigner = signFunc(func(context.Context, model.Decision) (string, error) { return "aGVhZA.cGF5bG9hZA.c2ln", nil })
@@ -569,12 +577,18 @@ func TestApprove(t *testing.T) {
 	t.Run("escalate records a pending entry; approve promotes to allow and signs", func(t *testing.T) {
 		r := newRig()
 		pend := newFakePending()
+		signer := &recordSigner{}
 		r.cfg.Policy = outcome(model.Escalate)
 		r.withPending(pend)
+		r.cfg.Signer = signer
 		e := r.engine(t)
 
 		req := fixtureRequest(t, "action_request.evm_tx.json")
-		d := evaluate(t, e, req)
+		requester := auth.Identity{Method: auth.MethodAPIKey, Tenant: req.Tenant, AgentID: req.Actor.AgentID, KeyID: "ak_requester"}
+		d, err := e.Evaluate(auth.WithIdentity(context.Background(), requester), req)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if d.Outcome != model.Escalate {
 			t.Fatalf("Outcome = %v, want escalate", d.Outcome)
 		}
@@ -586,7 +600,8 @@ func TestApprove(t *testing.T) {
 		}
 
 		// A human approves: the single escalation reason is now waived.
-		ad, err := e.Approve(context.Background(), req.ID, "ops@example.com")
+		approverCtx := auth.WithIdentity(context.Background(), auth.Identity{Method: auth.MethodAPIKey, Tenant: req.Tenant, KeyID: "ops@example.com"})
+		ad, err := e.Approve(approverCtx, req.ID, "ops@example.com")
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -604,6 +619,10 @@ func TestApprove(t *testing.T) {
 		}
 		if got := pend.state(req.ID); got != model.EscalationAllowed {
 			t.Fatalf("state after allow = %q, want allowed", got)
+		}
+		// decision-token v2: the token binds the requester, never the approver.
+		if by := pend.m[req.ID].Requester; by.KeyID != requester.KeyID || len(signer.ids) != 1 || signer.ids[0].KeyID != requester.KeyID {
+			t.Fatalf("token identity %+v, recorded requester %+v; want %s", signer.ids, by, requester.KeyID)
 		}
 		if got := r.audit.records[len(r.audit.records)-1]; got != model.AuditApproval {
 			t.Fatalf("last audit record = %q, want approval (the resolution)", got)
@@ -713,7 +732,7 @@ func TestApprove(t *testing.T) {
 	t.Run("the requester may not approve their own escalation", func(t *testing.T) {
 		pend := newFakePending()
 		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"),
-			Reasons: []string{escReason}, IssuedAt: rigNow, RequestedBy: "ak_requester"}
+			Reasons: []string{escReason}, IssuedAt: rigNow, Requester: auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", KeyID: "ak_requester"}}
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate)
 		r.withPending(pend)
@@ -790,7 +809,7 @@ func TestEscalationLifecycle(t *testing.T) {
 		r.cfg.Policy = outcome(model.Escalate)
 		pend := r.withPending(newFakePending())
 		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"),
-			Reasons: []string{escReason}, IssuedAt: issued, RequestedBy: requestedBy, State: model.EscalationPending}
+			Reasons: []string{escReason}, IssuedAt: issued, Requester: auth.Identity{KeyID: requestedBy}, State: model.EscalationPending}
 		return r, pend, r.engine(t)
 	}
 	bg := context.Background()
@@ -883,7 +902,7 @@ func TestEscalationLifecycle(t *testing.T) {
 
 	t.Run("execute hook: a refused execution resolves as denied", func(t *testing.T) {
 		_, pend, e := seed(t, rigNow, "")
-		d, err := e.ApproveWith(bg, "r1", "ak_ops", func(_ context.Context, d model.Decision, _ model.ActionRequest) model.Decision {
+		d, err := e.ApproveWith(bg, "r1", "ak_ops", func(_ context.Context, d model.Decision, _ model.ActionRequest, _ auth.Identity) model.Decision {
 			return e.denyWith(d, failed("FAIL_CLOSED_ADAPTER", errors.New("refused")))
 		})
 		if err != nil || d.Outcome != model.Deny || pend.state("r1") != model.EscalationDenied {

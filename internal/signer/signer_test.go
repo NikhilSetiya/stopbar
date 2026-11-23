@@ -7,6 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/canon"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
@@ -35,6 +37,7 @@ const (
 var b64 = base64.RawURLEncoding
 
 type rig struct {
+	dk      ed25519.PrivateKey
 	ring    *decision.KeyRing
 	signer  *decision.Signer
 	adapter *Adapter
@@ -44,7 +47,7 @@ type rig struct {
 func newRig(t *testing.T) *rig {
 	t.Helper()
 	_, dk, _ := ed25519.GenerateKey(nil)
-	r := &rig{ring: decision.NewKeyRing(dk), now: time.Now()}
+	r := &rig{dk: dk, ring: decision.NewKeyRing(dk), now: time.Now()}
 	r.signer = &decision.Signer{Keys: r.ring, Iss: "stopbar:test", Aud: "signer:local-1"}
 	wk, err := crypto.HexToECDSA(anvilKey)
 	if err != nil {
@@ -67,11 +70,19 @@ func action() model.Action {
 		TxType: &two, TxNonce: "7", GasLimit: "100000", MaxFeePerGas: "2000000000", MaxPriorityFeePerGas: "1000000000"}
 }
 
+// who is the authenticated requester the rig's tokens are bound to.
+var who = auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", AgentID: "agent", KeyID: "ak_requester", Scopes: []string{"evaluate"}}
+
 func request(a model.Action) model.ActionRequest {
 	return model.ActionRequest{ID: "req-1", Tenant: "acme", Nonce: "nonce-000000000001", Actor: model.Actor{AgentID: "agent"}, Action: a}
 }
 
 func (r *rig) token(t *testing.T, a model.Action, o model.Outcome) string {
+	t.Helper()
+	return r.tokenFor(t, who, a, o)
+}
+
+func (r *rig) tokenFor(t *testing.T, id auth.Identity, a model.Action, o model.Outcome) string {
 	t.Helper()
 	ph, err := decision.PayloadHash(a)
 	if err != nil {
@@ -79,7 +90,7 @@ func (r *rig) token(t *testing.T, a model.Action, o model.Outcome) string {
 	}
 	d := model.Decision{RequestID: "req-1", Outcome: o, PayloadHash: ph, PolicyBundleHash: "sha256:" + strings.Repeat("a", 64),
 		IssuedAt: r.now, ExpiresAt: r.now.Add(time.Minute)}
-	tok, err := r.signer.Sign(context.Background(), request(a), d)
+	tok, err := r.signer.Sign(context.Background(), id, request(a), d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +108,7 @@ func code(err error) string {
 func TestSignsExactlyTheApprovedTransaction(t *testing.T) {
 	r := newRig(t)
 	a := action()
-	raw, hash, err := r.adapter.SignTx(context.Background(), r.token(t, a, model.Allow), a)
+	raw, hash, err := r.adapter.SignTx(context.Background(), r.token(t, a, model.Allow), a, who)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +150,7 @@ func TestTxSwapIsRefused(t *testing.T) {
 			tok := r.token(t, approved, model.Allow)
 			swapped := action()
 			mut(&swapped)
-			if raw, _, err := r.adapter.SignTx(context.Background(), tok, swapped); code(err) != "PAYLOAD_MISMATCH" || raw != nil {
+			if raw, _, err := r.adapter.SignTx(context.Background(), tok, swapped, who); code(err) != "PAYLOAD_MISMATCH" || raw != nil {
 				t.Fatalf("swapped tx: err=%v raw=%x", err, raw)
 			}
 		})
@@ -157,7 +168,7 @@ func TestTokenReplayGivesOneSignature(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _, err := r.adapter.SignTx(context.Background(), tok, a)
+			_, _, err := r.adapter.SignTx(context.Background(), tok, a, who)
 			switch {
 			case err == nil:
 				signed.Add(1)
@@ -209,19 +220,70 @@ func TestTamperedTokensFailClosed(t *testing.T) {
 		"pinned kid, other key":        {resign(t, stranger, map[string]any{"alg": "EdDSA", "kid": kid, "typ": decision.TokenType}, payload), "BAD_SIGNATURE"},
 		"alg none":                     {mustHeader(t, map[string]any{"alg": "none", "kid": kid, "typ": decision.TokenType}) + "." + parts[1] + ".", "BAD_HEADER"},
 		"alg HS256 with public key":    {hs + "." + parts[1] + "." + b64.EncodeToString(mac.Sum(nil)), "BAD_HEADER"},
+		"v1 token (v1 typ)":            {resign(t, r.dk, map[string]any{"alg": "EdDSA", "kid": kid, "typ": "stopbar-decision+jws"}, v1Claims(t, payload)), "BAD_HEADER"},
+		"v1 claims, v2 typ":            {resign(t, r.dk, map[string]any{"alg": "EdDSA", "kid": kid, "typ": decision.TokenType}, v1Claims(t, payload)), "BAD_CLAIMS"},
 		"crit header":                  {resign(t, stranger, map[string]any{"alg": "EdDSA", "crit": []string{"exp"}, "kid": kid, "typ": decision.TokenType}, payload), "BAD_HEADER"},
 		"deny token":                   {r.token(t, a, model.Deny), "NOT_ALLOWED"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if raw, _, err := r.adapter.SignTx(context.Background(), tt.tok, a); code(err) != tt.want || raw != nil {
+			if raw, _, err := r.adapter.SignTx(context.Background(), tt.tok, a, who); code(err) != tt.want || raw != nil {
 				t.Fatalf("err = %v, want %s", err, tt.want)
 			}
 		})
 	}
 	// Expired: same token after its exp.
 	r.now = r.now.Add(time.Minute)
-	if _, _, err := r.adapter.SignTx(context.Background(), good, a); code(err) != "EXPIRED" {
+	if _, _, err := r.adapter.SignTx(context.Background(), good, a, who); code(err) != "EXPIRED" {
 		t.Fatalf("expired: %v", err)
+	}
+}
+
+// v1Claims turns v2 claims into v1's twelve (v=1, no identity).
+func v1Claims(t *testing.T, payload []byte) []byte {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(payload, &m); err != nil {
+		t.Fatal(err)
+	}
+	delete(m, "auth_method")
+	delete(m, "key_id")
+	delete(m, "agent_id")
+	m["v"] = 1
+	b, err := canon.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// A token bound to one requester never signs a request from another, and a
+// failed identity check does not burn the token.
+func TestIdentityMismatchRefused(t *testing.T) {
+	r := newRig(t)
+	a := action()
+	tok := r.token(t, a, model.Allow)
+	other := func(f func(*auth.Identity)) auth.Identity { id := who; f(&id); return id }
+	for name, id := range map[string]auth.Identity{
+		"other key":       other(func(id *auth.Identity) { id.KeyID = "ak_other" }),
+		"other agent":     other(func(id *auth.Identity) { id.AgentID = "other-agent" }),
+		"other method":    other(func(id *auth.Identity) { id.Method = auth.MethodMTLS }),
+		"other tenant":    other(func(id *auth.Identity) { id.Tenant = "other" }),
+		"unauthenticated": {},
+	} {
+		if raw, _, err := r.adapter.SignTx(context.Background(), tok, a, id); code(err) != "WRONG_IDENTITY" || raw != nil {
+			t.Fatalf("%s: err = %v", name, err)
+		}
+	}
+	if _, _, err := r.adapter.SignTx(context.Background(), tok, a, who); err != nil {
+		t.Fatalf("the bound requester: %v", err)
+	}
+	r = newRig(t) // fresh spent store: the next token reuses the request nonce
+	unauth := r.tokenFor(t, auth.Identity{}, a, model.Allow)
+	if _, _, err := r.adapter.SignTx(context.Background(), unauth, a, who); code(err) != "WRONG_IDENTITY" {
+		t.Fatalf("unauthenticated token for an authenticated request: %v", err)
+	}
+	if _, _, err := r.adapter.SignTx(context.Background(), unauth, a, auth.Identity{}); err != nil {
+		t.Fatalf("unauthenticated (auth off): %v", err)
 	}
 }
 
@@ -239,17 +301,17 @@ func TestWrongAudienceAndUnheldWallet(t *testing.T) {
 	other := &decision.Signer{Keys: r.ring, Iss: "stopbar:test", Aud: "signer:other"}
 	a := action()
 	ph, _ := decision.PayloadHash(a)
-	tok, err := other.Sign(context.Background(), request(a), model.Decision{RequestID: "req-1", Outcome: model.Allow, PayloadHash: ph,
+	tok, err := other.Sign(context.Background(), who, request(a), model.Decision{RequestID: "req-1", Outcome: model.Allow, PayloadHash: ph,
 		PolicyBundleHash: "sha256:" + strings.Repeat("a", 64), IssuedAt: r.now, ExpiresAt: r.now.Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.adapter.SignTx(context.Background(), tok, a); code(err) != "WRONG_AUDIENCE" {
+	if _, _, err := r.adapter.SignTx(context.Background(), tok, a, who); code(err) != "WRONG_AUDIENCE" {
 		t.Fatalf("wrong audience: %v", err)
 	}
 	unheld := action()
 	unheld.From = "0x5555555555555555555555555555555555555555"
-	if _, _, err := r.adapter.SignTx(context.Background(), r.token(t, unheld, model.Allow), unheld); !errors.Is(err, ErrNoKey) {
+	if _, _, err := r.adapter.SignTx(context.Background(), r.token(t, unheld, model.Allow), unheld, who); !errors.Is(err, ErrNoKey) {
 		t.Fatalf("unheld wallet: %v", err)
 	}
 }
@@ -294,7 +356,9 @@ type fakeEngine struct {
 	commits, releases []string
 	commitErr         error
 	outcome           model.Outcome
+	signAs            *auth.Identity       // token identity override (default: the ctx identity)
 	pending           *model.ActionRequest // the escalation ApproveWith re-runs
+	pendingBy         auth.Identity        // the pending request's requester
 	final             model.Decision       // what exec returned, i.e. what the engine records
 }
 
@@ -307,22 +371,28 @@ func (f *fakeEngine) Evaluate(ctx context.Context, req model.ActionRequest) (mod
 		d.ReservationID, d.Reasons = nil, []model.Reason{{Code: "POLICY", PolicyID: "p", Message: "m"}}
 		return d, nil
 	}
-	tok, err := f.r.signer.Sign(ctx, req, d)
+	requester, _ := auth.FromContext(ctx)
+	if f.signAs != nil {
+		requester = *f.signAs
+	}
+	tok, err := f.r.signer.Sign(ctx, requester, req, d)
 	d.Token = tok
 	return d, err
 }
 
-// ApproveWith re-runs the held escalation (if any) as an allow and hands it to
-// exec, as the real engine does; final records what exec returned.
-func (f *fakeEngine) ApproveWith(ctx context.Context, id, _ string, exec engine.Execute) (model.Decision, error) {
+// ApproveWith re-runs the held escalation (if any) as the engine does: the
+// token binds the pending record's requester, whoever the approver in ctx is.
+// It hands the allow to exec; final records what exec returned.
+func (f *fakeEngine) ApproveWith(_ context.Context, id, _ string, exec engine.Execute) (model.Decision, error) {
 	if f.pending == nil || f.pending.ID != id {
 		return model.Decision{}, model.ErrNoPending
 	}
+	ctx := auth.WithIdentity(context.Background(), f.pendingBy)
 	d, err := f.Evaluate(ctx, *f.pending)
 	if err != nil || d.Outcome != model.Allow {
 		return d, err
 	}
-	f.final = exec(ctx, d, *f.pending)
+	f.final = exec(ctx, d, *f.pending, f.pendingBy)
 	return f.final, nil
 }
 func (f *fakeEngine) Reject(context.Context, string, string) (model.Decision, error) {
@@ -349,8 +419,9 @@ func TestGatekeeper(t *testing.T) {
 	r := newRig(t)
 	e := &fakeEngine{r: r, outcome: model.Allow}
 	g := &Gatekeeper{Engine: e, Adapter: r.adapter}
+	ctx := auth.WithIdentity(context.Background(), who)
 
-	d, _ := g.Evaluate(context.Background(), request(action()))
+	d, _ := g.Evaluate(ctx, request(action()))
 	if d.Outcome != model.Allow || d.SignedTx == "" || d.Validate() != nil || len(e.commits) != 1 || !strings.HasSuffix(e.commits[0], d.TxHash) {
 		t.Fatalf("allow: %+v commits=%v", d, e.commits)
 	}
@@ -359,7 +430,7 @@ func TestGatekeeper(t *testing.T) {
 	unheld.From = "0x5555555555555555555555555555555555555555"
 	req := request(unheld)
 	req.Nonce = "nonce-000000000002"
-	d, _ = g.Evaluate(context.Background(), req)
+	d, _ = g.Evaluate(ctx, req)
 	if d.Outcome != model.Deny || d.SignedTx != "" || d.Validate() != nil || len(e.releases) != 1 || !strings.Contains(e.releases[0], "NO_KEY_FOR_FROM") {
 		t.Fatalf("adapter refusal: %+v releases=%v", d, e.releases)
 	}
@@ -370,15 +441,44 @@ func TestGatekeeper(t *testing.T) {
 	e.commitErr = errors.New("audit down")
 	req.Nonce, req.Action = "nonce-000000000003", action()
 	req.Action.TxNonce = "8"
-	d, _ = g.Evaluate(context.Background(), req)
+	d, _ = g.Evaluate(ctx, req)
 	if d.Outcome != model.Deny || d.SignedTx != "" || len(e.releases) != 2 {
 		t.Fatalf("commit failure must discard the signed tx: %+v", d)
 	}
 
 	e.outcome = model.Deny
 	req.Nonce = "nonce-000000000004"
-	if d, _ = g.Evaluate(context.Background(), req); d.Outcome != model.Deny || d.SignedTx != "" {
+	if d, _ = g.Evaluate(ctx, req); d.Outcome != model.Deny || d.SignedTx != "" {
 		t.Fatalf("deny passthrough: %+v", d)
+	}
+
+	// A token bound to an identity other than the authenticated requester's
+	// is refused and the reservation released.
+	e.outcome, e.commitErr = model.Allow, nil
+	e.signAs = &auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", AgentID: "agent", KeyID: "ak_other"}
+	req.Nonce, req.Action.TxNonce = "nonce-000000000005", "9"
+	if d, _ = g.Evaluate(ctx, req); d.Outcome != model.Deny || d.SignedTx != "" || !strings.Contains(e.releases[len(e.releases)-1], "WRONG_IDENTITY") {
+		t.Fatalf("identity mismatch: %+v releases=%v", d, e.releases)
+	}
+}
+
+// An approved escalation is signed against the identity that requested it,
+// not the approver's (who is in ctx).
+func TestGatekeeperApproveBindsRequester(t *testing.T) {
+	r := newRig(t)
+	pending := request(action())
+	e := &fakeEngine{r: r, outcome: model.Allow, pending: &pending, pendingBy: who}
+	g := &Gatekeeper{Engine: e, Adapter: r.adapter}
+	approverCtx := auth.WithIdentity(context.Background(), auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", KeyID: "ak_approver"})
+	if d, err := g.Approve(approverCtx, "req-1", "ak_approver"); err != nil || d.Outcome != model.Allow || d.SignedTx == "" {
+		t.Fatalf("approve: %+v %v", d, err)
+	}
+	// The engine reports one requester but the token binds another.
+	e.pending.Nonce, e.pending.Action.TxNonce = "nonce-000000000002", "8"
+	e.signAs = &auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", KeyID: "ak_approver"}
+	if d, _ := g.Approve(approverCtx, "req-1", "ak_approver"); d.Outcome != model.Deny || d.SignedTx != "" ||
+		!strings.Contains(e.releases[len(e.releases)-1], "WRONG_IDENTITY") {
+		t.Fatalf("approve with a token for the approver: %+v releases=%v", d, e.releases)
 	}
 }
 

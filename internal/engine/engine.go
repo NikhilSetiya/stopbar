@@ -84,9 +84,11 @@ var (
 )
 
 // Signer issues the decision token for an allow (CS-161, decision.Signer).
-// It needs the request for the token's tenant and nonce claims.
+// It needs the request for the token's tenant and nonce claims, and the
+// authenticated requester identity, which decision-token v2 binds (CS-103).
+// That identity is the zero Identity when auth is off.
 type Signer interface {
-	Sign(ctx context.Context, req model.ActionRequest, d model.Decision) (token string, err error)
+	Sign(ctx context.Context, requester auth.Identity, req model.ActionRequest, d model.Decision) (token string, err error)
 }
 
 // AuditLog appends to the hash chain (CS-171).
@@ -151,11 +153,12 @@ type PendingEscalation struct {
 	Request  model.ActionRequest `json:"request"`
 	Reasons  []string            `json:"reasons"` // the escalated policy IDs an approver must cover
 	IssuedAt time.Time           `json:"issued_at"`
-	// RequestedBy is the KeyID of the identity that submitted the request, so
-	// the same identity cannot also approve or reject it (CS-152 separation of
-	// duties). Empty when auth is off (loopback dev), which disables the check.
-	RequestedBy string                `json:"requested_by,omitempty"`
-	State       model.EscalationState `json:"state"`
+	// Requester is the authenticated identity that submitted the request. The
+	// same key cannot also approve it (CS-152 separation of duties), and an
+	// approved allow's token binds it, not the approver (decision-token v2).
+	// Zero when auth is off (loopback dev), which disables the SoD check.
+	Requester auth.Identity         `json:"requester"`
+	State     model.EscalationState `json:"state"`
 	// Decision is the escalate decision while pending, then the final one.
 	Decision   *model.Decision `json:"decision,omitempty"`
 	ResolvedBy string          `json:"resolved_by,omitempty"`
@@ -171,9 +174,11 @@ type PendingStore interface {
 }
 
 // Execute runs when an approval's re-run allows (gatekeeper mode: sign the
-// transaction and commit the reservation). It returns the final decision: the
-// allow, with the signed transaction, or a deny if execution failed.
-type Execute func(ctx context.Context, d model.Decision, req model.ActionRequest) model.Decision
+// transaction and commit the reservation). requester is the identity that
+// submitted the request, which the token binds (decision-token v2), not the
+// approver in ctx. It returns the final decision: the allow, with the signed
+// transaction, or a deny if execution failed.
+type Execute func(ctx context.Context, d model.Decision, req model.ActionRequest, requester auth.Identity) model.Decision
 
 // ErrNoPending (re-exported from model) means no escalation with that id is
 // visible to the caller.
@@ -299,7 +304,8 @@ func (e *Engine) Evaluate(ctx context.Context, req model.ActionRequest) (d model
 			d = e.deny(req.ID, now, "", failed(CodeEngine, fmt.Errorf("internal error")))
 		}
 	}()
-	return e.evaluate(ctx, req, now, nil, ""), nil
+	requester, _ := auth.FromContext(ctx)
+	return e.evaluate(ctx, req, now, nil, "", requester), nil
 }
 
 // Approve re-evaluates a pending escalation (CS-151/152) and returns the
@@ -334,12 +340,12 @@ func (e *Engine) ApproveWith(ctx context.Context, id, approver string, exec Exec
 	for _, r := range pe.Reasons {
 		approved[r] = true
 	}
-	out := e.evaluate(ctx, pe.Request, now, approved, approver)
+	out := e.evaluate(ctx, pe.Request, now, approved, approver, pe.Requester)
 	if out.Outcome != model.Allow {
 		return out, nil // still pending: the approver can see why, and retry
 	}
 	if exec != nil {
-		out = exec(ctx, out, pe.Request)
+		out = exec(ctx, out, pe.Request, pe.Requester)
 	}
 	state := model.EscalationAllowed
 	if out.Outcome != model.Allow {
@@ -411,7 +417,7 @@ func (e *Engine) openPending(ctx context.Context, id, approver string, now time.
 		return pe, pe.Decision, nil
 	case pe.State != model.EscalationPending:
 		return pe, nil, model.ErrResolved
-	case approver != "" && approver == pe.RequestedBy:
+	case approver != "" && approver == pe.Requester.KeyID:
 		d := e.deny(id, now, pe.payloadHash(), failed(CodeApprovalSelf, fmt.Errorf("the requester may not resolve their own escalation")))
 		e.auditRefusal(ctx, pe.Request, d)
 		return pe, &d, nil
@@ -525,7 +531,11 @@ func allApproved(reasons []model.Reason, approved map[string]bool) bool {
 	return true
 }
 
-func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time.Time, approved map[string]bool, approver string) model.Decision {
+// evaluate runs the pipeline. requester is the authenticated identity that
+// submitted req (from the gateway, or from the pending record on approval);
+// the audit records carry the identity in ctx, which on approval is the
+// approver's.
+func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time.Time, approved map[string]bool, approver string, requester auth.Identity) model.Decision {
 	audit := func(d model.Decision, extra map[string]any) model.Decision {
 		body := addIdentity(ctx, map[string]any{"request": req, "decision": d})
 		for k, v := range extra {
@@ -590,11 +600,8 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 			// CS-152: record the escalation so `stopbar approve <id>` can re-run it,
 			// with the requester's identity so it cannot also approve itself. The
 			// record and the escalate decision's audit record are one transaction.
-			pe := PendingEscalation{Request: req, Reasons: policyIDs(reasons), IssuedAt: now,
+			pe := PendingEscalation{Request: req, Reasons: policyIDs(reasons), IssuedAt: now, Requester: requester,
 				State: model.EscalationPending, Decision: &d}
-			if rid, ok := auth.FromContext(ctx); ok {
-				pe.RequestedBy = rid.KeyID
-			}
 			rec := &model.AuditEntry{Type: model.AuditDecision, Body: addIdentity(ctx, map[string]any{"request": req, "decision": d, "context": er})}
 			if perr := e.record(ctx, func(ctx context.Context) error { return e.cfg.Pending.Put(ctx, pe, rec) }); perr != nil {
 				e.unaudited(req.ID, perr)
@@ -615,7 +622,7 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 	id := req.ID
 	d.ReservationID = &id
 	var token string
-	if err := e.call(ctx, func(ctx context.Context) (err error) { token, err = e.cfg.Signer.Sign(ctx, req, d); return }); err != nil || token == "" {
+	if err := e.call(ctx, func(ctx context.Context) (err error) { token, err = e.cfg.Signer.Sign(ctx, requester, req, d); return }); err != nil || token == "" {
 		if err == nil {
 			err = errors.New("signer returned an empty token")
 		}

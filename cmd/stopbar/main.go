@@ -43,7 +43,14 @@ const usage = `usage:
   stopbar audit verify --state-dir DIR (--keys JWKS.json | --decision-key FILE) [--from N] [--to M] [--require-covered [--allow-empty]]
       recompute the audit hash chain and check the signed checkpoints, offline
   stopbar audit export --state-dir DIR [--from N] [--to M]
-      print audit records as JSON lines (unverified; run verify first)`
+      print audit records as JSON lines (unverified; run verify first)
+  stopbar contacts add <address> --state-dir DIR --tenant T [--label L] [--decision-key FILE]
+  stopbar contacts remove <address> --state-dir DIR --tenant T [--decision-key FILE]
+  stopbar contacts list --state-dir DIR --tenant T
+      edit or list a tenant's known destinations (the registry behind dest_known
+      and address-poisoning checks). Changes are audited; stop stopbard first,
+      since it holds the state file. --decision-key signs an audit checkpoint
+      over the change; without it the change is covered at stopbard's next exit`
 
 func main() {
 	if len(os.Args) < 2 || os.Args[1] == "version" {
@@ -57,6 +64,10 @@ func main() {
 		}
 	case "keygen":
 		if err := keygenCmd(os.Args[2:]); err != nil {
+			fail(err.Error())
+		}
+	case "contacts":
+		if err := contactsCmd(os.Args[2:]); err != nil {
 			fail(err.Error())
 		}
 	case "approve":

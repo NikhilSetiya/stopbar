@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
+	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/model"
@@ -53,7 +54,8 @@ func (g *Gatekeeper) Evaluate(ctx context.Context, req model.ActionRequest) (mod
 	if err != nil || d.Outcome != model.Allow {
 		return d, err
 	}
-	raw, hash, err := g.Adapter.SignTx(ctx, d.Token, req.Action)
+	requester, _ := auth.FromContext(ctx) // set by the gateway's auth; zero when auth is off
+	raw, hash, err := g.Adapter.SignTx(ctx, d.Token, req.Action, requester)
 	if err != nil {
 		reason := "adapter refused: " + adapterCode(err)
 		g.log().Warn("gatekeeper: adapter refused an allow", "request_id", req.ID, "err", err)
@@ -71,11 +73,13 @@ func (g *Gatekeeper) Evaluate(ctx context.Context, req model.ActionRequest) (mod
 
 // Approve re-evaluates a pending escalation (CS-151/152) and, if it now allows,
 // signs and commits the transaction exactly as Evaluate does for a fresh allow.
-// The engine records the final decision (signed tx, or the refusal) as the
+// The token binds the identity that requested the action, not the approver
+// in ctx, so that is the identity the adapter checks it against. The engine
+// records the final decision (signed tx, or the refusal) as the
 // escalation's resolution, so a poll returns it.
 func (g *Gatekeeper) Approve(ctx context.Context, id, approver string) (model.Decision, error) {
-	return g.Engine.ApproveWith(ctx, id, approver, func(ctx context.Context, d model.Decision, req model.ActionRequest) model.Decision {
-		raw, hash, err := g.Adapter.SignTx(ctx, d.Token, req.Action)
+	return g.Engine.ApproveWith(ctx, id, approver, func(ctx context.Context, d model.Decision, req model.ActionRequest, requester auth.Identity) model.Decision {
+		raw, hash, err := g.Adapter.SignTx(ctx, d.Token, req.Action, requester)
 		if err != nil {
 			g.log().Warn("gatekeeper: adapter refused an approved allow", "request_id", req.ID, "err", err)
 			g.release(ctx, req.ID, "adapter refused: "+adapterCode(err))

@@ -30,6 +30,9 @@ type Method string
 const (
 	MethodAPIKey Method = "api_key"
 	MethodMTLS   Method = "mtls"
+	// MethodNone is no credential at all: auth is off (loopback dev only). A
+	// decision token binds it explicitly (decision-token-v2 §3.3).
+	MethodNone Method = "none"
 )
 
 // Identity is who a request is authenticated as. It is the single source of

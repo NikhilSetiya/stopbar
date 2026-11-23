@@ -38,6 +38,7 @@ jobs:
           pip install pyyaml
           go build -o "$RUNNER_TEMP/" ./cmd/stopbard ./cmd/stopbar
           python3 scripts/e2e_corpus.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
+          python3 scripts/e2e_contacts.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
       # Reservation and escalation lifecycle over HTTP (CS-105/151/152).
       - name: lifecycle over HTTP
         run: python3 scripts/e2e_lifecycle.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
