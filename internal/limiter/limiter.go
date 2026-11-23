@@ -62,7 +62,7 @@ var (
 	ErrUnknownReservation   = engine.ErrUnknownReservation
 	ErrReservationExpired   = engine.ErrReservationExpired
 	ErrDuplicateReservation = errors.New("limiter: request ID was already used for a finished reservation")
-	ErrAlreadyCommitted     = errors.New("limiter: reservation is already committed")
+	ErrAlreadyCommitted     = engine.ErrAlreadyCommitted
 )
 
 // Rule is one cap. At least one of MaxUSD, MaxCount and MaxUnits must be set.
@@ -348,6 +348,7 @@ func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest
 	rec := Record{
 		ID: id, Keys: keyList, Count: amt.count, Units: amt.units.String(),
 		Created: now, Expires: now.Add(ttl), State: StateReserved,
+		Tenant: er.Request.Tenant, Agent: er.Request.Actor.AgentID,
 	}
 	if amt.usd != nil {
 		rec.USDMicro = amt.usd.String()
@@ -395,7 +396,8 @@ func (l *Limiter) Commit(_ context.Context, id, txRef string, ae *model.AuditEnt
 	return nil
 }
 
-// Release frees a live reservation.
+// Release frees a live reservation. Releasing one already released is a
+// no-op (nothing changes, so nothing is written or audited): retries are safe.
 func (l *Limiter) Release(_ context.Context, id string, ae *model.AuditEntry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -403,8 +405,10 @@ func (l *Limiter) Release(_ context.Context, id string, ae *model.AuditEntry) er
 	l.sweep(now)
 	e, ok := l.recs[id]
 	switch {
-	case !ok || e.State == StateReleased:
+	case !ok:
 		return fmt.Errorf("%w: %s", ErrUnknownReservation, id)
+	case e.State == StateReleased:
+		return nil
 	case e.State == StateCommitted:
 		return fmt.Errorf("%w: %s", ErrAlreadyCommitted, id)
 	case !e.counted:
@@ -418,6 +422,18 @@ func (l *Limiter) Release(_ context.Context, id string, ae *model.AuditEntry) er
 	e.Record = rec
 	l.subtract(e)
 	return nil
+}
+
+// Owner implements engine.Limiter: the tenant and agent a reservation (live,
+// committed or released, while retained) was made for.
+func (l *Limiter) Owner(id string) (tenant, agent string, ok bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, ok := l.recs[id]
+	if !ok || e.Tenant == "" {
+		return "", "", false // records written before owners were stored have none: fail closed
+	}
+	return e.Tenant, e.Agent, true
 }
 
 // persist writes rec (and its audit entry, in the same transaction). With an

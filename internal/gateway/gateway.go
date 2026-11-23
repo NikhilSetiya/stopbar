@@ -11,6 +11,11 @@
 // (issued_at within skew, not expired) → nonce consumed. The nonce is spent
 // before evaluation, so even a denied request cannot be retried with it.
 // Authentication (CS-103) slots in before the body is read.
+//
+// The lifecycle routes act on an earlier request's state and always need an
+// authenticated identity: commit/release (CS-105) take the requester's own
+// evaluate-scoped key, approve/reject (CS-151) an approve-scoped key of the
+// same tenant, and the decision poll (CS-152) either.
 package gateway
 
 import (
@@ -24,7 +29,9 @@ import (
 	"math/big"
 	"mime"
 	"net/http"
+	"reflect"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"time"
 
@@ -42,17 +49,32 @@ const MaxBodyBytes = 64 << 10
 // representable as an IEEE-754 double, which is what JCS hashes.
 var maxSafeInt = new(big.Rat).SetInt64(1 << 53)
 
-// EvalScope is the scope an API key needs to call /v1/evaluate; ApproveScope is
-// the scope an approver key needs to approve an escalation (CS-151).
+// EvalScope is the scope an API key needs to call /v1/evaluate (and to commit
+// or release its own reservations, CS-105); ApproveScope is the scope an
+// approver key needs to approve or reject an escalation (CS-151).
 const (
 	EvalScope    = "evaluate"
 	ApproveScope = "approve"
 )
 
-// Approver re-evaluates and, if it now allows, executes a pending escalation
-// (CS-151/152). It returns model.ErrNoPending when the id is unknown.
+// Approver drives the escalation lifecycle (CS-151/152): Approve re-evaluates
+// and, if it now allows, executes a pending escalation; Reject denies it;
+// Status reports it. They return model.ErrNoPending for an id the caller
+// cannot see and model.ErrResolved once it is allowed, denied or expired.
 type Approver interface {
 	Approve(ctx context.Context, id, approver string) (model.Decision, error)
+	Reject(ctx context.Context, id, approver string) (model.Decision, error)
+	Status(ctx context.Context, id string) (model.EscalationStatus, error)
+}
+
+// Actions settles an allowed request's reservation (CS-105, Engine.Commit and
+// Release). Owner reports who it was reserved for, so only that requester can
+// settle it. Commit and Release return model.ErrUnknownReservation,
+// ErrReservationExpired or ErrAlreadyCommitted for an id with nothing to act on.
+type Actions interface {
+	Owner(id string) (tenant, agent string, ok bool)
+	Commit(ctx context.Context, id, txRef string) error
+	Release(ctx context.Context, id, reason string) error
 }
 
 // Authenticator derives the caller's identity from the request (an API key
@@ -108,6 +130,9 @@ const (
 	CodeIdentityMismatch  Code = "IDENTITY_MISMATCH" // body tenant/agent != authenticated identity
 	CodeForbiddenScope    Code = "FORBIDDEN_SCOPE"   // the key lacks the required scope
 	CodeRateLimited       Code = "RATE_LIMITED"      // per-identity rate limit exceeded
+	CodeConflict          Code = "CONFLICT"          // the reservation is already committed (CS-105)
+	CodeAlreadyResolved   Code = "ALREADY_RESOLVED"  // the escalation was already allowed, denied or expired (CS-152)
+	CodeReservationGone   Code = "RESERVATION_EXPIRED"
 )
 
 // ClockSkew is how far issued_at may lead or trail the gateway clock (LLD §4).
@@ -143,6 +168,9 @@ var codeStatus = map[Code]int{
 	CodeIdentityMismatch:  http.StatusForbidden,
 	CodeForbiddenScope:    http.StatusForbidden,
 	CodeRateLimited:       http.StatusTooManyRequests,
+	CodeConflict:          http.StatusConflict,
+	CodeAlreadyResolved:   http.StatusConflict,
+	CodeReservationGone:   http.StatusGone,
 }
 
 // ErrorBody is the wire shape of every non-2xx response (LLD §4.1).
@@ -183,9 +211,11 @@ type Config struct {
 	Audit AuditSink
 	// RatePerMin is the per-identity request cap per minute (0: no gateway cap).
 	RatePerMin int
-	// Approver executes an approved escalation (CS-151/152); nil disables
-	// /v1/approvals.
+	// Approver drives escalations (CS-151/152); nil disables /v1/approvals and
+	// /v1/decisions.
 	Approver Approver
+	// Actions settles reservations (CS-105); nil disables /v1/actions.
+	Actions Actions
 }
 
 // Gateway is an http.Handler serving the Stopbar API.
@@ -202,12 +232,13 @@ type Gateway struct {
 	audit    AuditSink
 	rate     *rateLimiter
 	approver Approver
+	actions  Actions
 }
 
 // New returns a Gateway.
 func New(cfg Config) *Gateway {
 	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, keys: cfg.Keys, extra: cfg.Counters, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux(),
-		auth: cfg.Authenticator, audit: cfg.Audit, rate: newRateLimiter(cfg.RatePerMin), approver: cfg.Approver}
+		auth: cfg.Authenticator, audit: cfg.Audit, rate: newRateLimiter(cfg.RatePerMin), approver: cfg.Approver, actions: cfg.Actions}
 	if g.log == nil {
 		g.log = slog.New(slog.DiscardHandler)
 	}
@@ -219,6 +250,10 @@ func New(cfg Config) *Gateway {
 	}
 	g.route("/v1/evaluate", http.MethodPost, g.evaluate)
 	g.route("/v1/approvals/{id}", http.MethodPost, g.approve)
+	g.route("/v1/approvals/{id}/reject", http.MethodPost, g.reject)
+	g.route("/v1/decisions/{id}", http.MethodGet, g.poll)
+	g.route("/v1/actions/{id}/commit", http.MethodPost, g.commit)
+	g.route("/v1/actions/{id}/release", http.MethodPost, g.release)
 	g.route("/healthz", http.MethodGet, g.healthz)
 	g.route("/metrics", http.MethodGet, g.serveMetrics)
 	g.route("/v1/keys", http.MethodGet, g.serveKeys)
@@ -300,32 +335,215 @@ func (g *Gateway) evaluate(w http.ResponseWriter, r *http.Request) error {
 	return g.writeJSON(w, "/v1/evaluate", outcomeStatus[d.Outcome], d)
 }
 
+// authorize authenticates a lifecycle call and checks that the key carries one
+// of scopes. A missing scope is audited.
+func (g *Gateway) authorize(r *http.Request, id string, scopes ...string) (auth.Identity, error) {
+	identity, err := g.auth.Authenticate(r)
+	if err != nil {
+		return identity, withID(fail(CodeUnauthenticated, "missing or invalid credential"), id)
+	}
+	if !slices.ContainsFunc(scopes, identity.HasScope) {
+		g.auditReject(r.Context(), identity, model.ActionRequest{ID: id}, "key lacks the "+strings.Join(scopes, " or ")+" scope")
+		return identity, withID(fail(CodeForbiddenScope, "the API key lacks the %s scope", strings.Join(scopes, " or ")), id)
+	}
+	return identity, nil
+}
+
 // approve re-evaluates and, if it now allows, executes a pending escalation
 // (CS-151/152). It needs an approver-scoped credential; the outcome status is
 // the decision's own (200 allow+executed, 202 still escalated, 403 denied).
 func (g *Gateway) approve(w http.ResponseWriter, r *http.Request) error {
+	return g.resolve(w, r, "/v1/approvals", Approver.Approve)
+}
+
+// reject denies a pending escalation (CS-151/152): 403 with the deny decision.
+func (g *Gateway) reject(w http.ResponseWriter, r *http.Request) error {
+	return g.resolve(w, r, "/v1/approvals/reject", Approver.Reject)
+}
+
+func (g *Gateway) resolve(w http.ResponseWriter, r *http.Request, route string,
+	fn func(Approver, context.Context, string, string) (model.Decision, error)) error {
 	id := r.PathValue("id")
 	if g.approver == nil || g.auth == nil {
 		return withID(fail(CodeEngineUnavailable, "approvals are not configured"), id)
 	}
-	identity, aerr := g.auth.Authenticate(r)
-	if aerr != nil {
-		return withID(fail(CodeUnauthenticated, "missing or invalid credential"), id)
-	}
-	if !identity.HasScope(ApproveScope) {
-		g.auditReject(r.Context(), identity, model.ActionRequest{ID: id}, "key lacks the "+ApproveScope+" scope")
-		return withID(fail(CodeForbiddenScope, "the API key lacks the %q scope", ApproveScope), id)
-	}
-	ctx := auth.WithIdentity(r.Context(), identity) // CS-103: the approver is in the re-run's audit record
-	d, err := g.approver.Approve(ctx, id, identity.KeyID)
+	identity, err := g.authorize(r, id, ApproveScope)
 	if err != nil {
-		if errors.Is(err, model.ErrNoPending) {
-			return withID(fail(CodeNotFound, "no pending escalation for that id"), id)
-		}
-		g.log.Error("approve error", "id", id, "err", err)
+		return err
+	}
+	ctx := auth.WithIdentity(r.Context(), identity) // the approver is in the audit record
+	d, err := fn(g.approver, ctx, id, identity.KeyID)
+	switch {
+	case errors.Is(err, model.ErrNoPending):
+		return withID(fail(CodeNotFound, "no pending escalation for that id"), id)
+	case errors.Is(err, model.ErrResolved):
+		return withID(fail(CodeAlreadyResolved, "the escalation was already resolved; GET /v1/decisions/%s for the outcome", id), id)
+	case err != nil:
+		g.log.Error("approval error", "route", route, "id", id, "err", err)
 		return withID(fail(CodeInternal, "approval failed"), id)
 	}
-	return g.writeJSON(w, "/v1/approvals", outcomeStatus[d.Outcome], d)
+	return g.writeJSON(w, route, outcomeStatus[d.Outcome], d)
+}
+
+// stateStatus keeps the poll's status code as safe to act on as /v1/evaluate:
+// 200 only once the escalation is allowed, 202 while it waits, 403 otherwise.
+var stateStatus = map[model.EscalationState]int{
+	model.EscalationPending: http.StatusAccepted,
+	model.EscalationAllowed: http.StatusOK,
+	model.EscalationDenied:  http.StatusForbidden,
+	model.EscalationExpired: http.StatusForbidden,
+}
+
+// poll serves GET /v1/decisions/{id} (CS-152): the escalation's state and
+// decision, to the requester itself (evaluate scope, same tenant and agent)
+// or to an approver of its tenant. Anyone else gets 404, as for an unknown id.
+func (g *Gateway) poll(w http.ResponseWriter, r *http.Request) error {
+	id := r.PathValue("id")
+	if g.approver == nil || g.auth == nil {
+		return withID(fail(CodeEngineUnavailable, "approvals are not configured"), id)
+	}
+	identity, err := g.authorize(r, id, EvalScope, ApproveScope)
+	if err != nil {
+		return err
+	}
+	st, err := g.approver.Status(auth.WithIdentity(r.Context(), identity), id)
+	if errors.Is(err, model.ErrNoPending) || (err == nil && !identity.HasScope(ApproveScope) && st.Request.Actor.AgentID != identity.AgentID) {
+		return withID(fail(CodeNotFound, "no escalation for that id"), id)
+	}
+	if err != nil {
+		g.log.Error("decision poll error", "id", id, "err", err)
+		return withID(fail(CodeInternal, "poll failed"), id)
+	}
+	status, ok := stateStatus[st.State]
+	if !ok {
+		status = http.StatusForbidden
+	}
+	return g.writeJSON(w, "/v1/decisions", status, st)
+}
+
+// SettleBody is the body of /v1/actions/{id}/commit (tx_ref required: the
+// broadcast tx hash) and /release (reason optional; the body may be empty).
+type SettleBody struct {
+	TxRef  string `json:"tx_ref,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+const maxSettleBytes = 4 << 10
+
+// commit reports that an allowed action was broadcast, turning its
+// reservation into committed spend (CS-105).
+func (g *Gateway) commit(w http.ResponseWriter, r *http.Request) error { return g.settle(w, r, true) }
+
+// release abandons an allowed action and frees its reservation (CS-105).
+func (g *Gateway) release(w http.ResponseWriter, r *http.Request) error { return g.settle(w, r, false) }
+
+// settle serves commit and release. Only the requester (the same tenant and
+// agent, with an evaluate-scoped key) may settle its reservation: another
+// agent releasing it would free capacity that a still-valid token can spend.
+// Retries are safe: committing again with the same tx_ref and releasing again
+// both answer 200.
+func (g *Gateway) settle(w http.ResponseWriter, r *http.Request, commit bool) error {
+	id := r.PathValue("id")
+	route := "/v1/actions/release"
+	if commit {
+		route = "/v1/actions/commit"
+	}
+	if g.actions == nil || g.auth == nil {
+		return withID(fail(CodeEngineUnavailable, "commit/release are not configured"), id)
+	}
+	identity, err := g.authorize(r, id, EvalScope)
+	if err != nil {
+		return err
+	}
+	body, aerr := decodeSettle(w, r, commit)
+	if aerr != nil {
+		return withID(aerr, id)
+	}
+	tenant, agent, ok := g.actions.Owner(id)
+	if !ok || tenant != identity.Tenant || agent != identity.AgentID {
+		if ok {
+			g.auditReject(r.Context(), identity, model.ActionRequest{ID: id, Tenant: tenant, Actor: model.Actor{AgentID: agent}}, "not the requester of this reservation")
+		}
+		return withID(fail(CodeNotFound, "no reservation for that id"), id)
+	}
+	ctx := auth.WithIdentity(r.Context(), identity) // the settler is in the audit record
+	out := map[string]any{"request_id": id}
+	if commit {
+		err = g.actions.Commit(ctx, id, body.TxRef)
+		out["state"], out["tx_ref"] = "committed", body.TxRef
+		if errors.Is(err, model.ErrReservationExpired) {
+			err, out["late"] = nil, true // a late commit still records the spend (LLD §7.3a)
+		}
+	} else {
+		reason := body.Reason
+		if reason == "" {
+			reason = "client"
+		}
+		err = g.actions.Release(ctx, id, reason)
+		out["state"] = "released"
+	}
+	switch {
+	case err == nil:
+		return g.writeJSON(w, route, http.StatusOK, out)
+	case errors.Is(err, model.ErrUnknownReservation):
+		return withID(fail(CodeNotFound, "no live or committed reservation for that id"), id)
+	case errors.Is(err, model.ErrAlreadyCommitted):
+		return withID(fail(CodeConflict, "the reservation is already committed"), id)
+	case errors.Is(err, model.ErrReservationExpired):
+		return withID(fail(CodeReservationGone, "the reservation already lapsed; nothing is held"), id)
+	}
+	g.log.Error("settle error", "route", route, "id", id, "err", err)
+	return withID(fail(CodeInternal, "could not record the %s", out["state"]), id)
+}
+
+// decodeSettle applies the same structural checks as /v1/evaluate to the small
+// settle body: JSON content type, size, well-formed without duplicate keys,
+// exact-case known fields only.
+func decodeSettle(w http.ResponseWriter, r *http.Request, commit bool) (SettleBody, *apiError) {
+	var b SettleBody
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSettleBytes))
+	if err != nil {
+		return b, fail(CodeBodyTooLarge, "body exceeds %d bytes", maxSettleBytes)
+	}
+	if len(bytes.TrimSpace(raw)) > 0 {
+		if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+			return b, fail(CodeUnsupportedMedia, "Content-Type must be application/json")
+		}
+		if _, err := canon.Transform(raw); err != nil {
+			if errors.Is(err, canon.ErrDuplicateKey) {
+				return b, fail(CodeDuplicateKey, "%v", err)
+			}
+			return b, fail(CodeMalformedJSON, "%v", err)
+		}
+		if err := checkExactKeysAs(raw, reflect.TypeOf(SettleBody{})); err != nil {
+			var ae *apiError
+			errors.As(err, &ae)
+			return b, ae
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&b); err != nil {
+			return b, fail(CodeInvalidRequest, "%s", strings.TrimPrefix(err.Error(), "json: "))
+		}
+	}
+	var problems []string
+	switch {
+	case commit && b.TxRef == "":
+		problems = append(problems, "tx_ref is required")
+	case !commit && b.TxRef != "":
+		problems = append(problems, "tx_ref is not accepted on release")
+	case commit && b.Reason != "":
+		problems = append(problems, "reason is not accepted on commit")
+	}
+	if len(b.TxRef) > 256 || len(b.Reason) > 256 {
+		problems = append(problems, "tx_ref and reason are at most 256 bytes")
+	}
+	if len(problems) > 0 {
+		e := fail(CodeInvalidRequest, "request failed validation")
+		e.Problems = problems
+		return b, e
+	}
+	return b, nil
 }
 
 // outcomeStatus makes the status code alone safe to act on: a client that

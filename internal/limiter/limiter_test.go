@@ -168,7 +168,9 @@ func TestTypedErrorsOnCommitAndRelease(t *testing.T) {
 	if err := l.Release(bg, "r1", nil); err != nil {
 		t.Fatal(err)
 	}
-	wantErr(t, l.Release(bg, "r1", nil), ErrUnknownReservation)
+	if err := l.Release(bg, "r1", nil); err != nil {
+		t.Fatalf("second release must be an idempotent no-op: %v", err)
+	}
 	wantErr(t, l.Commit(bg, "r1", "0x1", nil), ErrUnknownReservation)
 
 	mustReserve(t, l, "r2", req(walletA, dest, "10", "1", true))

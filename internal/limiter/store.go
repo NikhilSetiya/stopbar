@@ -34,6 +34,10 @@ type Record struct {
 	State       string     `json:"state"`
 	CommittedAt *time.Time `json:"committed_at,omitempty"`
 	TxRef       string     `json:"tx_ref,omitempty"`
+	// Tenant and Agent own the reservation: only they may commit or release
+	// it over HTTP (CS-105).
+	Tenant string `json:"tenant,omitempty"`
+	Agent  string `json:"agent,omitempty"`
 }
 
 func fromRecord(r Record) (*entry, error) {

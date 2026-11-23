@@ -21,6 +21,7 @@ import (
 
 	"github.com/NikhilSetiya/stopbar/internal/canon"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
+	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 	"github.com/NikhilSetiya/stopbar/internal/nonce"
 )
@@ -293,6 +294,8 @@ type fakeEngine struct {
 	commits, releases []string
 	commitErr         error
 	outcome           model.Outcome
+	pending           *model.ActionRequest // the escalation ApproveWith re-runs
+	final             model.Decision       // what exec returned, i.e. what the engine records
 }
 
 func (f *fakeEngine) Evaluate(ctx context.Context, req model.ActionRequest) (model.Decision, error) {
@@ -308,8 +311,25 @@ func (f *fakeEngine) Evaluate(ctx context.Context, req model.ActionRequest) (mod
 	d.Token = tok
 	return d, err
 }
-func (f *fakeEngine) Approve(_ context.Context, id, _ string) (model.Decision, model.ActionRequest, error) {
-	return model.Decision{}, model.ActionRequest{}, model.ErrNoPending
+
+// ApproveWith re-runs the held escalation (if any) as an allow and hands it to
+// exec, as the real engine does; final records what exec returned.
+func (f *fakeEngine) ApproveWith(ctx context.Context, id, _ string, exec engine.Execute) (model.Decision, error) {
+	if f.pending == nil || f.pending.ID != id {
+		return model.Decision{}, model.ErrNoPending
+	}
+	d, err := f.Evaluate(ctx, *f.pending)
+	if err != nil || d.Outcome != model.Allow {
+		return d, err
+	}
+	f.final = exec(ctx, d, *f.pending)
+	return f.final, nil
+}
+func (f *fakeEngine) Reject(context.Context, string, string) (model.Decision, error) {
+	return model.Decision{}, model.ErrNoPending
+}
+func (f *fakeEngine) Status(context.Context, string) (model.EscalationStatus, error) {
+	return model.EscalationStatus{}, model.ErrNoPending
 }
 
 func (f *fakeEngine) Commit(_ context.Context, id, txRef string) error {
@@ -359,6 +379,34 @@ func TestGatekeeper(t *testing.T) {
 	req.Nonce = "nonce-000000000004"
 	if d, _ = g.Evaluate(context.Background(), req); d.Outcome != model.Deny || d.SignedTx != "" {
 		t.Fatalf("deny passthrough: %+v", d)
+	}
+}
+
+// TestGatekeeperApprove: an approved escalation is signed and committed like a
+// fresh allow, and that final decision (with the signed tx) is what the engine
+// records as the resolution; an adapter refusal records a deny instead.
+func TestGatekeeperApprove(t *testing.T) {
+	r := newRig(t)
+	req := request(action())
+	e := &fakeEngine{r: r, outcome: model.Allow, pending: &req}
+	g := &Gatekeeper{Engine: e, Adapter: r.adapter}
+
+	d, err := g.Approve(context.Background(), req.ID, "ak_ops")
+	if err != nil || d.Outcome != model.Allow || d.SignedTx == "" || len(e.commits) != 1 || e.final.SignedTx != d.SignedTx {
+		t.Fatalf("approve: %+v err=%v commits=%v final=%+v", d, err, e.commits, e.final)
+	}
+
+	unheld := action()
+	unheld.From = "0x5555555555555555555555555555555555555555"
+	req2 := request(unheld)
+	req2.ID, req2.Nonce = "req-unheld", "nonce-000000000009"
+	e.pending = &req2
+	d, err = g.Approve(context.Background(), req2.ID, "ak_ops")
+	if err != nil || d.Outcome != model.Deny || d.SignedTx != "" || e.final.Outcome != model.Deny || len(e.releases) != 1 {
+		t.Fatalf("refused approve: %+v err=%v final=%+v releases=%v", d, err, e.final, e.releases)
+	}
+	if _, err := g.Approve(context.Background(), "nope", "ak_ops"); !errors.Is(err, model.ErrNoPending) {
+		t.Fatalf("unknown id: %v", err)
 	}
 }
 
