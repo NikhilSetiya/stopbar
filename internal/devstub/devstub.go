@@ -35,14 +35,17 @@ func MaxFeeWei(a model.Action) *big.Int {
 
 // ---- enricher (replaced by CS-131/132/133) ----
 
-// World is a static view of prices, balances and known destinations, in the
-// shape of a corpus entry's `setup` (corpus/schema.json). Velocity comes from
-// the real limiter, which is configured from Limits.
+// World is a static view of prices and balances, in the shape of a corpus
+// entry's `setup` (corpus/schema.json). Velocity comes from the real limiter,
+// which is configured from Limits. KnownDestinations seeds the real
+// destination registry (enrich.Registry, CS-133), which supplies the
+// destination facts; this stub no longer does.
 type World struct {
 	KnownDestinations []string          `json:"known_destinations"`
-	Balances          map[string]string `json:"balances"`   // symbol -> whole tokens
-	PricesUSD         map[string]string `json:"prices_usd"` // symbol -> USD
-	Tokens            map[string]Token  `json:"tokens"`     // contract address -> token
+	MaxSlippage       string            `json:"max_slippage"` // tenant max slippage fraction; "": enrich.DefaultMaxSlippage
+	Balances          map[string]string `json:"balances"`     // symbol -> whole tokens
+	PricesUSD         map[string]string `json:"prices_usd"`   // symbol -> USD
+	Tokens            map[string]Token  `json:"tokens"`       // contract address -> token
 	PriceStale        bool              `json:"price_stale"`
 	Limits            []limiter.Rule    `json:"limits"` // empty: DefaultLimits
 	// LimitsDisabled runs the limiter with no caps (velocity is still
@@ -63,10 +66,13 @@ type World struct {
 	Feeds    map[string]enrich.Feed `json:"feeds,omitempty"`
 }
 
-// DefaultLimits are LLD §17's example caps, used when a world sets none.
+// DefaultLimits are LLD §17's example caps, used when a world sets none. The
+// destination rule is the salami cap (FR-LIM-2a, CS-145): more than 5
+// transfers in 24h to one destination that is not in the registry escalate.
 var DefaultLimits = []limiter.Rule{
 	{Scope: limiter.ScopeWallet, Window: "1h", MaxUSD: "5000", MaxCount: 50},
 	{Scope: limiter.ScopeTenant, Window: "1h", MaxUSD: "20000"},
+	{Scope: limiter.ScopeDestination, Window: "24h", MaxCount: 5, UnknownDestinationsOnly: true, Escalate: true},
 }
 
 // Token describes an ERC-20 contract. The native asset is symbol "ETH", 18 decimals.
@@ -93,16 +99,24 @@ func LoadWorld(path string) (*World, error) {
 	if w.LimitsDisabled && len(w.Limits) > 0 {
 		return nil, fmt.Errorf("devstub: world %s sets both limits and limits_disabled", path)
 	}
+	if _, err := enrich.ParseMaxSlippage(w.MaxSlippage); err != nil {
+		return nil, fmt.Errorf("devstub: world %s: %w", path, err)
+	}
+	for _, d := range w.KnownDestinations {
+		if _, err := enrich.NormalizeAddress(d); err != nil {
+			return nil, fmt.Errorf("devstub: world %s: known_destinations: %w", path, err)
+		}
+	}
 	if len(w.Limits) == 0 && !w.LimitsDisabled {
 		w.Limits = DefaultLimits
 	}
 	return &w, nil
 }
 
-// Enrich fills amount, balance share and destination facts. A
-// missing price or balance is left unset (and the price marked stale), so the
-// policy layer fails closed rather than evaluating a guess.
-func (w *World) Enrich(_ context.Context, er *model.EnrichedRequest) error {
+// Enrich fills amount, balance share and excessive_slippage. A missing price
+// or balance is left unset (and the price marked stale), so the policy layer
+// fails closed rather than evaluating a guess.
+func (w *World) Enrich(ctx context.Context, er *model.EnrichedRequest) error {
 	if er.Request.Action.Kind == model.KindToolCall {
 		return nil // no prices or balances for tool calls; taint comes from policy.SessionTaint
 	}
@@ -155,17 +169,25 @@ func (w *World) Enrich(_ context.Context, er *model.EnrichedRequest) error {
 	if bal, ok := ratOf(w.Balances[symbol]); ok && bal.Sign() > 0 {
 		er.PctOfBalance = decimalString(new(big.Rat).Quo(tokens, bal))
 	}
-	dest := strings.ToLower(er.Intent.Destination)
-	for _, k := range w.KnownDestinations {
-		k = strings.ToLower(k)
-		switch {
-		case k == dest:
-			er.Destination.Known = true
-		case len(k) == 42 && len(dest) == 42 && k[:6] == dest[:6] && k[38:] == dest[38:]:
-			er.Destination.SimilarToKnown = true // same first/last 4 hex digits (CS-133 does this properly)
-		}
+	ms, err := enrich.ParseMaxSlippage(w.MaxSlippage)
+	if err != nil {
+		return err
 	}
-	return nil
+	return enrich.CheckSlippage(ctx, er, ms, w.quote)
+}
+
+// quote prices token ("" native) from the static prices, for the slippage check.
+func (w *World) quote(_ context.Context, token string) (*big.Rat, int, bool, error) {
+	symbol, decimals := "ETH", 18
+	if token != "" {
+		t, ok := w.Tokens[token]
+		if !ok {
+			return nil, 0, false, nil // unknown token: no price, so the check can't pass
+		}
+		symbol, decimals = t.Symbol, t.Decimals
+	}
+	p, ok := ratOf(w.PricesUSD[symbol])
+	return p, decimals, ok && !w.PriceStale, nil
 }
 
 func ratOf(s string) (*big.Rat, bool) {

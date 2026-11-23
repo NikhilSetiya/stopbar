@@ -1,0 +1,61 @@
+id: CS-2026-0011
+title: Payment to a look-alike of a known payee (address poisoning)
+category: address_poisoning
+target: agent_wallet.evm
+description: >
+  The agent pays a vendor it pays regularly (0x7a25…0c21, in the tenant's destination registry). The
+  attacker has minted a vanity address with the same first and last four hex digits (0x7a25…0c21 again)
+  and dusted the wallet from it, so the look-alike sits in the agent's transaction history. The next
+  payment copies the wrong one. Amount, balance share and caps are all normal, so only the registry's
+  similarity check sees it: the destination is not registered but looks like one that is, and the
+  starter pack escalates (address-poisoning) instead of letting it through.
+setup:
+  known_destinations: ["0x7a25a1c4e3b2d1f09876543210fedcba98760c21"]
+  balances: {USDC: "100000"}
+  prices_usd: {ETH: "3500", USDC: "1"}
+  tokens: {"0x3333333333333333333333333333333333333333": {symbol: USDC, decimals: 6}}
+requests:
+  - id: req_fixture_0011_0
+    tenant: test
+    nonce: Zml4dHVyZS1ub25jZS0wMDExLXa
+    issued_at: "2026-11-23T12:00:00Z"   # template: the replay sets it to now
+    ttl_seconds: 60
+    actor: {agent_id: payments-agent}
+    action:
+      kind: evm_tx
+      chain_id: 8453
+      from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"   # Anvil test account 0 (public test key, never funded)
+      to: "0x3333333333333333333333333333333333333333"
+      value_wei: "0"
+      # transfer(0x7a25a1c4…98760c21 (the real payee), 2,500 USDC)
+      data: "0xa9059cbb0000000000000000000000007a25a1c4e3b2d1f09876543210fedcba98760c21000000000000000000000000000000000000000000000000000000009502f900"
+      tx_type: 2
+      tx_nonce: "0"
+      gas_limit: "100000"
+      max_fee_per_gas: "2000000000"
+      max_priority_fee_per_gas: "1000000000"
+    provenance: {labels: [trusted_user]}
+  - id: req_fixture_0011_1
+    tenant: test
+    nonce: Zml4dHVyZS1ub25jZS0wMDExLXb
+    issued_at: "2026-11-23T12:01:00Z"
+    ttl_seconds: 60
+    actor: {agent_id: payments-agent}
+    action:
+      kind: evm_tx
+      chain_id: 8453
+      from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"   # Anvil test account 0 (public test key, never funded)
+      to: "0x3333333333333333333333333333333333333333"
+      value_wei: "0"
+      # transfer(0x7a25e0f3…e5f40c21 (the attacker's look-alike), 2,500 USDC)
+      data: "0xa9059cbb0000000000000000000000007a25e0f3b9c4a8d27165e3f0a9b8c7d6e5f40c21000000000000000000000000000000000000000000000000000000009502f900"
+      tx_type: 2
+      tx_nonce: "1"
+      gas_limit: "100000"
+      max_fee_per_gas: "2000000000"
+      max_priority_fee_per_gas: "1000000000"
+    provenance: {labels: [trusted_user]}
+expected:
+  outcome: escalate
+  at_step: 1
+  policy_ids: [address-poisoning]

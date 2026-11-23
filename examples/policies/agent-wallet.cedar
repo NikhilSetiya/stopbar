@@ -28,6 +28,19 @@ when { context.flags.contains("unlimited_approval") };
 @id("min-out-zero") @message("Swap accepts any output at all (no slippage protection)") @outcome("deny")
 forbid (principal, action, resource) when { context.flags.contains("min_out_zero") };
 
+// The enricher prices the swap's limit against the oracle: a minimum output
+// (or, exact-out, a maximum input) that gives away more than the tenant's max
+// slippage (default 3%) is a loss waiting for a sandwich, but can be legitimate
+// in a fast market, so a human decides.
+@id("excessive-slippage") @message("Swap limit gives away more than the max slippage at oracle prices") @outcome("escalate")
+forbid (principal, action, resource) when { context.flags.contains("excessive_slippage") };
+
+// The limiter flags a request that would cross a soft cap. The default is the
+// salami cap: more than 5 transfers in 24h to one destination that is not in
+// the registry (FR-LIM-2a). Once approved, the transfer counts like any other.
+@id("soft-cap-exceeded") @message("Soft cap reached (default: more than 5 transfers in 24h to one unregistered destination)") @outcome("escalate")
+forbid (principal, action, resource) when { context.flags.contains("soft_cap_exceeded") };
+
 @id("wallet-admin") @message("Changes who controls the wallet (owners, threshold, modules or guard)") @outcome("escalate")
 forbid (principal, action, resource) when { context.flags.contains("wallet_admin") };
 

@@ -115,7 +115,21 @@ type IntentSummary struct {
 	Flags       []string        `json:"flags"`
 	Human       string          `json:"human"`
 	Calls       []IntentSummary `json:"calls,omitempty"`
-	PayloadHash string          `json:"payload_hash"`
+	// Swap holds a swap's terms, so an enricher can check them against a
+	// price quote (excessive_slippage). Set only on swap intents.
+	Swap        *Swap  `json:"swap,omitempty"`
+	PayloadHash string `json:"payload_hash"`
+}
+
+// Swap is what a swap gives and takes, in raw units. Token "" is the native
+// asset. Exact-in: AmountIn is exact and AmountOut the minimum accepted.
+// Exact-out: AmountOut is exact and AmountIn the most that may be paid.
+type Swap struct {
+	ExactIn   bool   `json:"exact_in"`
+	TokenIn   string `json:"token_in"`
+	AmountIn  string `json:"amount_in"`
+	TokenOut  string `json:"token_out"`
+	AmountOut string `json:"amount_out"`
 }
 
 // Asset is a token on a chain.
@@ -214,6 +228,9 @@ const (
 	AuditRelease      AuditRecordType = "release"
 	AuditOverride     AuditRecordType = "override"
 	AuditAuthReject   AuditRecordType = "auth_reject" // CS-103: a request rejected at the gateway (identity mismatch, scope)
+	// AuditDestination records a change to a tenant's destination registry
+	// (CS-133), in the same transaction as the change.
+	AuditDestination AuditRecordType = "destination_change"
 )
 
 // ErrNoPending means no escalation with that id is awaiting approval (CS-151).

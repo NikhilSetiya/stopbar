@@ -250,7 +250,7 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 	var stageTimeout time.Duration // 0: engine default (1s), fine for in-memory stubs
 	if w.ChainRPC != "" {
 		ce, err := enrich.New(enrich.Config{RPCURL: w.ChainRPC, Feeds: w.Feeds,
-			KnownDestinations: w.KnownDestinations, RPCTimeout: 3 * time.Second})
+			MaxSlippage: w.MaxSlippage, RPCTimeout: 3 * time.Second})
 		if err != nil {
 			return runtime{}, err
 		}
@@ -265,7 +265,29 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 	if err != nil {
 		return runtime{}, err
 	}
-	enrichers := []engine.Enricher{priceBalance, lim} // lim supplies velocity
+	// The destination registry (CS-133) lives in the state file. The world's
+	// known_destinations seed it for this tenant (added if missing, audited);
+	// `stopbar contacts` edits it while stopbard is stopped.
+	reg, err := enrich.OpenRegistry(o.db, lg)
+	if err != nil {
+		return runtime{}, err
+	}
+	seeded := 0
+	for _, d := range w.KnownDestinations {
+		added, err := reg.Add(o.tenant, d, "", "dev-world", time.Now())
+		if err != nil {
+			return runtime{}, err
+		}
+		if added {
+			seeded++
+		}
+	}
+	if seeded > 0 {
+		log.Info("destination registry seeded from the dev world", "tenant", o.tenant, "added", seeded)
+	}
+	// Order matters: the registry sets the destination facts the limiter's
+	// unknown-destination caps read, and the limiter reads the priced amount.
+	enrichers := []engine.Enricher{priceBalance, reg, lim} // lim supplies velocity and soft-cap flags
 	if b.Trust() != nil {
 		// Tool-call bundle: session taint from its frozen trust map.
 		enrichers = append(enrichers, &policy.SessionTaint{Bundle: b})
