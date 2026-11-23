@@ -49,8 +49,14 @@ As implemented in `internal/engine` (CS-104). Components are consumed through th
 ```go
 // engine.Engine implements gateway.Evaluator. Evaluate always returns a decision.
 Evaluate(ctx, model.ActionRequest) (model.Decision, error)
-Commit(ctx, requestID, txRef string) error
-Release(ctx, requestID string) error
+Commit(ctx, requestID, txRef string) error   // POST /v1/actions/{id}/commit (CS-105)
+Release(ctx, requestID, reason string) error // POST /v1/actions/{id}/release
+Owner(requestID string) (tenant, agent string, ok bool) // who may settle it
+// Escalation lifecycle (CS-151/152, §9): approve re-runs; exec (gatekeeper: sign + commit) runs on allow.
+Approve(ctx, id, approver string) (model.Decision, error)
+ApproveWith(ctx, id, approver string, exec Execute) (model.Decision, error)
+Reject(ctx, id, approver string) (model.Decision, error)
+Status(ctx, id string) (model.EscalationStatus, error) // GET /v1/decisions/{id}
 
 type Decoder interface {
     Supports(a model.Action) bool
@@ -68,6 +74,11 @@ type Limiter interface { // derives its own keys/amounts from the enriched reque
     Reserve(ctx, id string, req model.EnrichedRequest, ttl time.Duration, rec *model.AuditEntry) error // ErrCapExceeded, ErrCircuitOpen
     Commit(ctx, id, txRef string, rec *model.AuditEntry) error
     Release(ctx, id string, rec *model.AuditEntry) error // ErrUnknownReservation / ErrReservationExpired: nothing held
+    Owner(id string) (tenant, agent string, ok bool)     // the reservation's requester (CS-105)
+}
+type PendingStore interface { // escalations; Put writes the record AND its audit record in one transaction
+    Put(ctx, e PendingEscalation, rec *model.AuditEntry) error
+    Get(ctx, id string) (PendingEscalation, bool, error)
 }
 type Signer interface { // decision.Signer: Ed25519, stdlib, compact JWS hand-rolled (no JOSE library)
     Sign(ctx, req model.ActionRequest, d model.Decision) (token string, err error) // spec/decision-token-v1.md
@@ -218,14 +229,17 @@ Canonicalisation: RFC 8785 (JCS).
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/v1/evaluate` | Evaluate an ActionRequest. Returns the Decision for every outcome: `200` allow (+ signed tx in gatekeeper mode), `202` escalate (with `escalation_id`), `403` deny. |
-| GET | `/v1/decisions/{request_id}` | Poll decision (for escalations) |
-| POST | `/v1/actions/{request_id}/commit` | Report broadcast tx hash → commit reservation |
-| POST | `/v1/actions/{request_id}/release` | Abandon → release reservation |
-| POST | `/v1/approvals/{escalation_id}` | Submit signed approval |
+| GET | `/v1/decisions/{request_id}` | Poll an escalation (CS-152): `model.EscalationStatus` (`spec/schemas/escalation_status.v1.schema.json`) with `state` pending / allowed / denied / expired and the decision. Status as safe as evaluate's: `202` pending, `200` allowed (decision carries the token, and the signed tx in gatekeeper mode), `403` denied or expired. Visible to the requester (evaluate key, same tenant and agent) and its tenant's approvers; anyone else gets `404`. A pending escalation past its window is resolved as expired (audited) when polled. |
+| POST | `/v1/actions/{request_id}/commit` | `{"tx_ref": "0x…"}`: report the broadcast tx → commit reservation (CS-105). `200 {"state":"committed"}`; same tx_ref again `200` (idempotent); a lapsed reservation still records the spend (`200`, `"late": true`); another tx_ref `409 CONFLICT`; released/unknown `404` |
+| POST | `/v1/actions/{request_id}/release` | Optional `{"reason": "…"}`: abandon → release reservation. `200 {"state":"released"}`; again `200` (no-op, nothing audited); committed `409 CONFLICT`; lapsed `410 RESERVATION_EXPIRED`; unknown `404` |
+| POST | `/v1/approvals/{escalation_id}` | Approve: re-evaluate against current state (§9); status is the decision's. Approve-scoped key, same tenant, not the requester |
+| POST | `/v1/approvals/{escalation_id}/reject` | Reject (CS-151): `403` deny with `APPROVAL_REJECTED`, audited with the approver. Same key rules as approve |
 | POST | `/v1/events/deploy` | Ingest deploy/change event (Phase 4) |
 | GET | `/v1/audit?from=&to=` | Export audit range |
 | GET | `/v1/keys` | JWKS of decision-signing keys |
 | GET | `/healthz`, `/metrics` | Ops |
+
+**Lifecycle routes need authentication** (they act on another request's state; `503 ENGINE_UNAVAILABLE` with auth off). Commit/release take the requester's own `evaluate`-scoped key: the reservation's tenant and agent must match, or the answer is `404` and the attempt is audited (`auth_reject`), because another agent releasing it would free capacity a still-valid token can spend. Approve/reject take an `approve`-scoped key of the escalation's tenant. The settle body gets the evaluate checks (JSON, ≤4 KB, no duplicate or case-folded keys, no unknown fields).
 
 Error body: `{"code": "NONCE_REPLAYED", "message": "…", "request_id": "…", "problems": ["…"]}`. `request_id` appears once it is known, and `problems` only for `INVALID_REQUEST`, listing every problem at once.
 
@@ -244,7 +258,11 @@ Error body: `{"code": "NONCE_REPLAYED", "message": "…", "request_id": "…", "
 | `EXPIRED` | 400 | `now ≥ issued_at + ttl_seconds + 30 s` |
 | `ISSUED_IN_FUTURE` | 400 | `issued_at > now + 30 s` |
 | `NONCE_REPLAYED` | 400 | Nonce already used by this tenant and agent within retention |
-| `ENGINE_UNAVAILABLE` | 503 | No engine configured |
+| `UNAUTHENTICATED` / `FORBIDDEN_SCOPE` / `IDENTITY_MISMATCH` | 401 / 403 / 403 | CS-103 |
+| `CONFLICT` | 409 | Commit with another tx_ref, or release, of a committed reservation (CS-105) |
+| `ALREADY_RESOLVED` | 409 | Approve/reject of an escalation already allowed, denied or expired (CS-152) |
+| `RESERVATION_EXPIRED` | 410 | Release of a reservation that already lapsed (nothing held) |
+| `ENGINE_UNAVAILABLE` | 503 | No engine configured (or, for lifecycle routes, no auth) |
 | `INTERNAL` | 500 | Engine error or panic, the engine returned an invalid decision or one for a different request, or the nonce store failed |
 
 **The status code alone is safe to act on.** A client that only checks whether the status is 200 can never read a deny as an allow:
@@ -435,7 +453,8 @@ Amount is two-dimensional `{usd, count}`; caps can be set on either. Token-count
 - **Windows:** 60 sub-buckets each, counted conservatively. A spend stays counted for up to one sub-bucket (window/60) longer than the window, never shorter.
 - **Lifecycle:**
   - Reserving the same request ID while it is live is a no-op, and re-using a finished ID is `ErrDuplicateReservation`.
-  - Commit or release of an unknown ID returns `ErrUnknownReservation`, and of a lapsed one `ErrReservationExpired`.
+  - Commit or release of an unknown ID returns `ErrUnknownReservation`, and of a lapsed one `ErrReservationExpired`. Committing again with the same tx_ref is a no-op; with another, or releasing a committed one, is `ErrAlreadyCommitted`. Releasing a released one is a no-op (nothing written). These errors live in `model` so the gateway maps them (CS-105).
+  - Each record stores its `tenant` and `agent` (`Owner(id)`), so only the requester can settle it over HTTP. Records from before this field have no owner and cannot be settled over HTTP (fail closed).
   - **A late commit still records the spend**, so loss bounding counts what actually happened.
   - The engine treats unknown or expired IDs on its own best-effort release as "nothing held".
 - **Keys** quote each component, so requester-chosen tenant or agent IDs can't collide. Agent and tenant scopes are only as strong as authentication (CS-103), while wallet scopes are bound to the signing address.
@@ -488,7 +507,8 @@ Rules:
 1. Engine creates `Escalation{id, request_id, intent, payload_hash, required: M, approvers: [..], expires_at}`.
 2. Channel adapters push the rendered intent. Phase 1: CLI (`stopbar approve <id>`) signing with an Ed25519 approver key; Phase 2: Slack/Telegram with deep link to a signing page; Phase 4: WebAuthn passkeys.
 3. Approval payload = `{escalation_id, payload_hash, decision: approve|reject, ts}` signed by approver key. Engine verifies signer ∈ approvers, payload_hash matches, not expired, no duplicates.
-4. Any `reject` → deny. Timeout (default 15m) → deny.
+4. Any `reject` → deny. Timeout (default 15m, `stopbard -pending-ttl`) → deny.
+   **As implemented (CS-151/152):** an escalation is a `PendingEscalation` record (state pending → allowed | denied | expired) written in the same transaction as its audit record: the escalate decision on create; a `decision` deny `APPROVAL_REJECTED` with the approver identity on reject; a `decision` deny `APPROVAL_EXPIRED` on timeout (applied when the record is next touched: poll, approve or reject); an `approval` record with the final decision when an approval allows (in gatekeeper mode after signing and committing, or `denied` if the adapter refuses). Records are kept after resolution so `GET /v1/decisions/{id}` reports the outcome; approve/reject of a resolved one is `409 ALREADY_RESOLVED`. The requester's key may neither approve nor reject (`APPROVAL_SELF_APPROVAL`, audited, stays pending); approvers see only their own tenant. Transitions are serialised, so two approvers cannot both resolve one escalation. If the resolution of an approved allow cannot be recorded, the approval fails closed (`FAIL_CLOSED_AUDIT`, the signed bytes never leave). Approvals today are API keys with the `approve` scope; Ed25519-signed approval payloads (step 3) and quorum are still to come.
 5. **Approval re-evaluates against current state.** It does not replay the old decision. When quorum is reached, the engine re-runs **enrich → policy → limiter → sign** for the same request and `payload_hash`, with the verified approvals as a policy input (`context.approvals`: count and approver IDs). An escalation can wait up to 15 minutes, and in that time prices move, velocity windows fill and the circuit breaker can trip. A human approves the world as it was, but the system signs into the world as it is. The re-run can therefore still deny (for example `CAP_EXCEEDED`, or a deny policy that now matches) or escalate again. Policies decide what an approval satisfies: an escalate policy is written as `forbid … when { … && context.approvals.count < 1 }`, while deny policies ignore approvals. The resulting decision gets a fresh `iat`/`exp` and is audited as its own record, linked to the escalation.
 
 ## 10. Decision tokens and countersignatures
@@ -541,8 +561,10 @@ Implemented in `internal/audit` (CS-171/172), per `spec/audit-hash-v1.md`.
   |---|---|
   | `request` | the consumed nonce (gateway) |
   | `decision` (allow) | its reservation |
-  | `commit` / `release` | the limiter commit or release |
-  | `decision` (deny/escalate) | nothing, so its own transaction |
+  | `commit` / `release` | the limiter commit or release (with the settler's identity) |
+  | `decision` (escalate) | the pending escalation record |
+  | `decision` (reject / expiry), `approval` (approved) | the escalation's state change |
+  | `decision` (deny) | nothing, so its own transaction |
 
 - **Append-only.** Records are keyed by big-endian `seq`, and `hash = sha256(JCS({v, seq, ts, type, body, prev_hash}))` via `canon.RecordHash`. No code path updates or deletes a record.
 - **Checkpoints.** Every N records (`-audit-checkpoint-every`, default 1000) and at shutdown, the head `{v, seq, hash, ts}` is signed with the decision key. The signature is over `"stopbar-audit-checkpoint-v1\n" + JCS`, which can never be a token's signing input. (The original sketch used a Merkle root over the range. The chain already commits to every earlier record, so signing the head is enough; Merkle inclusion proofs can be added later without changing records.)
@@ -564,6 +586,9 @@ Implemented in `internal/audit` (CS-171/172), per `spec/audit-hash-v1.md`.
 | `FAIL_CLOSED_ENGINE` | Panic outside any component | deny |
 | `CAP_EXCEEDED` | Reserve failed | deny |
 | `CIRCUIT_OPEN` | Breaker tripped | deny |
+| `APPROVAL_REJECTED` | An approver rejected the escalation | deny |
+| `APPROVAL_EXPIRED` | The pending window passed before approval | deny |
+| `APPROVAL_SELF_APPROVAL` | The requester tried to approve or reject its own escalation | deny (stays pending) |
 | `NONCE_REPLAYED` / `EXPIRED` | Gateway | 400 |
 
 Panics recovered at the engine boundary → `deny`.

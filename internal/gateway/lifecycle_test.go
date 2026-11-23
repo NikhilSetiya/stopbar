@@ -20,7 +20,7 @@ import (
 )
 
 // Keys for the lifecycle tests: the requester agent, another agent of the same
-// tenant, an approver, and an approver of another tenant.
+// tenant, an approver, and a requester of another tenant.
 const (
 	skBot     = "stopbar_sk_bot"
 	skOther   = "stopbar_sk_other"
