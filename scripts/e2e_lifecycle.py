@@ -17,8 +17,13 @@ cap of 1 per hour, so a held reservation visibly blocks the next allow:
                 allowed → commit; an escalation left past -pending-ttl polls
                 403 expired.
 
-After shutdown `stopbar audit verify --require-covered` must pass, and the log
-must hold each lifecycle record with the identity that caused it.
+  gatekeeper    a second stopbard holding the wallet (-dev-wallet): escalate →
+                `stopbar approve <id>` → 200 with a signed tx that `stopbar
+                decode-tx` recovers to `from` with the decision's payload hash;
+                the poll returns the same signed tx; the tx is committed.
+
+After each shutdown `stopbar audit verify --require-covered` must pass, and the
+log must hold each lifecycle record with the identity that caused it.
 Needs: pyyaml.
 """
 import base64, datetime, hashlib, json, os, subprocess, sys, tempfile, time, urllib.error, urllib.request
@@ -220,6 +225,52 @@ with tempfile.TemporaryDirectory() as tmp:
     check(any(who(b) == "ak_ops" and b["state"] == "allowed" for b in find("approval", lambda b: b["request_id"] == "req_life_e2")), "approval resolution audited")
     check(any(b["request"]["id"] == "req_life_e3" for b in find("decision", lambda b: last_code(b) == "APPROVAL_EXPIRED")), "expiry audited as a deny")
     check(any(who(b) == "ak_other" for b in find("auth_reject", lambda b: "not the requester" in b.get("reason", ""))), "a foreign settle attempt is audited")
+
+print("-- gatekeeper: escalate → approve → signed tx (CS-152 acceptance)")
+ANVIL_KEY = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"  # public test key, never funded
+with tempfile.TemporaryDirectory() as tmp:
+    world, keyfile, wallet, jwks, state = (os.path.join(tmp, f) for f in ("world.json", "auth.json", "wallet", "jwks.json", "state"))
+    json.dump(setup, open(world, "w"))
+    json.dump([{"id": "ak_" + n, "tenant": t, "agent_id": a, "scopes": sc, "sha256": hashlib.sha256(sec.encode()).hexdigest()}
+               for n, (sec, t, a, sc) in keys.items()], open(keyfile, "w"))
+    with open(os.open(wallet, os.O_CREAT | os.O_WRONLY, 0o600), "w") as f:
+        f.write("stopbar-dev-wallet-secp256k1-v1\n" + ANVIL_KEY + "\n")
+    proc = subprocess.Popen([stopbard, "-listen", "127.0.0.1:0", "-dev-world", world, "-dev-wallet", wallet,
+                             "-auth-keys", keyfile, "-state-dir", state],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        line = proc.stdout.readline()
+        if "listening on" not in line:
+            raise RuntimeError(f"stopbard did not start: {line!r} {proc.stderr.read()}")
+        addr = line.rsplit(" ", 1)[1].strip()
+        g1, _ = template(ESCALATE, "esc-agent", "req_life_g1")
+        s, d = http(addr, "POST", "/v1/evaluate", K["esc"], g1)
+        check(s == 202, f"gatekeeper: escalates: HTTP {s}")
+        r = subprocess.run([stopbar_cli, "approve", "req_life_g1", "--url", f"http://{addr}", "--key", K["ops"]], capture_output=True, text=True)
+        out = r.stdout.split("\n", 1)[1] if "\n" in r.stdout else "{}"
+        d = json.loads(out or "{}")
+        check(r.returncode == 0 and d.get("outcome") == "allow" and d.get("signed_tx"), f"gatekeeper: `stopbar approve` returns a signed tx ({r.returncode})")
+        if d.get("signed_tx"):
+            tx = json.loads(subprocess.run([stopbar_cli, "decode-tx", d["signed_tx"]], capture_output=True, text=True, check=True).stdout)
+            check(tx["action"]["from"] == g1["action"]["from"].lower() and tx["payload_hash"] == d["payload_hash"] and tx["tx_hash"] == d["tx_hash"],
+                  "gatekeeper: decode-tx recovers `from` and the decision's payload hash")
+        s, st = http(addr, "GET", "/v1/decisions/req_life_g1", K["esc"])
+        check(s == 200 and st.get("state") == "allowed" and st["decision"].get("signed_tx") == d.get("signed_tx"),
+              f"gatekeeper: the requester's poll returns the signed tx: HTTP {s} {st.get('state')}")
+        s, c = http(addr, "POST", "/v1/actions/req_life_g1/commit", K["esc"], {"tx_ref": d.get("tx_hash") or "0x"})
+        check(s == 200, f"gatekeeper: already committed by the adapter; the same tx_ref is idempotent: HTTP {s}")
+        with urllib.request.urlopen(f"http://{addr}/v1/keys", timeout=5) as resp:
+            open(jwks, "wb").write(resp.read())
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+    v = subprocess.run([stopbar_cli, "audit", "verify", "--state-dir", state, "--keys", jwks, "--require-covered"], capture_output=True, text=True)
+    check(v.returncode == 0, f"gatekeeper audit verify: {(v.stdout or v.stderr).strip()}")
+    ex = subprocess.run([stopbar_cli, "audit", "export", "--state-dir", state], capture_output=True, text=True, check=True)
+    recs = [json.loads(l) for l in ex.stdout.splitlines()]
+    check(any(r["type"] == "commit" and r["body"]["request_id"] == "req_life_g1" for r in recs), "gatekeeper: the signed tx has a commit record")
+    check(any(r["type"] == "approval" and r["body"]["state"] == "allowed" and r["body"]["decision"].get("signed_tx") for r in recs),
+          "gatekeeper: the approval resolution records the signed tx")
 
 print(f"\n{'FAIL' if failures else 'ok  '} lifecycle e2e: {len(failures)} failures")
 sys.exit(1 if failures else 0)
