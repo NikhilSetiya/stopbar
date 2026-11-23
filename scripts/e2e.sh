@@ -29,8 +29,8 @@ step "policy: starter pack validates and combines (CS-007)"
 go test -count=1 -run 'TestSpike' ./internal/policy/
 go test -run='^$' -bench=BenchmarkSpikeEvaluate -benchtime=20000x ./internal/policy/ | grep Benchmark
 
-step "decision token v1: vectors fresh and verify (CS-008)"
-go test -count=1 -run 'TestDecisionTokenVectors|TestPayloadHash' ./internal/decision/
+step "decision token v2: vectors fresh and verify; frozen v1 tokens rejected (CS-008, CS-103)"
+go test -count=1 -run 'TestDecisionTokenVectors|TestFrozenV1VectorsRejected|TestSignerBindsIdentity|TestPayloadHash' ./internal/decision/
 
 step "engine: fail-closed matrix, invariants, gateway wiring (CS-104)"
 go test -race -count=1 ./internal/engine/

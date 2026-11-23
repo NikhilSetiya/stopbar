@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
+	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
@@ -20,7 +21,7 @@ const CodeAdapter = "FAIL_CLOSED_ADAPTER"
 // Engine is the part of engine.Engine the gatekeeper drives.
 type Engine interface {
 	Evaluate(ctx context.Context, req model.ActionRequest) (model.Decision, error)
-	Approve(ctx context.Context, id, approver string) (model.Decision, model.ActionRequest, error)
+	Approve(ctx context.Context, id, approver string) (model.Decision, model.ActionRequest, auth.Identity, error)
 	Commit(ctx context.Context, requestID, txRef string) error
 	Release(ctx context.Context, requestID, reason string) error
 }
@@ -50,7 +51,8 @@ func (g *Gatekeeper) Evaluate(ctx context.Context, req model.ActionRequest) (mod
 	if err != nil || d.Outcome != model.Allow {
 		return d, err
 	}
-	raw, hash, err := g.Adapter.SignTx(ctx, d.Token, req.Action)
+	requester, _ := auth.FromContext(ctx) // set by the gateway's auth; zero when auth is off
+	raw, hash, err := g.Adapter.SignTx(ctx, d.Token, req.Action, requester)
 	if err != nil {
 		reason := "adapter refused: " + adapterCode(err)
 		g.log().Warn("gatekeeper: adapter refused an allow", "request_id", req.ID, "err", err)
@@ -68,12 +70,14 @@ func (g *Gatekeeper) Evaluate(ctx context.Context, req model.ActionRequest) (mod
 
 // Approve re-evaluates a pending escalation (CS-151/152) and, if it now allows,
 // signs and commits the transaction exactly as Evaluate does for a fresh allow.
+// The token binds the identity that requested the action, not the approver
+// in ctx, so that is the identity the adapter checks it against.
 func (g *Gatekeeper) Approve(ctx context.Context, id, approver string) (model.Decision, error) {
-	d, req, err := g.Engine.Approve(ctx, id, approver)
+	d, req, requester, err := g.Engine.Approve(ctx, id, approver)
 	if err != nil || d.Outcome != model.Allow {
 		return d, err
 	}
-	raw, hash, err := g.Adapter.SignTx(ctx, d.Token, req.Action)
+	raw, hash, err := g.Adapter.SignTx(ctx, d.Token, req.Action, requester)
 	if err != nil {
 		g.log().Warn("gatekeeper: adapter refused an approved allow", "request_id", req.ID, "err", err)
 		g.release(ctx, req.ID, "adapter refused: "+adapterCode(err))

@@ -77,9 +77,11 @@ var (
 )
 
 // Signer issues the decision token for an allow (CS-161, decision.Signer).
-// It needs the request for the token's tenant and nonce claims.
+// It needs the request for the token's tenant and nonce claims, and the
+// authenticated requester identity, which decision-token v2 binds (CS-103).
+// That identity is the zero Identity when auth is off.
 type Signer interface {
-	Sign(ctx context.Context, req model.ActionRequest, d model.Decision) (token string, err error)
+	Sign(ctx context.Context, requester auth.Identity, req model.ActionRequest, d model.Decision) (token string, err error)
 }
 
 // AuditLog appends to the hash chain (CS-171).
@@ -141,10 +143,11 @@ type PendingEscalation struct {
 	Request  model.ActionRequest `json:"request"`
 	Reasons  []string            `json:"reasons"` // the escalated policy IDs an approver must cover
 	IssuedAt time.Time           `json:"issued_at"`
-	// RequestedBy is the KeyID of the identity that submitted the request, so
-	// the same identity cannot also approve it (CS-152 separation of duties).
-	// Empty when auth is off (loopback dev), which disables the check.
-	RequestedBy string `json:"requested_by,omitempty"`
+	// Requester is the authenticated identity that submitted the request. The
+	// same key cannot also approve it (CS-152 separation of duties), and an
+	// approved allow's token binds it, not the approver (decision-token v2).
+	// Zero when auth is off (loopback dev), which disables the SoD check.
+	Requester auth.Identity `json:"requester"`
 }
 
 // PendingStore records escalations until they are approved (and executed) or
@@ -273,7 +276,8 @@ func (e *Engine) Evaluate(ctx context.Context, req model.ActionRequest) (d model
 			d = e.deny(req.ID, now, "", failed(CodeEngine, fmt.Errorf("internal error")))
 		}
 	}()
-	return e.evaluate(ctx, req, now, nil, ""), nil
+	requester, _ := auth.FromContext(ctx)
+	return e.evaluate(ctx, req, now, nil, "", requester), nil
 }
 
 // Approve re-evaluates a pending escalation against current state (CS-151/152):
@@ -282,17 +286,19 @@ func (e *Engine) Evaluate(ctx context.Context, req model.ActionRequest) (d model
 // hold, the outcome becomes allow (signed and reserved like any allow); if a
 // new rule denies, a new escalation appears, or a cap has since filled, it is
 // returned unchanged so the caller can see why. The pending record is removed
-// only once the request is allowed.
-func (e *Engine) Approve(ctx context.Context, id, approver string) (model.Decision, model.ActionRequest, error) {
+// only once the request is allowed. It also returns the request and the
+// identity that submitted it, which the token binds, so a gatekeeper can
+// check the token against them before signing.
+func (e *Engine) Approve(ctx context.Context, id, approver string) (model.Decision, model.ActionRequest, auth.Identity, error) {
 	if e.cfg.Pending == nil {
-		return model.Decision{}, model.ActionRequest{}, errors.New("engine: approvals are not enabled")
+		return model.Decision{}, model.ActionRequest{}, auth.Identity{}, errors.New("engine: approvals are not enabled")
 	}
 	pe, ok, err := e.cfg.Pending.Get(ctx, id)
 	if err != nil {
-		return model.Decision{}, model.ActionRequest{}, err
+		return model.Decision{}, model.ActionRequest{}, auth.Identity{}, err
 	}
 	if !ok {
-		return model.Decision{}, model.ActionRequest{}, ErrNoPending
+		return model.Decision{}, model.ActionRequest{}, auth.Identity{}, ErrNoPending
 	}
 	now := e.cfg.Clock()
 	ph, _ := decision.PayloadHash(pe.Request.Action) // best-effort binding for the audit record
@@ -307,28 +313,28 @@ func (e *Engine) Approve(ctx context.Context, id, approver string) (model.Decisi
 		if derr := e.cfg.Pending.Delete(ctx, id); derr != nil {
 			e.cfg.Logger.Error("approve: delete expired pending failed", "severity", "high", "id", id, "err", derr)
 		}
-		return d, pe.Request, nil
+		return d, pe.Request, pe.Requester, nil
 	}
 
 	// Separation of duties: the identity that requested the action may not also
 	// approve it. A different approver can still approve, so the record stays.
-	if approver != "" && approver == pe.RequestedBy {
+	if approver != "" && approver == pe.Requester.KeyID {
 		d := e.deny(id, now, ph, failed(CodeApprovalSelf, fmt.Errorf("the requester may not approve their own escalation")))
 		e.auditRefusal(ctx, pe.Request, d)
-		return d, pe.Request, nil
+		return d, pe.Request, pe.Requester, nil
 	}
 
 	approved := make(map[string]bool, len(pe.Reasons))
 	for _, r := range pe.Reasons {
 		approved[r] = true
 	}
-	d := e.evaluate(ctx, pe.Request, now, approved, approver)
+	d := e.evaluate(ctx, pe.Request, now, approved, approver, pe.Requester)
 	if d.Outcome == model.Allow {
 		if err := e.cfg.Pending.Delete(ctx, id); err != nil {
 			e.cfg.Logger.Error("approve: delete pending after allow failed", "severity", "high", "id", id, "err", err)
 		}
 	}
-	return d, pe.Request, nil
+	return d, pe.Request, pe.Requester, nil
 }
 
 // auditRefusal records an approval refusal (expired window or self-approval) as
@@ -377,7 +383,11 @@ func allApproved(reasons []model.Reason, approved map[string]bool) bool {
 	return true
 }
 
-func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time.Time, approved map[string]bool, approver string) model.Decision {
+// evaluate runs the pipeline. requester is the authenticated identity that
+// submitted req (from the gateway, or from the pending record on approval);
+// the audit records carry the identity in ctx, which on approval is the
+// approver's.
+func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time.Time, approved map[string]bool, approver string, requester auth.Identity) model.Decision {
 	audit := func(d model.Decision, extra map[string]any) model.Decision {
 		body := addIdentity(ctx, map[string]any{"request": req, "decision": d})
 		for k, v := range extra {
@@ -441,10 +451,7 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 		case approved == nil && e.cfg.Pending != nil:
 			// CS-152: record the escalation so `stopbar approve <id>` can re-run it,
 			// with the requester's identity so it cannot also approve itself.
-			pe := PendingEscalation{Request: req, Reasons: policyIDs(reasons), IssuedAt: now}
-			if rid, ok := auth.FromContext(ctx); ok {
-				pe.RequestedBy = rid.KeyID
-			}
+			pe := PendingEscalation{Request: req, Reasons: policyIDs(reasons), IssuedAt: now, Requester: requester}
 			if perr := e.cfg.Pending.Put(ctx, pe); perr != nil {
 				return audit(e.deny(req.ID, now, payloadHash, failed(CodeAudit, perr)), ctxRecord)
 			}
@@ -462,7 +469,7 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 	id := req.ID
 	d.ReservationID = &id
 	var token string
-	if err := e.call(ctx, func(ctx context.Context) (err error) { token, err = e.cfg.Signer.Sign(ctx, req, d); return }); err != nil || token == "" {
+	if err := e.call(ctx, func(ctx context.Context) (err error) { token, err = e.cfg.Signer.Sign(ctx, requester, req, d); return }); err != nil || token == "" {
 		if err == nil {
 			err = errors.New("signer returned an empty token")
 		}

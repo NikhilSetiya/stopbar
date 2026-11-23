@@ -359,7 +359,10 @@ func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys fu
 // as JSON keyed by request id. It survives restart with the rest of state.db.
 type pendingStore struct{ db *store.DB }
 
-var pendingBucket = []byte("pending_escalations_v1")
+// v2: records carry the requester's full identity, which an approved token
+// binds (decision-token v2). v1 records (key ID only) are never read, so an
+// escalation pending across the upgrade cannot be approved; it lapses.
+var pendingBucket = []byte("pending_escalations_v2")
 
 func newPendingStore(db *store.DB) (*pendingStore, error) {
 	if err := db.Bucket(pendingBucket); err != nil {
