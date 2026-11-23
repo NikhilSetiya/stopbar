@@ -186,7 +186,7 @@ type Decision struct {
 	ReservationID    *string    `json:"reservation_id"`
 	IssuedAt         time.Time  `json:"issued_at"`
 	ExpiresAt        time.Time  `json:"expires_at"`
-	// Token is the decision token (spec/decision-token-v1.md), present only
+	// Token is the decision token (spec/decision-token-v2.md), present only
 	// on allow. It is not part of what it signs.
 	Token string `json:"token,omitempty"`
 	// SignedTx and TxHash are set in gatekeeper mode: the raw signed

@@ -1,4 +1,4 @@
-// Package decision is the decision token (spec/decision-token-v1.md): the
+// Package decision is the decision token (spec/decision-token-v2.md; its payload binding is unchanged from v1 §2): the
 // payload binding, Ed25519 signing, key rotation and the verifier signer
 // adapters run before signing anything. It is part of the trusted core:
 // stdlib only, with compact JWS hand-rolled, so no JOSE library.

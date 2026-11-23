@@ -70,7 +70,9 @@ type Limiter interface { // derives its own keys/amounts from the enriched reque
     Release(ctx, id string, rec *model.AuditEntry) error // ErrUnknownReservation / ErrReservationExpired: nothing held
 }
 type Signer interface { // decision.Signer: Ed25519, stdlib, compact JWS hand-rolled (no JOSE library)
-    Sign(ctx, req model.ActionRequest, d model.Decision) (token string, err error) // spec/decision-token-v1.md
+    // requester is the authenticated auth.Identity (zero when auth is off),
+    // never the body's actor. spec/decision-token-v2.md
+    Sign(ctx, requester auth.Identity, req model.ActionRequest, d model.Decision) (token string, err error)
 }
 // Keys are served as decision.JWK (our own RFC 8037 OKP type, with a status
 // of active or retired) at /v1/keys. There is no jose.JSONWebKey in the core.
@@ -175,7 +177,7 @@ Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decod
   "reservation_id": null,
   "issued_at": "…",
   "expires_at": "…",                        // = issued_at + 60s default
-  "token": "…"                              // allow only: decision token (spec/decision-token-v1.md)
+  "token": "…"                              // allow only: decision token (spec/decision-token-v2.md)
 }
 ```
 
@@ -495,24 +497,25 @@ Rules:
 
 ### 10.1 JWS (gatekeeper / generic)
 
-Normative spec: [`spec/decision-token-v1.md`](../spec/decision-token-v1.md), with vectors in `spec/vectors/decision-token-v1.json`.
+Normative spec: [`spec/decision-token-v2.md`](../spec/decision-token-v2.md), with vectors in `spec/vectors/decision-token-v2.json` (CS-103 increment 2, [ADR 0003](adr/0003-decision-token-v2-identity.md)). v1 ([`spec/decision-token-v1.md`](../spec/decision-token-v1.md)) is frozen: Stopbar no longer issues or accepts it, and a test checks that no v1 vector verifies.
 
-- Algorithm: EdDSA (Ed25519). The header is exactly `{alg, kid, typ}`, and `kid` is the RFC 7638 thumbprint of a key pinned from `/v1/keys`.
-- Claims (closed set, JCS-canonical): `v`, `iss`, `aud`, `tenant`, `request_id`, `nonce`, `outcome`, `payload_hash`, `policy_bundle_hash`, `reservation_id`, `iat`, `exp`.
-- `payload_hash` = sha256 over JCS of the normalised action (spec §2), not a chain tx hash. Gas, nonce and fees are adapter-chosen and capped.
-- Signer adapters **must** run the spec §4 checks in order. The checks include recomputing `payload_hash` from the tx they are about to sign, and single use per `(iss, tenant, nonce)`.
+- Algorithm: EdDSA (Ed25519). The header is exactly `{alg, kid, typ}` with `typ` = `stopbar-decision-v2+jws`, and `kid` is the RFC 7638 thumbprint of a key pinned from `/v1/keys`.
+- Claims (closed set, JCS-canonical): `v` (= 2), `iss`, `aud`, `tenant`, `request_id`, `nonce`, `outcome`, `payload_hash`, `policy_bundle_hash`, `reservation_id`, `iat`, `exp`, and the requester identity `auth_method`, `key_id`, `agent_id`.
+- The identity claims are the **authenticated** `auth.Identity` (method, key ID, the credential's agent), never the body's `actor`. With auth off (loopback dev only) they are `none`, `""`, `""`. The engine passes the identity to `Signer.Sign` explicitly: from the gateway's context on evaluate, and from the pending record's `Requester` on approval, so an approved token binds the requester and never the approver. The signer refuses a malformed identity or one whose tenant is not the request's.
+- `payload_hash` = sha256 over JCS of the normalised action (spec §2, unchanged from v1), not a chain tx hash. Every tx field, including nonce, gas and fees, is bound.
+- Signer adapters **must** run the spec §4 checks in order, given the action about to be signed and the authenticated identity of its request (`Verifier.Verify(token, action, identity)`). The checks include the identity (step 7d, `WRONG_IDENTITY`), recomputing `payload_hash` from the tx they are about to sign, and single use per `(iss, tenant, nonce)`.
 
 ### 10.1a Gatekeeper adapter (`internal/signer`, CS-162; edge)
 
 The adapter is edge code: it uses go-ethereum for secp256k1 and EIP-1559, which the stdlib lacks. It touches no key until the core verifier (`internal/decision`, stdlib only) has accepted the token. `SignTx` runs these steps in order:
 
-1. Verify the token (spec §4). This recomputes `payload_hash` from the exact unsigned tx and spends the token in the adapter's **own** spent store (`-state-dir/adapter-spent.db`, retention max TTL + 2× skew).
+1. Verify the token (decision-token-v2 §4) against the authenticated identity of the request (`SignTx(ctx, token, action, requester)`). This refuses a v1 token and a token bound to any other identity (`WRONG_IDENTITY`), recomputes `payload_hash` from the exact unsigned tx, and spends the token in the adapter's **own** spent store (`-state-dir/adapter-spent.db`, retention max TTL + 2× skew).
 2. Find the key for `from`. If `Options.CodeAt` is set, read `from`'s on-chain code and refuse (`DELEGATED_WALLET`, fail closed on a read error) when it carries EIP-7702 delegation code (`0xef0100 || addr`, `signer.DelegatedTo`) to an address not in `ExpectedDelegates` — a delegated hot wallet can be driven to act as another contract (CS-146; `CodeAt` is wired once `stopbard` has a chain RPC). Type-4 (EIP-7702 SetCode) requests never reach here: the wire schema pins `tx_type` to `2`.
 3. Build the transaction from the approved fields only.
 4. Sign, recover the sender, and require it to equal `from`.
 5. Read the *signed* tx back and require its payload hash to equal the token's.
 
-**Gatekeeper flow:** allow → sign → `Commit(reservation, tx hash)`. If the adapter refuses, or the commit can't be recorded, the reservation is released with the reason audited, the signed bytes are discarded, and the caller gets a 403 with `FAIL_CLOSED_ADAPTER`. `stopbar decode-tx` decodes any signed tx independently: recovered sender, every field, and its payload hash.
+**Gatekeeper flow:** allow → sign → `Commit(reservation, tx hash)`. `Gatekeeper.Evaluate` passes the adapter the identity the gateway authenticated; `Gatekeeper.Approve` passes the requester that `Engine.Approve` returns from the pending record (pending records keep the full `auth.Identity`, in bucket `pending_escalations_v2`). If the adapter refuses, or the commit can't be recorded, the reservation is released with the reason audited, the signed bytes are discarded, and the caller gets a 403 with `FAIL_CLOSED_ADAPTER`. `stopbar decode-tx` decodes any signed tx independently: recovered sender, every field, and its payload hash.
 
 ### 10.2 EIP-712 (co-signer, Phase 4)
 
