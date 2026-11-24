@@ -45,6 +45,18 @@ export class StopbarUnavailable extends StopbarError {
   override name = "StopbarUnavailable";
 }
 
+/** Stopbar refused a lifecycle call with a typed error: e.g. NOT_FOUND (no
+ * such reservation or escalation visible to this key), CONFLICT (already
+ * committed), ALREADY_RESOLVED, RESERVATION_EXPIRED, INVALID_REQUEST. */
+export class StopbarRequestError extends StopbarError {
+  override name = "StopbarRequestError";
+  readonly code: string;
+  constructor(readonly status: number, readonly body: { code?: string; message?: string }) {
+    super(`Stopbar refused (HTTP ${status}): ${body.code || body.message || "—"}`);
+    this.code = body.code ?? "";
+  }
+}
+
 /** The credential is missing, invalid, or lacks the required scope. */
 export class StopbarAuthError extends StopbarError {
   override name = "StopbarAuthError";

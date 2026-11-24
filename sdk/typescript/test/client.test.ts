@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { Client, StopbarAuthError, StopbarDenied, StopbarEscalated, StopbarUnavailable } from "stopbar";
+import { Client, StopbarAuthError, StopbarDenied, StopbarEscalated, StopbarRequestError, StopbarUnavailable } from "stopbar";
 import { client, evm, serve, servers } from "./mock.js";
 
 test("allow returns the decision with signed tx", async () => {
@@ -95,23 +95,52 @@ test("timeout fails closed", async () => {
   srv.closeAllConnections();
 });
 
-test("commit and release hit the LLD routes", async () => {
-  const m = await serve((p) => [200, { state: p.endsWith("/commit") ? "committed" : "released" }]);
+test("commit and release settle the reservation", async () => {
+  const m = await serve((p) => [200, { request_id: "req_1", state: p.endsWith("/commit") ? "committed" : "released" }]);
   const sb = client(m, { apiKey: "k" });
-  assert.equal((await sb.commit("req_1", "0x" + "ab".repeat(32))).state, "committed");
-  assert.equal((await sb.release("req_2")).state, "released");
-  await sb.release("req_3", "broadcast failed");
-  assert.deepEqual(m.seen, [
-    ["/v1/actions/req_1/commit", { tx_ref: "0x" + "ab".repeat(32) }],
-    ["/v1/actions/req_2/release", {}],
-    ["/v1/actions/req_3/release", { reason: "broadcast failed" }],
-  ]);
+  assert.equal((await sb.commit("req_1", "0xabc")).state, "committed");
+  assert.deepEqual([m.last.method, m.last.path, m.last.body], ["POST", "/v1/actions/req_1/commit", { tx_ref: "0xabc" }]);
+  assert.equal((await sb.release("req_1", "user cancelled")).state, "released");
+  assert.deepEqual([m.last.path, m.last.body], ["/v1/actions/req_1/release", { reason: "user cancelled" }]);
+  await sb.release("req/../x"); // an id is one path segment, never a path
+  assert.deepEqual([m.last.path, m.last.body], ["/v1/actions/req%2F..%2Fx/release", {}]);
   assert.equal(m.last.auth, "Bearer k");
 });
 
-test("commit and release fail closed", async () => {
-  for (const [status, code] of [[404, "NOT_FOUND"], [409, "CONFLICT"], [410, "RESERVATION_EXPIRED"]] as const) {
-    await assert.rejects(client(await serve(() => [status, { code }])).commit("req_1", "0x" + "ab".repeat(32)), StopbarUnavailable);
+test("lifecycle refusals are typed", async () => {
+  for (const [status, code] of [[404, "NOT_FOUND"], [409, "CONFLICT"], [410, "RESERVATION_EXPIRED"], [400, "INVALID_REQUEST"]] as const) {
+    const sb = client(await serve(() => [status, { code }]));
+    await assert.rejects(sb.commit("req_1", "0xabc"), (e: unknown) => e instanceof StopbarRequestError && e.status === status && e.code === code);
+    await assert.rejects(sb.poll("req_1"), StopbarRequestError);
   }
   await assert.rejects(client(await serve(() => [403, { code: "FORBIDDEN_SCOPE" }])).release("req_1"), StopbarAuthError);
+  await assert.rejects(client(await serve(() => [500, { code: "INTERNAL" }])).commit("req_1", "0x1"), StopbarUnavailable);
+});
+
+test("poll reports the escalation state", async () => {
+  for (const [status, state, allowed] of [[202, "pending", false], [200, "allowed", true], [403, "denied", false], [403, "expired", false]] as const) {
+    const m = await serve(() => [status, { request_id: "req_1", state, decision: { request_id: "req_1", outcome: allowed ? "allow" : "deny", token: "t" } }]);
+    const st = await client(m, { apiKey: "k" }).poll("req_1");
+    assert.deepEqual([m.last.method, m.last.path, m.last.body], ["GET", "/v1/decisions/req_1", null]);
+    assert.equal(st.state, state);
+    assert.equal(st.allowed, allowed);
+    assert.equal(st.decision?.outcome, allowed ? "allow" : "deny");
+  }
+});
+
+test("reject resolves with the APPROVAL_REJECTED deny", async () => {
+  const deny = { request_id: "req_1", outcome: "deny", reasons: [{ policy_id: "large-share-of-balance", message: "" }, { code: "APPROVAL_REJECTED", policy_id: "", message: "" }] };
+  const m = await serve(() => [403, deny]);
+  const d = await client(m, { apiKey: "ops" }).reject("req_1");
+  assert.deepEqual([m.last.method, m.last.path], ["POST", "/v1/approvals/req_1/reject"]);
+  assert.equal(d.outcome, "deny");
+  assert.deepEqual(d.reasons, ["large-share-of-balance", "APPROVAL_REJECTED"]);
+});
+
+test("reject refusals are typed", async () => {
+  const self = { request_id: "req_1", outcome: "deny", reasons: [{ code: "APPROVAL_SELF_APPROVAL", policy_id: "", message: "" }] };
+  await assert.rejects(client(await serve(() => [403, self])).reject("req_1"), StopbarDenied);
+  await assert.rejects(client(await serve(() => [409, { code: "ALREADY_RESOLVED" }])).reject("req_1"), StopbarRequestError);
+  await assert.rejects(client(await serve(() => [403, { code: "FORBIDDEN_SCOPE" }])).reject("req_1"), StopbarAuthError);
+  await assert.rejects(client(await serve(() => [200, { outcome: "allow" }])).reject("req_1"), StopbarUnavailable);
 });

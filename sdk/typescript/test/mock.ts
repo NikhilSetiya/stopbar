@@ -7,7 +7,7 @@ import { after } from "node:test";
 import { Client, type ClientOptions } from "stopbar";
 
 export type Responder = (path: string, body: any) => [number, unknown];
-export interface Mock { url: string; last: { body: any; auth?: string; path?: string }; seen: [string, any][] }
+export interface Mock { url: string; last: { body: any; auth?: string; path?: string; method?: string }; seen: [string, any][] }
 
 export const servers: Server[] = [];
 after(() => servers.forEach((s) => s.close().closeAllConnections()));
@@ -19,7 +19,7 @@ export async function serve(responder: Responder): Promise<Mock> {
     req.on("data", (c) => (raw += c));
     req.on("end", () => {
       const body = raw ? JSON.parse(raw) : null;
-      mock.last = { body, auth: req.headers.authorization, path: req.url };
+      mock.last = { body, auth: req.headers.authorization, path: req.url, method: req.method };
       mock.seen.push([req.url ?? "", body]);
       const [status, out] = responder(req.url ?? "", body);
       res.writeHead(status, { "Content-Type": "application/json" }).end(JSON.stringify(out));

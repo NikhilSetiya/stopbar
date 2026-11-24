@@ -186,3 +186,6 @@ def test_reject_refusals_raise():
     with pytest.raises(StopbarRequestError) as ei:
         client(srv).reject("req_1")
     assert ei.value.code == "ALREADY_RESOLVED"
+    srv = serve(lambda path, body: (200, {"request_id": "req_1", "outcome": "allow"}))
+    with pytest.raises(StopbarUnavailable):  # an allow is never a rejection: fail closed
+        client(srv).reject("req_1")

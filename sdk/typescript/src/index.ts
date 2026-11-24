@@ -11,7 +11,7 @@
 //     else throw e;                           // StopbarDenied, StopbarUnavailable: never broadcast
 //   }
 
-export { Client, Decision, Session } from "./client.js";
+export { Client, Decision, EscalationStatus, Session } from "./client.js";
 export type { ClientOptions, EvaluateOptions, EvmTxParams } from "./client.js";
 export { detectEncodings, KINDS } from "./encoding.js";
 export type { Encoding } from "./encoding.js";
@@ -21,6 +21,7 @@ export {
   StopbarDenied,
   StopbarError,
   StopbarEscalated,
+  StopbarRequestError,
   StopbarUnavailable,
 } from "./errors.js";
 export type * from "./types.js";

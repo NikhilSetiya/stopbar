@@ -188,7 +188,9 @@ class Client:
                 (decoded.get("reasons") or [{}])[-1].get("code") == "APPROVAL_REJECTED":
             return Decision(status, decoded)
         self._refusal(status, decoded)
-        return self._decision(status, decoded)  # raises: a 200/202 is not a rejection
+        if status != 200:
+            self._decision(status, decoded)  # raises: escalate / deny / unavailable
+        raise StopbarUnavailable(f"Stopbar answered a reject with HTTP {status}: not a rejection")
 
     def poll(self, request_id: str) -> EscalationStatus:
         """The escalation's current state (GET /v1/decisions/{id}). Visible to the

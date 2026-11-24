@@ -8,7 +8,7 @@
 
 import { randomBytes, randomUUID } from "node:crypto";
 import { detectEncodings } from "./encoding.js";
-import { StopbarAuthError, StopbarDenied, StopbarEscalated, StopbarUnavailable, reasonIds } from "./errors.js";
+import { StopbarAuthError, StopbarDenied, StopbarEscalated, StopbarRequestError, StopbarUnavailable, reasonIds } from "./errors.js";
 import type { Action, ActionRequest, DecisionBody, ErrorBody, Label, Source } from "./types.js";
 
 /** A Stopbar decision. `outcome` is "allow", "escalate" or "deny"; in
@@ -21,6 +21,20 @@ export class Decision {
   get txHash(): string | undefined { return this.body.tx_hash; }
   get token(): string | undefined { return this.body.token; }
   get reasons(): string[] { return reasonIds(this.body); }
+}
+
+/** GET /v1/decisions/{id}: where an escalation is. `state` is "pending",
+ * "allowed", "denied" or "expired"; `decision` is the escalate decision while
+ * pending and the final one after (with the token, and in gatekeeper mode the
+ * signed tx, once allowed). Only `allowed` is safe to act on. */
+export class EscalationStatus {
+  constructor(readonly status: number, readonly body: Record<string, unknown>) {}
+  get state(): string { return typeof this.body.state === "string" ? this.body.state : ""; }
+  get allowed(): boolean { return this.status === 200 && this.state === "allowed"; }
+  get decision(): Decision | undefined {
+    const d = this.body.decision;
+    return d !== null && typeof d === "object" ? new Decision(this.status, d as DecisionBody) : undefined;
+  }
 }
 
 export interface ClientOptions {
@@ -109,29 +123,58 @@ export class Client {
       provenance: { labels: [...new Set(opts.labels ?? [])] },
     };
     if (opts.sources?.length) body.provenance.sources = [...opts.sources];
-    return this.decision(...(await this.post("/v1/evaluate", body)));
+    return this.decision(...(await this.request("POST", "/v1/evaluate", body)));
   }
 
   /** Approve a pending escalation. Stopbar re-evaluates it against current
    * state; on an allow the Decision carries the signed transaction. Needs a
    * key with the 'approve' scope. */
   async approve(requestId: string): Promise<Decision> {
-    return this.decision(...(await this.post(`/v1/approvals/${encodeURIComponent(requestId)}`)));
+    return this.decision(...(await this.request("POST", `/v1/approvals/${seg(requestId)}`)));
   }
 
-  /** Report that an allowed action was broadcast, committing its limiter
-   * reservation (LLD §4.1 `POST /v1/actions/{id}/commit`, body `{tx_ref}`).
-   * Idempotent for the same txRef. Rejects with StopbarAuthError, or
-   * StopbarUnavailable on anything else but a 2xx (e.g. 409 for a different
-   * txRef, 404 for a released/unknown id). */
-  async commit(requestId: string, txRef: string): Promise<Record<string, unknown>> {
-    return this.ack(...(await this.post(`/v1/actions/${encodeURIComponent(requestId)}/commit`, { tx_ref: txRef })));
+  /** Reject a pending escalation: it is denied and nothing is signed. Needs a
+   * key with the 'approve' scope that did not request it. Resolves with the
+   * deny (reason APPROVAL_REJECTED); rejects with StopbarDenied if Stopbar
+   * refused the rejection itself (e.g. self-rejection), StopbarRequestError
+   * for an unknown or already-resolved escalation. */
+  async reject(requestId: string): Promise<Decision> {
+    const [status, body] = await this.request("POST", `/v1/approvals/${seg(requestId)}/reject`);
+    const d = body as unknown as DecisionBody;
+    if (status === 403 && d.outcome === "deny" && d.reasons?.at(-1)?.code === "APPROVAL_REJECTED") return new Decision(status, d);
+    refusal(status, body);
+    if (status !== 200) this.decision(status, body); // throws: escalate / deny / unavailable
+    throw new StopbarUnavailable(`Stopbar answered a reject with HTTP ${status}: not a rejection`);
   }
 
-  /** Abandon an allowed action, releasing its limiter reservation (LLD §4.1
-   * `POST /v1/actions/{id}/release`, optional body `{reason}`). */
-  async release(requestId: string, reason?: string): Promise<Record<string, unknown>> {
-    return this.ack(...(await this.post(`/v1/actions/${encodeURIComponent(requestId)}/release`, reason === undefined ? {} : { reason })));
+  /** The escalation's current state (GET /v1/decisions/{id}). Visible to the
+   * requesting agent and its tenant's approvers. A pending escalation past its
+   * approval window comes back expired (a deny). */
+  async poll(requestId: string): Promise<EscalationStatus> {
+    const [status, body] = await this.request("GET", `/v1/decisions/${seg(requestId)}`);
+    if ((status === 200 || status === 202 || status === 403) && body.state) return new EscalationStatus(status, body);
+    refusal(status, body);
+    throw new StopbarUnavailable(`Stopbar returned HTTP ${status}: ${(body as ErrorBody).code ?? JSON.stringify(body)}`);
+  }
+
+  /** Report that an allowed action was broadcast (txRef: its tx hash), turning
+   * its reservation into committed spend (LLD §4.1). Retrying with the same
+   * txRef is safe. Resolves with the body (`{state: "committed", late: true}`
+   * if the reservation had lapsed: the spend is still recorded). */
+  commit(requestId: string, txRef: string): Promise<Record<string, unknown>> {
+    return this.settle(requestId, "commit", { tx_ref: txRef });
+  }
+
+  /** Abandon an allowed action and free its reservation. Retrying is safe. */
+  release(requestId: string, reason?: string): Promise<Record<string, unknown>> {
+    return this.settle(requestId, "release", reason ? { reason } : {});
+  }
+
+  private async settle(requestId: string, verb: string, body: object): Promise<Record<string, unknown>> {
+    const [status, out] = await this.request("POST", `/v1/actions/${seg(requestId)}/${verb}`, body);
+    if (status === 200) return out;
+    refusal(status, out);
+    throw new StopbarUnavailable(`Stopbar returned HTTP ${status}: ${(out as ErrorBody).code ?? JSON.stringify(out)}`);
   }
 
   private decision(status: number, body: Record<string, unknown>): Decision {
@@ -139,21 +182,19 @@ export class Client {
     if (status === 200) return new Decision(status, d);
     if (status === 202) throw new StopbarEscalated(status, d);
     if (status === 403 && d.outcome === "deny") throw new StopbarDenied(status, d);
-    return fail(status, body);
+    const e = body as ErrorBody;
+    if (status === 401 || status === 403) throw new StopbarAuthError(`Stopbar auth failed (HTTP ${status}): ${e.code ?? e.message}`);
+    throw new StopbarUnavailable(`Stopbar returned HTTP ${status}: ${e.code ?? e.message ?? JSON.stringify(body)}`);
   }
 
-  private ack(status: number, body: Record<string, unknown>): Record<string, unknown> {
-    return status >= 200 && status < 300 ? body : fail(status, body);
-  }
-
-  private async post(path: string, body?: unknown): Promise<[number, Record<string, unknown>]> {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+  private async request(method: string, path: string, body?: unknown): Promise<[number, Record<string, unknown>]> {
+    const headers: Record<string, string> = body === undefined ? {} : { "Content-Type": "application/json" };
     if (this.apiKey) headers.Authorization = "Bearer " + this.apiKey;
     let res: Response;
     let text: string;
     try {
       res = await fetch(this.baseUrl + path, {
-        method: "POST", headers, body: body === undefined ? undefined : JSON.stringify(body),
+        method, headers, body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(this.timeoutMs),
       });
       text = await res.text();
@@ -165,13 +206,15 @@ export class Client {
   }
 }
 
-// Anything that is not a decision or a 2xx ack: an auth failure, or (fail
-// closed) unavailable.
-function fail(status: number, body: Record<string, unknown>): never {
+// Throw the typed error for a non-decision refusal, if it is one.
+function refusal(status: number, body: Record<string, unknown>): void {
   const e = body as ErrorBody;
-  if (status === 401 || status === 403) throw new StopbarAuthError(`Stopbar auth failed (HTTP ${status}): ${e.code ?? e.message}`);
-  throw new StopbarUnavailable(`Stopbar returned HTTP ${status}: ${e.code ?? e.message ?? JSON.stringify(body)}`);
+  if (status === 401 || (status === 403 && e.code)) throw new StopbarAuthError(`Stopbar auth failed (HTTP ${status}): ${e.code ?? e.message}`);
+  if ([400, 404, 409, 410, 413, 415].includes(status)) throw new StopbarRequestError(status, e);
 }
+
+// A request id as one URL path segment.
+const seg = (id: string) => encodeURIComponent(id);
 
 function parse(text: string): Record<string, unknown> {
   try {
@@ -225,5 +268,17 @@ export class Session {
 
   approve(requestId: string): Promise<Decision> {
     return this.client.approve(requestId);
+  }
+
+  poll(requestId: string): Promise<EscalationStatus> {
+    return this.client.poll(requestId);
+  }
+
+  commit(requestId: string, txRef: string): Promise<Record<string, unknown>> {
+    return this.client.commit(requestId, txRef);
+  }
+
+  release(requestId: string, reason?: string): Promise<Record<string, unknown>> {
+    return this.client.release(requestId, reason);
   }
 }
