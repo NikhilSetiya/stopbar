@@ -55,6 +55,14 @@ type Approver interface {
 	Approve(ctx context.Context, id, approver string) (model.Decision, error)
 }
 
+// Breaker is the tenant circuit breaker as the gateway sees it (CS-124, the
+// limiter). ResetBreaker records one approver's vote and returns the status
+// after it; it returns model.ErrBreakerNotOpen for a closed breaker.
+type Breaker interface {
+	BreakerStatus(tenant string) model.BreakerStatus
+	ResetBreaker(ctx context.Context, tenant, approver string) (model.BreakerStatus, error)
+}
+
 // Authenticator derives the caller's identity from the request (an API key
 // header now; mTLS/SPIFFE later). It returns auth.ErrUnauthenticated for a
 // missing or unknown credential. nil means auth is off (dev loopback only).
@@ -108,6 +116,7 @@ const (
 	CodeIdentityMismatch  Code = "IDENTITY_MISMATCH" // body tenant/agent != authenticated identity
 	CodeForbiddenScope    Code = "FORBIDDEN_SCOPE"   // the key lacks the required scope
 	CodeRateLimited       Code = "RATE_LIMITED"      // per-identity rate limit exceeded
+	CodeDuplicateVote     Code = "DUPLICATE_VOTE"    // CS-124: the approver already holds a live breaker reset vote
 )
 
 // ClockSkew is how far issued_at may lead or trail the gateway clock (LLD §4).
@@ -143,6 +152,7 @@ var codeStatus = map[Code]int{
 	CodeIdentityMismatch:  http.StatusForbidden,
 	CodeForbiddenScope:    http.StatusForbidden,
 	CodeRateLimited:       http.StatusTooManyRequests,
+	CodeDuplicateVote:     http.StatusConflict,
 }
 
 // ErrorBody is the wire shape of every non-2xx response (LLD §4.1).
@@ -186,6 +196,8 @@ type Config struct {
 	// Approver executes an approved escalation (CS-151/152); nil disables
 	// /v1/approvals.
 	Approver Approver
+	// Breaker serves /v1/breakers (CS-124); nil disables it.
+	Breaker Breaker
 }
 
 // Gateway is an http.Handler serving the Stopbar API.
@@ -202,12 +214,13 @@ type Gateway struct {
 	audit    AuditSink
 	rate     *rateLimiter
 	approver Approver
+	breaker  Breaker
 }
 
 // New returns a Gateway.
 func New(cfg Config) *Gateway {
 	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, keys: cfg.Keys, extra: cfg.Counters, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux(),
-		auth: cfg.Authenticator, audit: cfg.Audit, rate: newRateLimiter(cfg.RatePerMin), approver: cfg.Approver}
+		auth: cfg.Authenticator, audit: cfg.Audit, rate: newRateLimiter(cfg.RatePerMin), approver: cfg.Approver, breaker: cfg.Breaker}
 	if g.log == nil {
 		g.log = slog.New(slog.DiscardHandler)
 	}
@@ -219,6 +232,8 @@ func New(cfg Config) *Gateway {
 	}
 	g.route("/v1/evaluate", http.MethodPost, g.evaluate)
 	g.route("/v1/approvals/{id}", http.MethodPost, g.approve)
+	g.route("/v1/breakers/{tenant}", http.MethodGet, g.breakerStatus)
+	g.route("/v1/breakers/{tenant}/reset", http.MethodPost, g.breakerReset)
 	g.route("/healthz", http.MethodGet, g.healthz)
 	g.route("/metrics", http.MethodGet, g.serveMetrics)
 	g.route("/v1/keys", http.MethodGet, g.serveKeys)
@@ -326,6 +341,73 @@ func (g *Gateway) approve(w http.ResponseWriter, r *http.Request) error {
 		return withID(fail(CodeInternal, "approval failed"), id)
 	}
 	return g.writeJSON(w, "/v1/approvals", outcomeStatus[d.Outcome], d)
+}
+
+// approverFor authenticates an approver of tenant's breaker: a key with the
+// approve scope, issued to that tenant (CS-124 reuses the CS-151 approver keys).
+func (g *Gateway) approverFor(r *http.Request, tenant string) (auth.Identity, error) {
+	id, err := g.auth.Authenticate(r)
+	if err != nil {
+		return id, fail(CodeUnauthenticated, "missing or invalid credential")
+	}
+	req := model.ActionRequest{Tenant: tenant}
+	if !id.HasScope(ApproveScope) {
+		g.auditReject(r.Context(), id, req, "breaker: key lacks the "+ApproveScope+" scope")
+		return id, fail(CodeForbiddenScope, "the API key lacks the %q scope", ApproveScope)
+	}
+	if id.Tenant != tenant {
+		g.auditReject(r.Context(), id, req, "breaker: approver is not of this tenant")
+		return id, fail(CodeIdentityMismatch, "the approver key is not issued to tenant %q", tenant)
+	}
+	return id, nil
+}
+
+// breakerStatus serves a tenant's circuit breaker (CS-124). With auth on, only
+// that tenant's approvers may read it; with auth off (loopback dev) anyone on
+// the host may.
+func (g *Gateway) breakerStatus(w http.ResponseWriter, r *http.Request) error {
+	tenant := r.PathValue("tenant")
+	if g.breaker == nil {
+		return fail(CodeEngineUnavailable, "no circuit breaker configured")
+	}
+	if g.auth != nil {
+		if _, err := g.approverFor(r, tenant); err != nil {
+			return err
+		}
+	}
+	return g.writeJSON(w, "/v1/breakers", http.StatusOK, g.breaker.BreakerStatus(tenant))
+}
+
+// breakerReset records the authenticated approver's vote to reset the tenant's
+// open breaker (CS-124). 200 means the vote completed the quorum and the
+// breaker is closed; 202 means the vote is recorded but the quorum is not met,
+// so the breaker stays open (the reset is refused for now). Votes need
+// identities, so this requires auth even on loopback.
+func (g *Gateway) breakerReset(w http.ResponseWriter, r *http.Request) error {
+	tenant := r.PathValue("tenant")
+	if g.breaker == nil || g.auth == nil {
+		return fail(CodeEngineUnavailable, "breaker reset needs a circuit breaker and authentication (-auth-keys)")
+	}
+	id, err := g.approverFor(r, tenant)
+	if err != nil {
+		return err
+	}
+	st, err := g.breaker.ResetBreaker(auth.WithIdentity(r.Context(), id), tenant, id.KeyID)
+	if errors.Is(err, model.ErrBreakerNotOpen) {
+		return fail(CodeNotFound, "the circuit breaker for tenant %q is not open", tenant)
+	}
+	if errors.Is(err, model.ErrDuplicateVote) {
+		return fail(CodeDuplicateVote, "approver %s already holds a live reset vote on this trip; a second distinct approver must vote", id.KeyID)
+	}
+	if err != nil {
+		g.log.Error("breaker reset failed", "tenant", tenant, "approver", id.KeyID, "err", err)
+		return fail(CodeInternal, "breaker reset vote not recorded")
+	}
+	status := http.StatusOK
+	if st.Open {
+		status = http.StatusAccepted
+	}
+	return g.writeJSON(w, "/v1/breakers", status, st)
 }
 
 // outcomeStatus makes the status code alone safe to act on: a client that

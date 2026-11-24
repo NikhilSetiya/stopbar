@@ -18,7 +18,8 @@
 //
 // Sliding windows use 60 sub-buckets each, counted conservatively: a spend
 // stays in a window for up to one sub-bucket (window/60) longer than the
-// window itself, and never for less.
+// window itself, and never for less. Rules with window "tx" are hard
+// per-transaction caps (USD, units, share of balance; CS-123).
 package limiter
 
 import (
@@ -26,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"regexp"
 	"slices"
@@ -64,18 +66,34 @@ var (
 	ErrReservationExpired   = engine.ErrReservationExpired
 	ErrDuplicateReservation = errors.New("limiter: request ID was already used for a finished reservation")
 	ErrAlreadyCommitted     = errors.New("limiter: reservation is already committed")
+	// ErrNoBalance: a max_pct_of_balance cap applies to a request that moves
+	// value, but its share of the balance is unknown. It fails closed.
+	ErrNoBalance = errors.New("limiter: a balance-share cap applies but the request has no pct_of_balance")
 )
 
-// Rule is one cap. At least one of MaxUSD, MaxCount and MaxUnits must be set.
+// WindowTx is the per-transaction window: a rule with it caps one request on
+// its own (CS-123, FR-LIM-1) and accumulates nothing.
+const WindowTx = "tx"
+
+// Rule is one cap. At least one of MaxUSD, MaxCount, MaxUnits and
+// MaxPctOfBalance must be set.
 type Rule struct {
 	Scope    Scope  `json:"scope"`
-	Window   string `json:"window"`              // "1m", "1h" or "24h"
+	Window   string `json:"window"`              // "1m", "1h", "24h", or "tx" (per transaction)
 	MaxUSD   string `json:"max_usd,omitempty"`   // decimal string, ≤ 6 fractional digits
-	MaxCount int64  `json:"max_count,omitempty"` // transactions
+	MaxCount int64  `json:"max_count,omitempty"` // transactions; not on "tx"
 	MaxUnits string `json:"max_units,omitempty"` // raw token units; wallet+asset only
+	// MaxPctOfBalance caps one request's share of the wallet's balance of the
+	// moved asset (decimal fraction, e.g. "0.5" = 50%). "tx" window only.
+	MaxPctOfBalance string `json:"max_pct_of_balance,omitempty"`
 	// UnknownDestinationsOnly applies a destination rule only when the
 	// destination is not known (salami draining, FR-LIM-2a).
 	UnknownDestinationsOnly bool `json:"unknown_destinations_only,omitempty"`
+	// CircuitBreaker makes a tenant-scope rule the tenant's outflow circuit
+	// breaker (CS-124, FR-LIM-3): a request that would exceed it trips the
+	// breaker, and from then on every request for the tenant is denied
+	// CIRCUIT_OPEN until a quorum of approvers resets it.
+	CircuitBreaker bool `json:"circuit_breaker,omitempty"`
 	// Escalate makes the rule a soft cap: a request that would exceed it is
 	// flagged soft_cap_exceeded (FlagSoftCap) for policy to escalate, instead
 	// of being denied. Reserve still denies an unflagged request that would
@@ -90,19 +108,31 @@ const FlagSoftCap = "soft_cap_exceeded"
 
 type rule struct {
 	Rule
-	window   int // index into Windows
+	window   int // index into Windows; -1 for a per-transaction rule
+	perTx    bool
 	maxUSD   *big.Int
 	maxUnits *big.Int
+	maxPct   *big.Rat
 }
+
+// DefaultBreakerQuorum is how many distinct approvers must vote to reset a
+// tripped breaker when Config.BreakerQuorum is unset.
+const DefaultBreakerQuorum = model.MinBreakerQuorum
 
 // Config wires a Limiter.
 type Config struct {
 	Rules []Rule
 	Store Store // nil: in-memory only (tests, dev)
 	Clock func() time.Time
+	// BreakerQuorum is M in the M-of-N breaker reset: distinct approver
+	// identities needed. 0 means DefaultBreakerQuorum.
+	BreakerQuorum int
+	// Logger receives the high-severity alert when a breaker trips.
+	Logger *slog.Logger
 }
 
-// Limiter implements engine.Limiter and engine.Enricher (velocity context).
+// Limiter implements engine.Limiter, engine.Enricher (velocity context) and
+// engine.Breaker (the tenant circuit breaker).
 type Limiter struct {
 	mu    sync.Mutex
 	rules []rule
@@ -110,6 +140,13 @@ type Limiter struct {
 	clock func() time.Time
 	recs  map[string]*entry
 	usage map[string]*keyUsage
+	// breakers holds every open breaker, by tenant. A closed breaker has no
+	// entry. Changes are durable (and audited) before they are applied, except
+	// a trip whose write fails, which still opens in memory: failing closed.
+	breakers      map[string]*model.BreakerStatus
+	quorum        int
+	log           *slog.Logger
+	trips, resets uint64
 	// Sweeping is proportional to what lapsed, not to what is retained:
 	// live reservations sit in a heap by expiry, and every record in a
 	// queue by creation time (retention pruning).
@@ -146,12 +183,30 @@ type bucket struct {
 
 // New validates the rules and rebuilds state from the store.
 func New(cfg Config) (*Limiter, error) {
-	l := &Limiter{store: cfg.Store, clock: cfg.Clock, recs: map[string]*entry{}, usage: map[string]*keyUsage{}}
+	l := &Limiter{store: cfg.Store, clock: cfg.Clock, recs: map[string]*entry{}, usage: map[string]*keyUsage{},
+		breakers: map[string]*model.BreakerStatus{}, quorum: cfg.BreakerQuorum, log: cfg.Logger}
 	if l.store == nil {
 		l.store = MemStore{}
 	}
 	if l.clock == nil {
 		l.clock = time.Now
+	}
+	if l.log == nil {
+		l.log = slog.New(slog.DiscardHandler)
+	}
+	switch {
+	case l.quorum == 0:
+		l.quorum = DefaultBreakerQuorum
+	case l.quorum < model.MinBreakerQuorum:
+		return nil, fmt.Errorf("limiter: breaker quorum must be at least %d distinct approvers", model.MinBreakerQuorum)
+	}
+	open, err := l.store.LoadBreakers()
+	if err != nil {
+		return nil, fmt.Errorf("limiter: loading breakers: %w", err)
+	}
+	for _, b := range open {
+		b.Quorum = l.quorum // the configured quorum, not the one at trip time
+		l.breakers[b.Tenant] = &b
 	}
 	for i, r := range cfg.Rules {
 		cr, err := compile(r)
@@ -189,17 +244,34 @@ func compile(r Rule) (rule, error) {
 	if !valid {
 		return cr, fmt.Errorf("unknown scope %q", r.Scope)
 	}
-	d, err := time.ParseDuration(r.Window)
-	if err != nil {
-		return cr, fmt.Errorf("window: %w", err)
-	}
-	for i, w := range Windows {
-		if w == d {
-			cr.window = i
+	if r.Window == WindowTx {
+		cr.perTx = true
+		if r.MaxCount != 0 {
+			return cr, errors.New("max_count is meaningless on a per-transaction (tx) rule")
+		}
+	} else {
+		d, err := time.ParseDuration(r.Window)
+		if err != nil {
+			return cr, fmt.Errorf("window: %w", err)
+		}
+		for i, w := range Windows {
+			if w == d {
+				cr.window = i
+			}
+		}
+		if cr.window < 0 {
+			return cr, fmt.Errorf("window %s: must be one of 1m, 1h, 24h, tx", r.Window)
+		}
+		if r.MaxPctOfBalance != "" {
+			return cr, errors.New("max_pct_of_balance applies to one transaction: use window tx")
 		}
 	}
-	if cr.window < 0 {
-		return cr, fmt.Errorf("window %s: must be one of 1m, 1h, 24h", r.Window)
+	var err error
+	if r.MaxPctOfBalance != "" {
+		if !reUSD.MatchString(r.MaxPctOfBalance) {
+			return cr, fmt.Errorf("max_pct_of_balance %q: not a non-negative decimal string", r.MaxPctOfBalance)
+		}
+		cr.maxPct, _ = new(big.Rat).SetString(r.MaxPctOfBalance)
 	}
 	if r.MaxUSD != "" {
 		if cr.maxUSD, err = parseUSD(r.MaxUSD, false); err != nil {
@@ -219,11 +291,17 @@ func compile(r Rule) (rule, error) {
 	if r.MaxCount < 0 {
 		return cr, errors.New("max_count must be ≥ 0")
 	}
-	if cr.maxUSD == nil && cr.maxUnits == nil && r.MaxCount == 0 {
+	if cr.maxUSD == nil && cr.maxUnits == nil && cr.maxPct == nil && r.MaxCount == 0 {
 		return cr, errors.New("rule sets no cap")
 	}
 	if r.UnknownDestinationsOnly && r.Scope != ScopeDestination {
 		return cr, errors.New("unknown_destinations_only is only meaningful on destination scope")
+	}
+	if r.CircuitBreaker && (r.Scope != ScopeTenant || cr.perTx) {
+		return cr, errors.New("circuit_breaker is a tenant outflow cap: tenant scope with a 1m, 1h or 24h window")
+	}
+	if r.CircuitBreaker && r.Escalate {
+		return cr, errors.New("circuit_breaker is a hard stop; it cannot also be a soft (escalate) cap")
 	}
 	return cr, nil
 }
@@ -310,6 +388,36 @@ func amountOf(er model.EnrichedRequest) (amount, error) {
 	return amt, nil
 }
 
+// checkTx applies a per-transaction rule to one request on its own: its USD
+// spend (value + max fee), its raw units, and its share of the balance. These
+// are hard caps: unlike a policy escalation, a human approval cannot lift them.
+func checkTx(r rule, amt amount, er model.EnrichedRequest) error {
+	if r.maxUSD != nil {
+		if amt.usd == nil {
+			return fmt.Errorf("%w (%s per-tx cap)", ErrUnpriced, r.Scope)
+		}
+		if amt.usd.Cmp(r.maxUSD) > 0 {
+			return fmt.Errorf("%w: %s per-tx USD cap %s", engine.ErrCapExceeded, r.Scope, microToDecimal(r.maxUSD))
+		}
+	}
+	if r.maxUnits != nil && amt.units.Cmp(r.maxUnits) > 0 {
+		return fmt.Errorf("%w: %s per-tx unit cap %s", engine.ErrCapExceeded, r.Scope, r.maxUnits)
+	}
+	if r.maxPct != nil && amt.units.Sign() > 0 { // a call that moves nothing has no share
+		if er.PctOfBalance == nil {
+			return fmt.Errorf("%w (%s per-tx cap)", ErrNoBalance, r.Scope)
+		}
+		if !reUSD.MatchString(*er.PctOfBalance) {
+			return fmt.Errorf("limiter: pct_of_balance %q is not a non-negative decimal string", *er.PctOfBalance)
+		}
+		pct, _ := new(big.Rat).SetString(*er.PctOfBalance)
+		if pct.Cmp(r.maxPct) > 0 {
+			return fmt.Errorf("%w: %s per-tx balance-share cap %s", engine.ErrCapExceeded, r.Scope, r.MaxPctOfBalance)
+		}
+	}
+	return nil
+}
+
 // Reserve implements engine.Limiter: all caps checked on all keys, then all
 // keys updated, or nothing.
 func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest, ttl time.Duration, ae *model.AuditEntry) error {
@@ -330,13 +438,31 @@ func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest
 		}
 		return fmt.Errorf("%w: %s (%s)", ErrDuplicateReservation, id, e.State)
 	}
+	tenant := er.Request.Tenant
+	if b := l.breakers[tenant]; b != nil {
+		return fmt.Errorf("%w: tenant %q: %s", engine.ErrCircuitOpen, tenant, b.Reason)
+	}
 	ks := keys(er)
 	flagged := slices.Contains(er.Intent.Flags, FlagSoftCap)
+	// Breaker rules first: a request that would push the tenant's outflow
+	// over one trips the breaker, whatever other caps it also breaks.
 	for _, r := range l.rules {
-		if !applies(r, er) || (r.Escalate && flagged) {
+		if !r.CircuitBreaker {
+			continue
+		}
+		err := l.check(r, er, ks[r.Scope], amt, now)
+		if errors.Is(err, engine.ErrCapExceeded) {
+			return l.trip(id, tenant, strings.TrimPrefix(err.Error(), engine.ErrCapExceeded.Error()+": ")+" (circuit breaker)", now)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	for _, r := range l.rules {
+		if r.CircuitBreaker || !applies(r, er) || (r.Escalate && flagged) {
 			continue // a flagged request reached here only because policy allowed it
 		}
-		if err := l.check(r, ks[r.Scope], amt, now); err != nil {
+		if err := l.check(r, er, ks[r.Scope], amt, now); err != nil {
 			return err
 		}
 	}
@@ -429,8 +555,12 @@ func applies(r rule, er model.EnrichedRequest) bool {
 	return !r.UnknownDestinationsOnly || !er.Destination.Known
 }
 
-// check returns why adding amt to key would exceed rule r, or nil.
-func (l *Limiter) check(r rule, key string, amt amount, now time.Time) error {
+// check returns why adding amt to key would exceed rule r, or nil. A
+// per-transaction rule judges the request on its own (checkTx).
+func (l *Limiter) check(r rule, er model.EnrichedRequest, key string, amt amount, now time.Time) error {
+	if r.perTx {
+		return checkTx(r, amt, er)
+	}
 	used := l.used(key, r.window, now)
 	if r.maxUSD != nil {
 		if amt.usd == nil {
@@ -489,7 +619,7 @@ func (l *Limiter) Enrich(_ context.Context, er *model.EnrichedRequest) error {
 		return nil
 	}
 	for _, r := range l.rules {
-		if r.Escalate && applies(r, *er) && l.check(r, ks[r.Scope], amt, now) != nil {
+		if r.Escalate && applies(r, *er) && l.check(r, *er, ks[r.Scope], amt, now) != nil {
 			if !slices.Contains(er.Intent.Flags, FlagSoftCap) {
 				er.Intent.Flags = append(slices.Clip(er.Intent.Flags), FlagSoftCap)
 			}

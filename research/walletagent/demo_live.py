@@ -69,7 +69,10 @@ def demo_world(path, rpc):
             USDC: {"address": USDC_USD_FEED, "max_age_sec": USDC_HEARTBEAT},
         },
         "known_destinations": [ALICE, BOB, ROUTER, "0x2626664c2603336e57b271c5c0b26f421741e481"],
-        "limits": [{"scope": "wallet", "window": "1h", "max_usd": "20000", "max_count": 50}],
+        # Hard per-tx cap (CS-123): the approved 5 ETH is ~50% of the 10 ETH demo
+        # wallet, so the share cap sits above it (60%); max_usd matches the 1h cap.
+        "limits": [{"scope": "wallet", "window": "tx", "max_usd": "20000", "max_pct_of_balance": "0.6"},
+                   {"scope": "wallet", "window": "1h", "max_usd": "20000", "max_count": 50}],
     }, indent=2))
 
 

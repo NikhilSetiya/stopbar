@@ -153,8 +153,10 @@
                 "enum": [
                   "1m",
                   "1h",
-                  "24h"
-                ]
+                  "24h",
+                  "tx"
+                ],
+                "description": "tx: a per-transaction cap (CS-123) that judges one request on its own and accumulates nothing."
               },
               "max_usd": {
                 "type": "string",
@@ -168,8 +170,17 @@
                 "type": "string",
                 "pattern": "^[0-9]+$"
               },
+              "max_pct_of_balance": {
+                "type": "string",
+                "pattern": "^[0-9]+(\\.[0-9]+)?$",
+                "description": "tx window only: the most one request may move as a fraction of the wallet's balance of that asset (\"0.5\" = 50%). An unknown balance fails closed."
+              },
               "unknown_destinations_only": {
                 "type": "boolean"
+              },
+              "circuit_breaker": {
+                "type": "boolean",
+                "description": "Tenant scope only: this rule is the tenant's outflow circuit breaker (CS-124). A request that would exceed it trips the breaker, and every later request for the tenant is denied CIRCUIT_OPEN until reset."
               },
               "escalate": {
                 "description": "Soft cap: a request that would exceed it is flagged soft_cap_exceeded and escalated by policy, instead of denied.",
@@ -191,7 +202,7 @@
     },
     "requests": {
       "type": "array",
-      "description": "Sequence for multi-step attacks (e.g. velocity drain). Every request before expected.at_step must be allowed; the one at at_step must match expected.",
+      "description": "Sequence for multi-step attacks (e.g. velocity drain). Every request before expected.at_step must be allowed; the one at at_step, and every one after it, must match expected (e.g. a tripped circuit breaker keeps denying).",
       "items": {
         "type": "object"
       }
@@ -220,7 +231,15 @@
         "at_step": {
           "type": "integer",
           "minimum": 0,
-          "description": "For sequences: index of the request that must be stopped"
+          "description": "For sequences: index of the first request that must be stopped. Every later request must be stopped the same way."
+        },
+        "metrics": {
+          "type": "object",
+          "description": "Counters /metrics must report after the run's last request, e.g. {stopbar_circuit_breaker_trips_total: 1}.",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
         },
         "code": {
           "type": "string",

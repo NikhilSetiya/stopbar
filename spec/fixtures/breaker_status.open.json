@@ -1,0 +1,14 @@
+{
+  "tenant": "acme",
+  "open": true,
+  "tripped_at": "2026-11-23T10:00:00Z",
+  "trip_request_id": "req_fixture_0014_1",
+  "reason": "tenant 1h USD cap 30000 (circuit breaker)",
+  "votes": [
+    {"approver": "ak_1a2b3c4d", "at": "2026-11-23T11:30:00Z", "expires_at": "2026-11-23T12:30:00Z"}
+  ],
+  "expired_votes": [
+    {"approver": "ak_5e6f7a8b", "at": "2026-11-23T10:05:00Z", "expires_at": "2026-11-23T11:05:00Z"}
+  ],
+  "quorum": 2
+}

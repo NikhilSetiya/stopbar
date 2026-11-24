@@ -2,12 +2,22 @@ id: CS-2026-0002
 title: Agent error sends entire balance (OpenClaw pattern, Feb 2026)
 category: agent_error
 target: agent_wallet.evm
-description: No attacker. Agent misinterprets an instruction and transfers its full token balance to a known address.
+description: >
+  No attacker. Agent misinterprets an instruction and transfers its full token balance (~$250,000)
+  to a known address. The destination is allowlisted and nothing is tainted, so the only signal is
+  size: the starter pack's large-share-of-balance policy escalates it (100% > 20%). The per-transaction
+  hard caps (CS-123: $10,000 and 50% of balance) sit behind it in the limiter: escalations reserve
+  nothing, so they don't change this decision, but they are what still blocks the transfer if a
+  human approves it (approval waives the escalation, never a cap).
 setup:
   known_destinations: ["0x4444444444444444444444444444444444444444"]
   balances: {LOBSTAR: "52430000"}
   prices_usd: {ETH: "3500", LOBSTAR: "0.00477"}
   tokens: {"0x6666666666666666666666666666666666666666": {symbol: LOBSTAR, decimals: 18}}
+  limits:
+    - {scope: wallet, window: tx, max_usd: "10000", max_pct_of_balance: "0.5"}
+    - {scope: wallet, window: 1h, max_usd: "5000", max_count: 50}
+    - {scope: tenant, window: 1h, max_usd: "20000"}
 request:
   id: req_fixture_0002
   tenant: test

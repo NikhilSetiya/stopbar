@@ -37,6 +37,11 @@ const usage = `usage:
   stopbar approve <id> --url URL --key APPROVER_KEY
       approve a pending escalation: stopbard re-evaluates it against current
       state and, if it now allows, returns the signed transaction
+  stopbar breaker status --tenant T [--url URL] [--key APPROVER_KEY]
+      show the tenant's circuit breaker (open/closed, trip, reset votes, quorum)
+  stopbar breaker reset --tenant T --url URL --key APPROVER_KEY [--key APPROVER_KEY ...]
+      vote to reset a tripped circuit breaker, once per approver key; it closes
+      only when a quorum of distinct approvers has voted (M of N), else refused
   stopbar audit verify --state-dir DIR (--keys JWKS.json | --decision-key FILE) [--from N] [--to M] [--require-covered [--allow-empty]]
       recompute the audit hash chain and check the signed checkpoints, offline
   stopbar audit export --state-dir DIR [--from N] [--to M]
@@ -69,6 +74,10 @@ func main() {
 		}
 	case "approve":
 		if err := approveCmd(os.Args[2:]); err != nil {
+			fail(err.Error())
+		}
+	case "breaker":
+		if err := breakerCmd(os.Args[2:]); err != nil {
 			fail(err.Error())
 		}
 	case "decode-tx":
