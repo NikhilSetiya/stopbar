@@ -18,6 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from .encoding import detect
 from .errors import (
     StopbarAuthError,
     StopbarDenied,
@@ -109,10 +110,10 @@ class Client:
 
     def session(self, labels: list[str] | None = None) -> "Session":
         """A Session accumulates provenance labels (monotonic taint) that ride
-        on every request it evaluates — e.g. add ``untrusted_web`` after the
-        agent reads web content, and it stays attached for the rest of the
-        session."""
-        return Session(self, list(labels or []))
+        on every request it evaluates — e.g. ``add(page, "untrusted_web")``
+        after the agent reads web content, and it stays attached for the rest
+        of the session."""
+        return Session(self, list(dict.fromkeys(labels or [])))
 
     # ---- actions ----
 
@@ -146,6 +147,7 @@ class Client:
         action: dict[str, Any],
         *,
         labels: list[str] | None = None,
+        sources: list[dict[str, str]] | None = None,
         request_id: str | None = None,
         nonce: str | None = None,
         ttl_seconds: int = 60,
@@ -161,8 +163,10 @@ class Client:
             "ttl_seconds": ttl_seconds,
             "actor": {"agent_id": self.agent_id, "session_id": self.session_id},
             "action": action,
-            "provenance": {"labels": list(labels or [])},
+            "provenance": {"labels": list(dict.fromkeys(labels or []))},
         }
+        if sources:
+            body["provenance"]["sources"] = list(sources)
         status, decoded = self._post("/v1/evaluate", body)
         return self._decision(status, decoded)
 
@@ -184,7 +188,9 @@ class Client:
                 (decoded.get("reasons") or [{}])[-1].get("code") == "APPROVAL_REJECTED":
             return Decision(status, decoded)
         self._refusal(status, decoded)
-        return self._decision(status, decoded)  # raises: a 200/202 is not a rejection
+        if status != 200:
+            self._decision(status, decoded)  # raises: escalate / deny / unavailable
+        raise StopbarUnavailable(f"Stopbar answered a reject with HTTP {status}: not a rejection")
 
     def poll(self, request_id: str) -> EscalationStatus:
         """The escalation's current state (GET /v1/decisions/{id}). Visible to the
@@ -260,16 +266,34 @@ class Session:
 
     client: Client
     labels: list[str]
+    sources: list[dict[str, str]] = field(default_factory=list)
 
     def add_label(self, label: str) -> "Session":
         if label not in self.labels:
             self.labels.append(label)
         return self
 
+    def add(self, content: str, label: str, ref: str | None = None) -> "Session":
+        """Record content entering the agent's context under ``label`` (LLD
+        §8.2). Any input not labelled ``trusted_*`` is scanned for encoded
+        content (base64, hex, Morse, ROT-n, zero-width); if any is found the
+        session also gains ``decoded`` (CS-183). ``ref`` (a URL, tx hash…) is
+        recorded as a provenance source."""
+        self.add_label(label)
+        decoded = not label.startswith("trusted_") and bool(detect(content))
+        if decoded:
+            self.add_label("decoded")
+        if ref is not None:
+            self.sources.append({"label": label, "ref": ref})
+            if decoded:
+                self.sources.append({"label": "decoded", "ref": ref})
+        return self
+
     def evaluate(self, action: dict[str, Any], **kw: Any) -> Decision:
         extra = kw.pop("labels", None) or []
         merged = list(dict.fromkeys([*self.labels, *extra]))
-        return self.client.evaluate(action, labels=merged, **kw)
+        sources = [*self.sources, *(kw.pop("sources", None) or [])]
+        return self.client.evaluate(action, labels=merged, sources=sources, **kw)
 
     def approve(self, request_id: str) -> Decision:
         return self.client.approve(request_id)

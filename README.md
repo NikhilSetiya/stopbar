@@ -30,7 +30,9 @@ COMPROMISED REQUESTER (T3): an authenticated service submits the same unlimited 
 Together spend: $0.0104 of the $1.00 cap (DeepSeek-V4.1-Flash; 16 calls)
 ```
 
-<sub>Excerpt; the full verbatim output is in [`docs/transcripts/demo-live-2026-11-23.txt`](docs/transcripts/demo-live-2026-11-23.txt). The model's behaviour varies run to run — a safety-trained model sometimes declines the approval itself — so the T3 step re-submits it with valid credentials to show the denial doesn't depend on the model. Reproduce with `make demo-live` (needs the Together key; hard-capped at $1).</sub>
+Model behaviour varies by run: sometimes the agent refuses on its own, sometimes it tries and Stopbar denies. The compromised-service (T3) step shows Stopbar's deny on every run.
+
+<sub>Excerpt; the full verbatim output is in [`docs/transcripts/demo-live-2026-11-23.txt`](docs/transcripts/demo-live-2026-11-23.txt). Reproduce with `make demo-live` (needs the Together key; hard-capped at $1).</sub>
 
 A compromised service, a buggy script, or an agent's mistake asks the signer to move funds it never should — no key is stolen and the signature is valid, as in the [Binance](#the-problem-in-one-line) and [OpenClaw](#the-problem-in-one-line) patterns. Stopbar denies it **deterministically, with no model in the loop**, because it binds the whole transaction to caps, allowlists, decoded intent and loss bounds. Every such block is replayed over real HTTP on every PR (`make e2e`).
 

@@ -544,7 +544,7 @@ const decision = await cs.evaluate(proposedTx, { context: ctx });   // attaches 
 
 Rules:
 - `ctx.labels()` = union of labels of everything added this session (monotonic; can only reset by starting a new session).
-- `decoded` is added automatically if the SDK detects encoded content (base64, hex, Morse, ROT-n, zero-width chars) in untrusted inputs.
+- `decoded` is added automatically if the SDK detects encoded content (base64, hex, Morse, ROT-n, zero-width chars) in untrusted inputs (CS-183: any label not `trusted_*`). To keep false positives low on addresses, hashes and calldata, base64/hex count only when they decode to readable text, Morse needs a run of ≥ 5 valid codes, and ROT-n needs a segment that is English only under rotation. Both SDKs run the same detector against the shared fixtures in `sdk/testdata/encodings.json`.
 - Labels only restrict. Missing provenance (`labels` empty) is treated as `unknown_provenance` → policy may escalate.
 
 ### 8.3 Phase 3 — field-level taint (code mode)
