@@ -91,12 +91,16 @@ func TestContactValidate(t *testing.T) {
 		want int // problems
 	}{
 		{"valid pending", func(*Contact) {}, 0},
-		{"valid approved", func(c *Contact) { c.ApprovedBy, c.ApprovedAt, c.ActiveFrom, c.Status = "ak2", &at, &later, ContactCoolingOff }, 0},
+		{"valid approved", func(c *Contact) {
+			c.ApprovedBy, c.ApprovedAt, c.ActiveFrom, c.Status = "ak2", &at, &later, ContactCoolingOff
+		}, 0},
 		{"everything wrong at once", func(c *Contact) {
 			*c = Contact{Address: "0xABC", Label: strings.Repeat("x", MaxContactLabel+1), Status: "live"}
 		}, 9},
 		{"approval fields half set", func(c *Contact) { c.ApprovedBy = "ak2" }, 1},
-		{"active before approval", func(c *Contact) { c.ApprovedBy, c.ApprovedAt, c.ActiveFrom, c.Status = "ak2", &later, &at, ContactActive }, 1},
+		{"active before approval", func(c *Contact) {
+			c.ApprovedBy, c.ApprovedAt, c.ActiveFrom, c.Status = "ak2", &later, &at, ContactActive
+		}, 1},
 		{"unapproved but active", func(c *Contact) { c.Status = ContactActive }, 1},
 		{"similar to itself", func(c *Contact) { c.SimilarTo = []SimilarContact{{Address: c.Address}} }, 1},
 	} {
