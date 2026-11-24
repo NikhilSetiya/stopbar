@@ -25,6 +25,21 @@ from .client import Client
 from .errors import StopbarDecisionError, StopbarError
 
 
+def disable_agentkit_telemetry() -> None:
+    """Stop AgentKit posting the wallet address, network and every action name
+    to Coinbase analytics. AgentKit has no opt-out, so both call sites (wallet
+    provider initialisation and the action decorator) are stubbed process-wide.
+    Importing stopbar.wallet calls this."""
+    from coinbase_agentkit.action_providers import action_decorator
+    from coinbase_agentkit.wallet_providers.wallet_provider import WalletProvider
+
+    WalletProvider.track_initialization = lambda self: None
+    action_decorator.send_analytics_event = lambda event: None
+
+
+disable_agentkit_telemetry()
+
+
 class StopbarWalletProvider(EvmWalletProvider):
     """An AgentKit EvmWalletProvider whose signing goes only through Stopbar.
 

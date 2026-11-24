@@ -49,6 +49,10 @@ BOB = "0x000000000000000000000000000000000000b0b0"
 SUPPLIER = "0x7c9e8a2b4d6f1030a5b8c2e4f6a1b3d5e7f90c2a"  # a real-looking address NOT on the allowlist
 USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 ROUTER = "0x6ff5693b99212da76ad316178a184ab56d299b43"
+# The demo's address book: the frozen PILOT-2 book minus SwapRouter02. No demo
+# journey swaps, and two entries named "Uniswap router" / "Uniswap SwapRouter"
+# made "approve the Uniswap router" ambiguous to the model.
+DEMO_CONTACTS = {k: v for k, v in ADDRESS_BOOK.items() if k != "Uniswap SwapRouter"}
 
 
 def demo_world(path, rpc):
@@ -125,7 +129,7 @@ def main():
                                      provenance=lambda: ["trusted_user"])
         reads = agent.ReadContext(balances={"ETH": "10", "USDC": "5000", "WETH": "2", "cbBTC": "0.05"},
                                   transactions=[], resources={}, decimals={USDC: 6, ROUTER: 18},
-                                  contacts=ADDRESS_BOOK)
+                                  contacts=DEMO_CONTACTS)
 
         WRITES = {"send_eth", "send_token", "approve_token", "swap", "wrap_eth", "unwrap_weth"}
         outcomes = []
