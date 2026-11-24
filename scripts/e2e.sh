@@ -109,6 +109,9 @@ else
   echo "SKIP wallet agent e2e: anvil not installed (brew install foundry). This stage is local-only; CI does not run it."
 fi
 
+step "SDKs: TypeScript + Python unit tests, encoding detector, examples vs live stopbard (CS-181/182/183)"
+./scripts/e2e_sdk.sh "$BIN/stopbard" "$BIN/stopbar"
+
 step "corpus attacks through live stopbard: real engine + policy, dev stubs (CS-111/112)"
 python3 scripts/e2e_corpus.py "$BIN/stopbard" "$BIN/stopbar"
 

@@ -1,0 +1,33 @@
+{
+  "name": "stopbar",
+  "version": "0.1.0",
+  "description": "Stopbar TypeScript SDK — an intent firewall for AI-agent wallet actions and tool calls.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NikhilSetiya/stopbar.git",
+    "directory": "sdk/typescript"
+  },
+  "homepage": "https://github.com/NikhilSetiya/stopbar/tree/main/sdk/typescript",
+  "keywords": ["ethereum", "agent", "wallet", "policy", "firewall", "security"],
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "files": ["dist/src"],
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "tsc -p . && node --test --test-reporter=spec dist/test/*.test.js",
+    "prepack": "tsc -p ."
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "7.0.2"
+  }
+}

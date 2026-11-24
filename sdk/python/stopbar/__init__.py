@@ -22,6 +22,7 @@ The AgentKit wallet provider lives in ``stopbar.wallet`` and needs the 'wallet'
 extra (``pip install stopbar[wallet]``); the core client above is stdlib-only.
 """
 from .client import Client, Decision, EscalationStatus, Session
+from .encoding import detect as detect_encodings
 from .errors import (
     StopbarAuthError,
     StopbarDecisionError,
@@ -39,6 +40,7 @@ __all__ = [
     "Decision",
     "EscalationStatus",
     "Session",
+    "detect_encodings",
     "StopbarError",
     "StopbarDecisionError",
     "StopbarDenied",
