@@ -118,6 +118,18 @@ func (l *fakeLimiter) Release(_ context.Context, id string, rec *model.AuditEntr
 	return l.record(rec)
 }
 
+func (l *fakeLimiter) Owner(id string) (string, string, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return "test", "agent", slices.Contains(l.reserved, id)
+}
+
+type breakerFunc func(context.Context, string) (bool, error)
+
+func (f breakerFunc) CircuitOpen(ctx context.Context, tenant string) (bool, error) {
+	return f(ctx, tenant)
+}
+
 type signFunc func(context.Context, model.Decision) (string, error)
 
 func (f signFunc) Sign(ctx context.Context, _ auth.Identity, _ model.ActionRequest, d model.Decision) (string, error) {
@@ -334,6 +346,17 @@ func TestFailClosed(t *testing.T) {
 		}, "", CodePolicyFail, false, true},
 		{"cap exceeded", func(r *rig) { r.limiter.reserveErr = ErrCapExceeded }, "", CodeCapExceeded, true, true},
 		{"circuit open", func(r *rig) { r.limiter.reserveErr = ErrCircuitOpen }, "", CodeCircuitOpen, true, true},
+		// CS-124: an open breaker denies before decode, enrich or policy run.
+		{"breaker open", func(r *rig) {
+			r.cfg.Breaker = breakerFunc(func(_ context.Context, tenant string) (bool, error) { return tenant == "acme", nil })
+			r.cfg.Decoders = []Decoder{noDecoder{}}
+		}, "", CodeCircuitOpen, false, true},
+		{"breaker store down", func(r *rig) {
+			r.cfg.Breaker = breakerFunc(func(context.Context, string) (bool, error) { return false, errors.New("bolt: closed") })
+		}, "", CodeLimiter, false, true},
+		{"breaker panic", func(r *rig) {
+			r.cfg.Breaker = breakerFunc(func(context.Context, string) (bool, error) { panic("boom") })
+		}, "", CodeLimiter, false, true},
 		{"limiter store down", func(r *rig) { r.limiter.reserveErr = errors.New("redis: connection refused") }, "", CodeLimiter, true, true},
 		{"signer error", func(r *rig) {
 			r.cfg.Signer = signFunc(func(context.Context, model.Decision) (string, error) { return "", errors.New("kms throttled") })
@@ -514,18 +537,26 @@ func TestUnauditedDenialsAreCounted(t *testing.T) {
 
 // fakePending is an in-memory PendingStore for the approval-lifecycle tests.
 type fakePending struct {
-	mu  sync.Mutex
-	m   map[string]PendingEscalation
-	err error // forced on every call when set
+	mu    sync.Mutex
+	m     map[string]PendingEscalation
+	err   error      // forced on every call when set
+	audit *fakeAudit // Put writes its audit record here, atomically
 }
 
 func newFakePending() *fakePending { return &fakePending{m: map[string]PendingEscalation{}} }
 
-func (p *fakePending) Put(_ context.Context, e PendingEscalation) error {
+// Put models the store's single transaction: if the audit record cannot be
+// written, the state change does not happen either.
+func (p *fakePending) Put(_ context.Context, e PendingEscalation, rec *model.AuditEntry) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.err != nil {
 		return p.err
+	}
+	if rec != nil && p.audit != nil {
+		if err := p.audit.Append(context.Background(), rec.Type, rec.Body); err != nil {
+			return err
+		}
 	}
 	p.m[e.Request.ID] = e
 	return nil
@@ -539,16 +570,18 @@ func (p *fakePending) Get(_ context.Context, id string) (PendingEscalation, bool
 	e, ok := p.m[id]
 	return e, ok, nil
 }
-func (p *fakePending) Delete(_ context.Context, id string) error {
+func (p *fakePending) len() int { p.mu.Lock(); defer p.mu.Unlock(); return len(p.m) }
+func (p *fakePending) state(id string) model.EscalationState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.err != nil {
-		return p.err
-	}
-	delete(p.m, id)
-	return nil
+	return p.m[id].State
 }
-func (p *fakePending) len() int { p.mu.Lock(); defer p.mu.Unlock(); return len(p.m) }
+
+func (r *rig) withPending(p *fakePending) *fakePending {
+	p.audit = r.audit
+	r.cfg.Pending = p
+	return p
+}
 
 // TestApprove covers the escalation lifecycle (CS-151/152): an escalation is
 // recorded, approving it re-runs enrich/policy/limiter against current state,
@@ -563,7 +596,7 @@ func TestApprove(t *testing.T) {
 		pend := newFakePending()
 		signer := &recordSigner{}
 		r.cfg.Policy = outcome(model.Escalate)
-		r.cfg.Pending = pend
+		r.withPending(pend)
 		r.cfg.Signer = signer
 		e := r.engine(t)
 
@@ -585,7 +618,7 @@ func TestApprove(t *testing.T) {
 
 		// A human approves: the single escalation reason is now waived.
 		approverCtx := auth.WithIdentity(context.Background(), auth.Identity{Method: auth.MethodAPIKey, Tenant: req.Tenant, KeyID: "ops@example.com"})
-		ad, areq, by, err := e.Approve(approverCtx, req.ID, "ops@example.com")
+		ad, err := e.Approve(approverCtx, req.ID, "ops@example.com")
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -601,15 +634,18 @@ func TestApprove(t *testing.T) {
 		if !slices.Contains(r.limiter.reserved, req.ID) {
 			t.Fatalf("approve did not reserve the cap; reserved=%v", r.limiter.reserved)
 		}
-		if areq.ID != req.ID {
-			t.Fatalf("returned request ID = %q, want %q", areq.ID, req.ID)
+		if got := pend.state(req.ID); got != model.EscalationAllowed {
+			t.Fatalf("state after allow = %q, want allowed", got)
 		}
 		// decision-token v2: the token binds the requester, never the approver.
-		if by.KeyID != requester.KeyID || len(signer.ids) != 1 || signer.ids[0].KeyID != requester.KeyID {
-			t.Fatalf("token identity %+v, returned requester %+v; want %s", signer.ids, by, requester.KeyID)
+		if by := pend.m[req.ID].Requester; by.KeyID != requester.KeyID || len(signer.ids) != 1 || signer.ids[0].KeyID != requester.KeyID {
+			t.Fatalf("token identity %+v, recorded requester %+v; want %s", signer.ids, by, requester.KeyID)
 		}
-		if pend.len() != 0 {
-			t.Fatalf("pending entries after allow = %d, want 0 (deleted)", pend.len())
+		if got := r.audit.records[len(r.audit.records)-1]; got != model.AuditApproval {
+			t.Fatalf("last audit record = %q, want approval (the resolution)", got)
+		}
+		if _, err := e.Approve(context.Background(), req.ID, "ops@example.com"); !errors.Is(err, model.ErrResolved) {
+			t.Fatalf("second Approve err = %v, want ErrResolved", err)
 		}
 	})
 
@@ -618,10 +654,10 @@ func TestApprove(t *testing.T) {
 		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{escReason}, IssuedAt: rigNow}
 		r := newRig()
 		r.cfg.Policy = outcome(model.Deny) // state changed: it now denies
-		r.cfg.Pending = pend
+		r.withPending(pend)
 		e := r.engine(t)
 
-		d, _, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, err := e.Approve(context.Background(), "r1", "ops@example.com")
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -643,10 +679,10 @@ func TestApprove(t *testing.T) {
 		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{"some-old-reason"}, IssuedAt: rigNow}
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate) // emits escReason, which is NOT approved
-		r.cfg.Pending = pend
+		r.withPending(pend)
 		e := r.engine(t)
 
-		d, _, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, err := e.Approve(context.Background(), "r1", "ops@example.com")
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -663,11 +699,11 @@ func TestApprove(t *testing.T) {
 		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{escReason}, IssuedAt: rigNow}
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate)
-		r.cfg.Pending = pend
+		r.withPending(pend)
 		r.limiter.reserveErr = ErrCapExceeded // the cap filled while it waited
 		e := r.engine(t)
 
-		d, _, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, err := e.Approve(context.Background(), "r1", "ops@example.com")
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -679,17 +715,17 @@ func TestApprove(t *testing.T) {
 		}
 	})
 
-	t.Run("approval after the pending window expires is refused, audited and removed", func(t *testing.T) {
+	t.Run("approval after the pending window expires is refused, audited and resolved as expired", func(t *testing.T) {
 		pend := newFakePending()
 		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"),
 			Reasons: []string{escReason}, IssuedAt: rigNow.Add(-16 * time.Minute)} // past the 15m default
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate) // would otherwise promote to allow
-		r.cfg.Pending = pend
+		r.withPending(pend)
 		e := r.engine(t)
 
 		before := len(r.audit.records)
-		d, _, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, err := e.Approve(context.Background(), "r1", "ops@example.com")
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -702,8 +738,11 @@ func TestApprove(t *testing.T) {
 		if len(r.limiter.reserved) != 0 {
 			t.Fatalf("an expired approval reserved %d caps, want 0", len(r.limiter.reserved))
 		}
-		if pend.len() != 0 {
-			t.Fatalf("expired pending entries = %d, want 0 (removed)", pend.len())
+		if got := pend.state("r1"); got != model.EscalationExpired {
+			t.Fatalf("state = %q, want expired", got)
+		}
+		if _, err := e.Approve(context.Background(), "r1", "ops@example.com"); !errors.Is(err, model.ErrResolved) {
+			t.Fatalf("Approve after expiry err = %v, want ErrResolved", err)
 		}
 	})
 
@@ -713,11 +752,11 @@ func TestApprove(t *testing.T) {
 			Reasons: []string{escReason}, IssuedAt: rigNow, Requester: auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", KeyID: "ak_requester"}}
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate)
-		r.cfg.Pending = pend
+		r.withPending(pend)
 		e := r.engine(t)
 
 		// same identity as the requester → refused, record kept for a real approver.
-		d, _, _, err := e.Approve(context.Background(), "r1", "ak_requester")
+		d, err := e.Approve(context.Background(), "r1", "ak_requester")
 		if err != nil {
 			t.Fatalf("Approve(self): %v", err)
 		}
@@ -728,7 +767,7 @@ func TestApprove(t *testing.T) {
 			t.Fatalf("pending after self-approval = %d, want 1 (kept for another approver)", pend.len())
 		}
 		// a different identity may still approve it.
-		d2, _, _, err := e.Approve(context.Background(), "r1", "ak_operator")
+		d2, err := e.Approve(context.Background(), "r1", "ak_operator")
 		if err != nil {
 			t.Fatalf("Approve(operator): %v", err)
 		}
@@ -749,10 +788,10 @@ func TestApprove(t *testing.T) {
 		pend.m["r1"] = PendingEscalation{Request: stale, Reasons: []string{escReason}, IssuedAt: rigNow}
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate)
-		r.cfg.Pending = pend
+		r.withPending(pend)
 		e := r.engine(t)
 
-		d, _, _, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, err := e.Approve(context.Background(), "r1", "ops@example.com")
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -763,9 +802,9 @@ func TestApprove(t *testing.T) {
 
 	t.Run("unknown id is ErrNoPending", func(t *testing.T) {
 		r := newRig()
-		r.cfg.Pending = newFakePending()
+		r.withPending(newFakePending())
 		e := r.engine(t)
-		if _, _, _, err := e.Approve(context.Background(), "nope", "ops@example.com"); !errors.Is(err, model.ErrNoPending) {
+		if _, err := e.Approve(context.Background(), "nope", "ops@example.com"); !errors.Is(err, model.ErrNoPending) {
 			t.Fatalf("Approve(unknown) err = %v, want ErrNoPending", err)
 		}
 	})
@@ -774,4 +813,162 @@ func TestApprove(t *testing.T) {
 func setID(req model.ActionRequest, id string) model.ActionRequest {
 	req.ID = id
 	return req
+}
+
+// TestEscalationLifecycle covers CS-152 beyond approve: reject → deny,
+// timeout → deny surfaced by polling, the requester cannot reject either,
+// approvers only see their own tenant, the gatekeeper's execute hook decides
+// the final state, and every state change is audited in the same write.
+func TestEscalationLifecycle(t *testing.T) {
+	const escReason = "taint-unknown-destination"
+	seed := func(t *testing.T, issued time.Time, requestedBy string) (*rig, *fakePending, *Engine) {
+		r := newRig()
+		r.cfg.Policy = outcome(model.Escalate)
+		pend := r.withPending(newFakePending())
+		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"),
+			Reasons: []string{escReason}, IssuedAt: issued, Requester: auth.Identity{KeyID: requestedBy}, State: model.EscalationPending}
+		return r, pend, r.engine(t)
+	}
+	bg := context.Background()
+
+	t.Run("reject denies, is audited with the approver, and is final", func(t *testing.T) {
+		r, pend, e := seed(t, rigNow, "ak_requester")
+		ctx := auth.WithIdentity(bg, auth.Identity{Tenant: "acme", KeyID: "ak_ops"})
+		d, err := e.Reject(ctx, "r1", "ak_ops")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Outcome != model.Deny || d.Reasons[len(d.Reasons)-1].Code != CodeApprovalReject {
+			t.Fatalf("Reject = %v %+v, want deny APPROVAL_REJECTED", d.Outcome, d.Reasons)
+		}
+		if pend.state("r1") != model.EscalationDenied || pend.m["r1"].ResolvedBy != "ak_ops" {
+			t.Fatalf("record = %+v, want denied by ak_ops", pend.m["r1"])
+		}
+		body := r.audit.bodies[len(r.audit.bodies)-1]
+		if body["approver"] != "ak_ops" || body["identity"].(auth.Identity).KeyID != "ak_ops" {
+			t.Fatalf("reject audit body lacks the approver identity: %+v", body)
+		}
+		if _, err := e.Approve(ctx, "r1", "ak_ops"); !errors.Is(err, model.ErrResolved) {
+			t.Fatalf("Approve after reject err = %v, want ErrResolved", err)
+		}
+		if len(r.limiter.reserved) != 0 {
+			t.Fatal("a rejected escalation reserved caps")
+		}
+		st, err := e.Status(ctx, "r1")
+		if err != nil || st.State != model.EscalationDenied || st.Decision == nil || st.Decision.Outcome != model.Deny {
+			t.Fatalf("Status = %+v, %v; want denied with the deny decision", st, err)
+		}
+	})
+
+	t.Run("the requester may not reject their own escalation", func(t *testing.T) {
+		_, pend, e := seed(t, rigNow, "ak_requester")
+		d, err := e.Reject(bg, "r1", "ak_requester")
+		if err != nil || d.Reasons[len(d.Reasons)-1].Code != CodeApprovalSelf {
+			t.Fatalf("self Reject = %+v, %v; want APPROVAL_SELF_APPROVAL", d, err)
+		}
+		if pend.state("r1") != model.EscalationPending {
+			t.Fatalf("state = %q, want still pending", pend.state("r1"))
+		}
+	})
+
+	t.Run("polling after the window resolves it as expired, audited once", func(t *testing.T) {
+		r, pend, e := seed(t, rigNow.Add(-DefaultPendingTTL-time.Second), "")
+		st, err := e.Status(bg, "r1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.State != model.EscalationExpired || st.Decision.Reasons[len(st.Decision.Reasons)-1].Code != CodeApprovalExpired {
+			t.Fatalf("Status = %+v, want expired with APPROVAL_EXPIRED", st)
+		}
+		if !st.ExpiresAt.Equal(pend.m["r1"].IssuedAt.Add(DefaultPendingTTL)) {
+			t.Fatalf("ExpiresAt = %v", st.ExpiresAt)
+		}
+		n := len(r.audit.records)
+		if _, err := e.Status(bg, "r1"); err != nil || len(r.audit.records) != n {
+			t.Fatalf("a second poll wrote %d more audit records (err %v), want 0", len(r.audit.records)-n, err)
+		}
+		if _, err := e.Reject(bg, "r1", "ak_ops"); !errors.Is(err, model.ErrResolved) {
+			t.Fatalf("Reject after expiry err = %v, want ErrResolved", err)
+		}
+	})
+
+	t.Run("an expiry that cannot be audited does not happen", func(t *testing.T) {
+		r, pend, e := seed(t, rigNow.Add(-DefaultPendingTTL-time.Second), "")
+		r.audit.err = errors.New("disk full")
+		if _, err := e.Status(bg, "r1"); err == nil {
+			t.Fatal("Status succeeded with the audit log down")
+		}
+		if pend.state("r1") != model.EscalationPending {
+			t.Fatalf("state = %q, want pending (unaudited change must not happen)", pend.state("r1"))
+		}
+	})
+
+	t.Run("another tenant's approver cannot see or resolve it", func(t *testing.T) {
+		_, _, e := seed(t, rigNow, "")
+		other := auth.WithIdentity(bg, auth.Identity{Tenant: "other", KeyID: "ak_x"})
+		if _, err := e.Approve(other, "r1", "ak_x"); !errors.Is(err, ErrNoPending) {
+			t.Fatalf("cross-tenant Approve err = %v", err)
+		}
+		if _, err := e.Reject(other, "r1", "ak_x"); !errors.Is(err, ErrNoPending) {
+			t.Fatalf("cross-tenant Reject err = %v", err)
+		}
+		if _, err := e.Status(other, "r1"); !errors.Is(err, ErrNoPending) {
+			t.Fatalf("cross-tenant Status err = %v", err)
+		}
+	})
+
+	t.Run("execute hook: a refused execution resolves as denied", func(t *testing.T) {
+		_, pend, e := seed(t, rigNow, "")
+		d, err := e.ApproveWith(bg, "r1", "ak_ops", func(_ context.Context, d model.Decision, _ model.ActionRequest, _ auth.Identity) model.Decision {
+			return e.denyWith(d, failed("FAIL_CLOSED_ADAPTER", errors.New("refused")))
+		})
+		if err != nil || d.Outcome != model.Deny || pend.state("r1") != model.EscalationDenied {
+			t.Fatalf("ApproveWith = %v, %v, state %q; want deny / denied", d.Outcome, err, pend.state("r1"))
+		}
+	})
+
+	t.Run("an allow whose resolution cannot be recorded fails closed", func(t *testing.T) {
+		_, pend, e := seed(t, rigNow, "")
+		e.cfg.Pending = &failingPut{pend}
+		d, err := e.Approve(bg, "r1", "ak_ops")
+		if err != nil || d.Outcome != model.Deny || d.Reasons[len(d.Reasons)-1].Code != CodeAudit || d.Token != "" {
+			t.Fatalf("Approve = %+v, %v; want deny FAIL_CLOSED_AUDIT without a token", d, err)
+		}
+	})
+
+	t.Run("an escalation that cannot be recorded is a deny", func(t *testing.T) {
+		r := newRig()
+		r.cfg.Policy = outcome(model.Escalate)
+		r.withPending(newFakePending()).err = errors.New("disk full")
+		d := evaluate(t, r.engine(t), fixtureRequest(t, "action_request.evm_tx.json"))
+		if d.Outcome != model.Deny || d.Reasons[len(d.Reasons)-1].Code != CodeAudit {
+			t.Fatalf("Outcome = %v %+v, want deny FAIL_CLOSED_AUDIT", d.Outcome, d.Reasons)
+		}
+	})
+}
+
+// failingPut lets Get through but fails every Put.
+type failingPut struct{ *fakePending }
+
+func (f *failingPut) Put(context.Context, PendingEscalation, *model.AuditEntry) error {
+	return errors.New("disk full")
+}
+
+func TestCommitReleaseCarryIdentityAndDomainErrors(t *testing.T) {
+	r := newRig()
+	e := r.engine(t)
+	r.limiter.reserved = []string{"req-1"}
+	ctx := auth.WithIdentity(context.Background(), auth.Identity{Tenant: "test", AgentID: "agent", KeyID: "ak_agent"})
+	if err := e.Commit(ctx, "req-1", "0xabc"); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := r.audit.bodies[0]["identity"].(auth.Identity); !ok || id.KeyID != "ak_agent" {
+		t.Fatalf("commit audit body lacks identity: %+v", r.audit.bodies[0])
+	}
+	if err := e.Release(ctx, "nope", "client"); !errors.Is(err, ErrUnknownReservation) {
+		t.Fatalf("Release(unknown) = %v, want it to unwrap to ErrUnknownReservation", err)
+	}
+	if tenant, agent, ok := e.Owner("req-1"); !ok || tenant != "test" || agent != "agent" {
+		t.Fatalf("Owner = %q %q %v", tenant, agent, ok)
+	}
 }

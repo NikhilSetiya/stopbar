@@ -11,11 +11,13 @@ import (
 // encoding/json matches object keys to struct fields case-insensitively, so
 // {"to":"0xA…","To":"0xB…"} passes the (byte-exact) duplicate check and then
 // silently decodes one of them. What the engine evaluates would then differ
-// from the raw body that is audited and hashed. checkExactKeys closes that
+// from the raw body that is audited and hashed. checkExactKeysAs closes that
 // parser differential: every key must match a json tag exactly, at the
 // position the struct defines. Free-form maps (action.args) are exempt; they
 // are hashed verbatim and never decoded into fields.
-func checkExactKeys(body []byte, t reflect.Type) error {
+//
+// checkExactKeysAs checks body against the struct type t (a pointer is fine).
+func checkExactKeysAs(body []byte, t reflect.Type) error {
 	var v any
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()

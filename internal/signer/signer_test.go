@@ -23,6 +23,7 @@ import (
 	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/canon"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
+	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 	"github.com/NikhilSetiya/stopbar/internal/nonce"
 )
@@ -355,9 +356,10 @@ type fakeEngine struct {
 	commits, releases []string
 	commitErr         error
 	outcome           model.Outcome
-	signAs            *auth.Identity // token identity override (default: the ctx identity)
-	pending           model.ActionRequest
-	pendingBy         auth.Identity // the pending request's requester, returned by Approve
+	signAs            *auth.Identity       // token identity override (default: the ctx identity)
+	pending           *model.ActionRequest // the escalation ApproveWith re-runs
+	pendingBy         auth.Identity        // the pending request's requester
+	final             model.Decision       // what exec returned, i.e. what the engine records
 }
 
 func (f *fakeEngine) Evaluate(ctx context.Context, req model.ActionRequest) (model.Decision, error) {
@@ -378,15 +380,26 @@ func (f *fakeEngine) Evaluate(ctx context.Context, req model.ActionRequest) (mod
 	return d, err
 }
 
-// Approve re-evaluates the pending request as the engine does: the token
-// binds the pending record's requester, whoever the approver in ctx is.
-func (f *fakeEngine) Approve(_ context.Context, id, _ string) (model.Decision, model.ActionRequest, auth.Identity, error) {
-	if id != f.pending.ID {
-		return model.Decision{}, model.ActionRequest{}, auth.Identity{}, model.ErrNoPending
+// ApproveWith re-runs the held escalation (if any) as the engine does: the
+// token binds the pending record's requester, whoever the approver in ctx is.
+// It hands the allow to exec; final records what exec returned.
+func (f *fakeEngine) ApproveWith(_ context.Context, id, _ string, exec engine.Execute) (model.Decision, error) {
+	if f.pending == nil || f.pending.ID != id {
+		return model.Decision{}, model.ErrNoPending
 	}
 	ctx := auth.WithIdentity(context.Background(), f.pendingBy)
-	d, err := f.Evaluate(ctx, f.pending)
-	return d, f.pending, f.pendingBy, err
+	d, err := f.Evaluate(ctx, *f.pending)
+	if err != nil || d.Outcome != model.Allow {
+		return d, err
+	}
+	f.final = exec(ctx, d, *f.pending, f.pendingBy)
+	return f.final, nil
+}
+func (f *fakeEngine) Reject(context.Context, string, string) (model.Decision, error) {
+	return model.Decision{}, model.ErrNoPending
+}
+func (f *fakeEngine) Status(context.Context, string) (model.EscalationStatus, error) {
+	return model.EscalationStatus{}, model.ErrNoPending
 }
 
 func (f *fakeEngine) Commit(_ context.Context, id, txRef string) error {
@@ -453,7 +466,8 @@ func TestGatekeeper(t *testing.T) {
 // not the approver's (who is in ctx).
 func TestGatekeeperApproveBindsRequester(t *testing.T) {
 	r := newRig(t)
-	e := &fakeEngine{r: r, outcome: model.Allow, pending: request(action()), pendingBy: who}
+	pending := request(action())
+	e := &fakeEngine{r: r, outcome: model.Allow, pending: &pending, pendingBy: who}
 	g := &Gatekeeper{Engine: e, Adapter: r.adapter}
 	approverCtx := auth.WithIdentity(context.Background(), auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", KeyID: "ak_approver"})
 	if d, err := g.Approve(approverCtx, "req-1", "ak_approver"); err != nil || d.Outcome != model.Allow || d.SignedTx == "" {
@@ -465,6 +479,34 @@ func TestGatekeeperApproveBindsRequester(t *testing.T) {
 	if d, _ := g.Approve(approverCtx, "req-1", "ak_approver"); d.Outcome != model.Deny || d.SignedTx != "" ||
 		!strings.Contains(e.releases[len(e.releases)-1], "WRONG_IDENTITY") {
 		t.Fatalf("approve with a token for the approver: %+v releases=%v", d, e.releases)
+	}
+}
+
+// TestGatekeeperApprove: an approved escalation is signed and committed like a
+// fresh allow, and that final decision (with the signed tx) is what the engine
+// records as the resolution; an adapter refusal records a deny instead.
+func TestGatekeeperApprove(t *testing.T) {
+	r := newRig(t)
+	req := request(action())
+	e := &fakeEngine{r: r, outcome: model.Allow, pending: &req}
+	g := &Gatekeeper{Engine: e, Adapter: r.adapter}
+
+	d, err := g.Approve(context.Background(), req.ID, "ak_ops")
+	if err != nil || d.Outcome != model.Allow || d.SignedTx == "" || len(e.commits) != 1 || e.final.SignedTx != d.SignedTx {
+		t.Fatalf("approve: %+v err=%v commits=%v final=%+v", d, err, e.commits, e.final)
+	}
+
+	unheld := action()
+	unheld.From = "0x5555555555555555555555555555555555555555"
+	req2 := request(unheld)
+	req2.ID, req2.Nonce = "req-unheld", "nonce-000000000009"
+	e.pending = &req2
+	d, err = g.Approve(context.Background(), req2.ID, "ak_ops")
+	if err != nil || d.Outcome != model.Deny || d.SignedTx != "" || e.final.Outcome != model.Deny || len(e.releases) != 1 {
+		t.Fatalf("refused approve: %+v err=%v final=%+v releases=%v", d, err, e.final, e.releases)
+	}
+	if _, err := g.Approve(context.Background(), "nope", "ak_ops"); !errors.Is(err, model.ErrNoPending) {
+		t.Fatalf("unknown id: %v", err)
 	}
 }
 

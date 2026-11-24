@@ -169,7 +169,9 @@ func TestTypedErrorsOnCommitAndRelease(t *testing.T) {
 	if err := l.Release(bg, "r1", nil); err != nil {
 		t.Fatal(err)
 	}
-	wantErr(t, l.Release(bg, "r1", nil), ErrUnknownReservation)
+	if err := l.Release(bg, "r1", nil); err != nil {
+		t.Fatalf("second release must be an idempotent no-op: %v", err)
+	}
 	wantErr(t, l.Commit(bg, "r1", "0x1", nil), ErrUnknownReservation)
 
 	mustReserve(t, l, "r2", req(walletA, dest, "10", "1", true))
@@ -250,6 +252,59 @@ func TestUnpricedRequests(t *testing.T) {
 	mustReserve(t, l, "r3", req(walletA, dest, "", "400", true))
 	mustReserve(t, l, "r4", req(walletA, dest, "", "0", true))
 	wantErr(t, l.Reserve(bg, "r5", req(walletA, dest, "", "0", true), time.Minute, nil), engine.ErrCapExceeded) // 4th tx
+}
+
+// Per-transaction caps (CS-123, FR-LIM-1) judge each request on its own: at
+// the cap passes, over it is CAP_EXCEEDED, and nothing accumulates.
+func TestPerTxCaps(t *testing.T) {
+	pct := func(er model.EnrichedRequest, p string) model.EnrichedRequest { er.PctOfBalance = &p; return er }
+	cases := []struct {
+		name string
+		rule Rule
+		er   model.EnrichedRequest
+		want error
+	}{
+		{"usd at cap", Rule{Scope: ScopeWallet, Window: WindowTx, MaxUSD: "100"}, req(walletA, dest, "100", "1", true), nil},
+		{"usd over cap", Rule{Scope: ScopeWallet, Window: WindowTx, MaxUSD: "100"}, req(walletA, dest, "100.000001", "1", true), engine.ErrCapExceeded},
+		{"usd counts the max fee", Rule{Scope: ScopeWallet, Window: WindowTx, MaxUSD: "100"}, func() model.EnrichedRequest {
+			er := req(walletA, dest, "99", "1", true)
+			fee := "1.5"
+			er.MaxFeeUSD = &fee
+			return er
+		}(), engine.ErrCapExceeded},
+		{"usd unpriced fails closed", Rule{Scope: ScopeWallet, Window: WindowTx, MaxUSD: "100"}, req(walletA, dest, "", "1", true), ErrUnpriced},
+		{"units at cap", Rule{Scope: ScopeWalletAsset, Window: WindowTx, MaxUnits: "1000"}, req(walletA, dest, "", "1000", true), nil},
+		{"units over cap", Rule{Scope: ScopeWalletAsset, Window: WindowTx, MaxUnits: "1000"}, req(walletA, dest, "", "1001", true), engine.ErrCapExceeded},
+		{"pct at cap", Rule{Scope: ScopeWallet, Window: WindowTx, MaxPctOfBalance: "0.5"}, pct(req(walletA, dest, "1", "5", true), "0.5"), nil},
+		{"pct over cap", Rule{Scope: ScopeWallet, Window: WindowTx, MaxPctOfBalance: "0.5"}, pct(req(walletA, dest, "1", "5", true), "0.500000000000000001"), engine.ErrCapExceeded},
+		{"pct unknown fails closed", Rule{Scope: ScopeWallet, Window: WindowTx, MaxPctOfBalance: "0.5"}, req(walletA, dest, "1", "5", true), ErrNoBalance},
+		{"pct malformed fails closed", Rule{Scope: ScopeWallet, Window: WindowTx, MaxPctOfBalance: "0.5"}, pct(req(walletA, dest, "1", "5", true), "-1"), nil},
+		{"pct ignores a call that moves nothing", Rule{Scope: ScopeWallet, Window: WindowTx, MaxPctOfBalance: "0.5"}, req(walletA, dest, "1", "0", true), nil},
+		{"unknown-destination per-tx cap skips known", Rule{Scope: ScopeDestination, Window: WindowTx, MaxUSD: "10", UnknownDestinationsOnly: true}, req(walletA, dest, "50", "1", true), nil},
+		{"unknown-destination per-tx cap hits unknown", Rule{Scope: ScopeDestination, Window: WindowTx, MaxUSD: "10", UnknownDestinationsOnly: true}, req(walletA, dest, "50", "1", false), engine.ErrCapExceeded},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			l := newLimiter(t, newClock(), c.rule)
+			err := l.Reserve(bg, "r1", c.er, time.Minute, nil)
+			switch {
+			case c.name == "pct malformed fails closed":
+				if err == nil || errors.Is(err, engine.ErrCapExceeded) {
+					t.Fatalf("err = %v, want a non-domain error (FAIL_CLOSED_LIMITER)", err)
+				}
+			case c.want == nil && err != nil:
+				t.Fatalf("err = %v, want nil", err)
+			case c.want != nil:
+				wantErr(t, err, c.want)
+			}
+		})
+	}
+
+	// Nothing accumulates: many requests each at the cap all pass.
+	l := newLimiter(t, newClock(), Rule{Scope: ScopeWallet, Window: WindowTx, MaxUSD: "100"})
+	for i := range 10 {
+		mustReserve(t, l, fmt.Sprintf("r%d", i), req(walletA, dest, "100", "1", true))
+	}
 }
 
 func TestUnknownDestinationCountCap(t *testing.T) {
@@ -358,6 +413,10 @@ func TestRuleValidation(t *testing.T) {
 		"units off wallet+asset": {Scope: ScopeWallet, Window: "1h", MaxUnits: "5"},
 		"unknown-only off dest":  {Scope: ScopeWallet, Window: "1h", MaxCount: 1, UnknownDestinationsOnly: true},
 		"negative count":         {Scope: ScopeWallet, Window: "1h", MaxCount: -1},
+		"count on tx":            {Scope: ScopeWallet, Window: WindowTx, MaxCount: 1},
+		"pct on a window":        {Scope: ScopeWallet, Window: "1h", MaxPctOfBalance: "0.5"},
+		"pct not decimal":        {Scope: ScopeWallet, Window: WindowTx, MaxPctOfBalance: "50%"},
+		"no cap on tx":           {Scope: ScopeWallet, Window: WindowTx},
 	} {
 		if _, err := New(Config{Rules: []Rule{r}}); err == nil {
 			t.Errorf("%s: accepted", name)

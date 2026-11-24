@@ -50,6 +50,18 @@ class StopbarAuthError(StopbarError):
     """The credential is missing, invalid, or lacks the required scope."""
 
 
+class StopbarRequestError(StopbarError):
+    """Stopbar refused a lifecycle call with a typed error: e.g. NOT_FOUND (no
+    such reservation or escalation visible to this key), CONFLICT (already
+    committed), ALREADY_RESOLVED, RESERVATION_EXPIRED, INVALID_REQUEST."""
+
+    def __init__(self, status: int, body: dict[str, Any]):
+        self.status = status
+        self.code = str(body.get("code") or "")
+        self.body = body
+        super().__init__(f"Stopbar refused (HTTP {status}): {self.code or body.get('message') or '—'}")
+
+
 def _reasons(decision: dict[str, Any]) -> list[str]:
     rs = [r.get("policy_id") or r.get("code") for r in decision.get("reasons", [])]
     rs = [str(r) for r in rs if r]

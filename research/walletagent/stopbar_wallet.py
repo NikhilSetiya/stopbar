@@ -24,6 +24,10 @@ from coinbase_agentkit.network import Network
 from coinbase_agentkit.wallet_providers.evm_wallet_provider import EvmWalletProvider
 from web3 import Web3
 
+from harness.telemetry import disable_agentkit_telemetry
+
+disable_agentkit_telemetry()
+
 
 class StopbarBlocked(Exception):
     """stopbard did not allow the transaction. Carries the HTTP status and the
