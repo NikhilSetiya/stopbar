@@ -27,6 +27,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/audit"
 	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
@@ -58,7 +59,8 @@ func main() {
 	authKeys := flag.String("auth-keys", "", "API key store (JSON array of `stopbar keygen api-key` records); enables authentication and non-loopback listening")
 	ratePerMin := flag.Int("rate-per-min", 0, "per-identity request cap per minute (0: no gateway cap)")
 	pendingTTL := flag.Duration("pending-ttl", engine.DefaultPendingTTL, "how long an escalation waits for approve/reject before it expires (deny)")
-	breakerQuorum := flag.Int("breaker-quorum", limiter.DefaultBreakerQuorum, "distinct approver keys needed to reset a tripped circuit breaker (M of N, at least 2; each vote counts for 1h)")
+	breakerQuorum := flag.Int("breaker-quorum", limiter.DefaultBreakerQuorum, "distinct approver OWNERS needed (M of N, CS-151) to approve an escalation or reset a tripped circuit breaker; at least 2 unless -dev-world")
+	approversFile := flag.String("approvers", "", "CS-151: approver public-key config (JSON, internal/approval.LoadConfigFile) — required for escalation approve/reject and breaker reset; without it both are disabled")
 	configPath := flag.String("config", "", "config file (JSON); its fields set any flag not also given on the command line")
 	flag.Parse()
 	if *showVersion {
@@ -70,18 +72,23 @@ func main() {
 		if err := applyConfigFile(*configPath, map[string]*string{
 			"listen": listen, "dev-world": devWorld, "policies": policies, "state-dir": stateDir,
 			"decision-key": decisionKey, "dev-wallet": devWallet, "tenant": tenant, "auth-keys": authKeys,
+			"approvers": approversFile,
 		}, checkpointEvery, map[string]*int{"rate-per-min": ratePerMin, "breaker-quorum": breakerQuorum}, pendingTTL); err != nil {
 			log.Error("stopbard config", "err", err)
 			os.Exit(1)
 		}
 	}
-	if *breakerQuorum < model.MinBreakerQuorum {
-		log.Error("stopbard config", "err", fmt.Sprintf("-breaker-quorum must be at least %d distinct approvers", model.MinBreakerQuorum))
+	// CS-151: M-of-N quorum floor, for both escalation approvals and breaker
+	// resets. -dev-world allows a lower quorum (down to 1) for local testing;
+	// a production deployment (no -dev-world) never goes below
+	// approval.MinQuorumProduction (2).
+	if err := approval.ValidateQuorum(*breakerQuorum, *devWorld != ""); err != nil {
+		log.Error("stopbard config", "err", err)
 		os.Exit(1)
 	}
 	if err := serve(*listen, *stateDir, devOpts{world: *devWorld, policies: *policies, decisionKey: *decisionKey,
 		wallet: *devWallet, tenant: *tenant, checkpointEvery: *checkpointEvery, authKeys: *authKeys, ratePerMin: *ratePerMin,
-		breakerQuorum: *breakerQuorum, pendingTTL: *pendingTTL}, log); err != nil {
+		breakerQuorum: *breakerQuorum, pendingTTL: *pendingTTL, approversFile: *approversFile}, log); err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
 	}
@@ -109,6 +116,7 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 		DecisionKey          string `json:"decision_key"`
 		Tenant               string `json:"tenant"`
 		AuthKeys             string `json:"auth_keys"`
+		Approvers            string `json:"approvers"`
 		AuditCheckpointEvery uint64 `json:"audit_checkpoint_every"`
 		RatePerMin           int    `json:"rate_per_min"`
 		PendingTTL           string `json:"pending_ttl"`
@@ -120,7 +128,8 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 		return fmt.Errorf("config %s: %w", path, err)
 	}
 	for name, val := range map[string]string{"listen": c.Listen, "policies": c.Policies, "state-dir": c.StateDir,
-		"dev-world": c.DevWorld, "dev-wallet": c.DevWallet, "decision-key": c.DecisionKey, "tenant": c.Tenant, "auth-keys": c.AuthKeys} {
+		"dev-world": c.DevWorld, "dev-wallet": c.DevWallet, "decision-key": c.DecisionKey, "tenant": c.Tenant, "auth-keys": c.AuthKeys,
+		"approvers": c.Approvers} {
 		if val != "" && !set[name] {
 			*strs[name] = val
 		}
@@ -196,6 +205,7 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 
 type devOpts struct {
 	authKeys                                     string
+	approversFile                                string
 	ratePerMin, breakerQuorum                    int
 	pendingTTL                                   time.Duration
 	world, policies, decisionKey, wallet, tenant string
@@ -260,7 +270,21 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 	if err != nil {
 		return runtime{}, err
 	}
-	lim, err := limiter.New(limiter.Config{Rules: w.Limits, Store: limStore, BreakerQuorum: o.breakerQuorum, Logger: log})
+	// CS-151: the configured approver public keys, shared by escalation
+	// approve/reject (the engine) and breaker reset (the limiter). Without
+	// -approvers both are disabled (Approvers nil): no API key ever
+	// substitutes for a signature.
+	var approvers *approval.KeySet
+	if o.approversFile != "" {
+		if approvers, err = approval.LoadConfigFile(o.approversFile); err != nil {
+			return runtime{}, fmt.Errorf("-approvers %s: %w", o.approversFile, err)
+		}
+		log.Info("approver keys loaded (CS-151)", "approvers", o.approversFile, "keys", approvers.Len(), "quorum", o.breakerQuorum)
+	} else {
+		log.Warn("no -approvers: escalation approve/reject and breaker reset are disabled")
+	}
+	alerts := approval.NewAlerts(log)
+	lim, err := limiter.New(limiter.Config{Rules: w.Limits, Store: limStore, BreakerQuorum: o.breakerQuorum, Approvers: approvers, Logger: log})
 	if err != nil {
 		return runtime{}, err
 	}
@@ -316,16 +340,19 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		enrichers = append(enrichers, &policy.SessionTaint{Bundle: b})
 	}
 	e, err := engine.New(engine.Config{
-		Decoders:     []engine.Decoder{evm.Decoder{}, toolcall.Decoder{}},
-		Enrichers:    enrichers,
-		Policy:       b,
-		Limiter:      lim,
-		Signer:       &decision.Signer{Keys: ring, Iss: devIssuer, Aud: devAudience},
-		Audit:        lg,
-		Pending:      pending,
-		PendingTTL:   o.pendingTTL,
-		StageTimeout: stageTimeout,
-		Logger:       log,
+		Decoders:       []engine.Decoder{evm.Decoder{}, toolcall.Decoder{}},
+		Enrichers:      enrichers,
+		Policy:         b,
+		Limiter:        lim,
+		Signer:         &decision.Signer{Keys: ring, Iss: devIssuer, Aud: devAudience},
+		Audit:          lg,
+		Pending:        pending,
+		PendingTTL:     o.pendingTTL,
+		StageTimeout:   stageTimeout,
+		Logger:         log,
+		Approvers:      approvers,
+		ApprovalQuorum: o.breakerQuorum,
+		Alerts:         alerts,
 	})
 	if err != nil {
 		return runtime{}, err
@@ -360,6 +387,14 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		for k, v := range lim.Counters() { // the breaker trip alert lives here
 			c[k] = v
 		}
+		// CS-151: stopbar_approval_rejects_total, summed across tenant/kind —
+		// the per-event breakdown is in the high-severity log line Alerts.Veto
+		// emits (tenant, kind, kid, owner), not this flat HTTP counter.
+		var rejects uint64
+		for _, n := range alerts.Counters() {
+			rejects += n
+		}
+		c["stopbar_approval_rejects_total"] = rejects
 		return c
 	}
 	return runtime{eval: eval, approver: approver, actions: e, breaker: lim, keys: ring.JWKS, counters: counters, audit: lg, signed: true}, nil
