@@ -281,7 +281,10 @@ func TestCircuitBreakerConfig(t *testing.T) {
 func TestResetBreakerRequiresApprovers(t *testing.T) {
 	c := newClock()
 	l := newLimiter(t, c, breakerRules...)
-	wantErr(t, l.Reserve(bg, "r1", req(walletA, dest, "101", "1", true), time.Minute, nil), engine.ErrCircuitOpen)
+	// newLimiter has no bolt store (MemStore), so the trip itself cannot be
+	// recorded; it still opens in memory, failing closed (as
+	// TestCircuitBreakerFailsClosedWithoutAudit covers in full).
+	wantErr(t, l.Reserve(bg, "r1", req(walletA, dest, "101", "1", true), time.Minute, nil), engine.ErrAuditUnavailable)
 	_, privs := breakerKeySet(t)
 	if _, err := l.ResetBreaker(bg, "acme", signReset(t, privs["alice"], "acme", "r1", c.Now(), time.Hour)); err == nil {
 		t.Fatal("reset succeeded with no approver keys configured")

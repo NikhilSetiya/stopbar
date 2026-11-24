@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/audit"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/decode/evm"
@@ -21,6 +22,53 @@ import (
 	"github.com/NikhilSetiya/stopbar/internal/policy"
 	"github.com/NikhilSetiya/stopbar/internal/store"
 )
+
+// testApprovers configures three Ed25519 approver keys for tenant "test"
+// (CS-151), each with its own distinct owner, shared by the pipeline tests
+// below: alice/bob for the breaker's 2-of-N reset, approver for the
+// single-signer escalation-approval flow.
+func testApprovers(t *testing.T) (*approval.KeySet, map[string]ed25519.PrivateKey) {
+	t.Helper()
+	privs := map[string]ed25519.PrivateKey{}
+	var keys []approval.Key
+	for _, id := range []string{"alice", "bob", "approver"} {
+		pub, priv, err := approval.GenerateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		privs[id] = priv
+		keys = append(keys, approval.Key{ID: id, Tenant: "test", Owner: approval.Owner{KeyID: "ak_" + id}, Public: pub})
+	}
+	ks, err := approval.NewKeySet(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ks, privs
+}
+
+// signApprove builds a signed escalation-approval envelope for id/payloadHash.
+func signApprove(t *testing.T, priv ed25519.PrivateKey, id, payloadHash string) approval.SignedEscalation {
+	t.Helper()
+	s, err := approval.SignEscalation(priv, approval.EscalationObject{
+		EscalationID: id, PayloadHash: payloadHash, Decision: approval.Approve, Expiry: time.Now().Add(time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// signReset builds a signed breaker-reset envelope for tenant/tripID.
+func signReset(t *testing.T, priv ed25519.PrivateKey, tenant, tripID string) approval.SignedBreakerReset {
+	t.Helper()
+	s, err := approval.SignBreakerReset(priv, approval.BreakerResetObject{
+		Tenant: tenant, TripRequestID: tripID, Decision: approval.ResetDecision, Expiry: time.Now().Add(time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
 
 var bg = context.Background()
 
@@ -50,11 +98,12 @@ func (p *memPending) Get(_ context.Context, id string) (engine.PendingEscalation
 }
 
 type pipeline struct {
-	eng  *engine.Engine
-	lim  *limiter.Limiter
-	db   *store.DB
-	log  *audit.Log
-	keys map[string]ed25519.PublicKey
+	eng    *engine.Engine
+	lim    *limiter.Limiter
+	db     *store.DB
+	log    *audit.Log
+	keys   map[string]ed25519.PublicKey
+	approv map[string]ed25519.PrivateKey // approver keys (CS-151): alice, bob, approver
 }
 
 // openClawWorld is corpus CS-2026-0002's setup: 52,430,000 LOBSTAR at $0.00477.
@@ -85,7 +134,8 @@ func newPipeline(t *testing.T, w *devstub.World, cfg limiter.Config) *pipeline {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Rules, cfg.Store = w.Limits, st
+	approvers, approvPrivs := testApprovers(t)
+	cfg.Rules, cfg.Store, cfg.Approvers = w.Limits, st, approvers
 	lim, err := limiter.New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -97,13 +147,15 @@ func newPipeline(t *testing.T, w *devstub.World, cfg limiter.Config) *pipeline {
 	eng, err := engine.New(engine.Config{
 		Decoders: []engine.Decoder{evm.Decoder{}}, Enrichers: []engine.Enricher{w, lim},
 		Policy: b, Limiter: lim, Audit: lg,
-		Signer:  &decision.Signer{Keys: ring, Iss: "stopbar:test", Aud: "signer:test"},
-		Pending: &memPending{m: map[string]engine.PendingEscalation{}, log: lg},
+		Signer:         &decision.Signer{Keys: ring, Iss: "stopbar:test", Aud: "signer:test"},
+		Pending:        &memPending{m: map[string]engine.PendingEscalation{}, log: lg},
+		Approvers:      approvers,
+		ApprovalQuorum: 1, // single-signer flow for these tests; the breaker's own quorum is set via cfg.BreakerQuorum
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &pipeline{eng: eng, lim: lim, db: db, log: lg, keys: ring.PublicKeys()}
+	return &pipeline{eng: eng, lim: lim, db: db, log: lg, keys: ring.PublicKeys(), approv: approvPrivs}
 }
 
 // transfer builds a LOBSTAR transfer to the known destination. tokens is the
@@ -158,8 +210,9 @@ func TestCircuitBreakerThroughEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	// An escalation recorded before the trip, to approve after it.
-	if d, _ := p.eng.Evaluate(bg, transfer("req_esc", "test", fullBalance)); d.Outcome != model.Escalate {
-		t.Fatalf("pre-trip escalation: %s %v", d.Outcome, d.Reasons)
+	escD, _ := p.eng.Evaluate(bg, transfer("req_esc", "test", fullBalance))
+	if escD.Outcome != model.Escalate {
+		t.Fatalf("pre-trip escalation: %s %v", escD.Outcome, escD.Reasons)
 	}
 	d, _ = p.eng.Evaluate(bg, transfer("req_1", "test", tenthOfBal)) // $50k > $30k: trips
 	if d.Outcome != model.Deny || code(d) != engine.CodeCircuitOpen {
@@ -171,7 +224,7 @@ func TestCircuitBreakerThroughEngine(t *testing.T) {
 			t.Fatalf("%s after trip: %s %v, want deny CIRCUIT_OPEN", id, d.Outcome, d.Reasons)
 		}
 	}
-	if d, _ := p.eng.Approve(bg, "req_esc", "ak_alice"); d.Outcome != model.Deny || code(d) != engine.CodeCircuitOpen {
+	if d, _ := p.eng.Approve(bg, "req_esc", signApprove(t, p.approv["alice"], "req_esc", escD.PayloadHash)); d.Outcome != model.Deny || code(d) != engine.CodeCircuitOpen {
 		t.Fatalf("approval after trip: %s %v, want deny CIRCUIT_OPEN", d.Outcome, d.Reasons)
 	}
 	if d, _ := p.eng.Evaluate(bg, transfer("req_other", "other-tenant", tinyAmount)); d.Outcome != model.Allow {
@@ -181,13 +234,13 @@ func TestCircuitBreakerThroughEngine(t *testing.T) {
 		t.Fatalf("trip metric %d, want 1", got)
 	}
 
-	if st, err := p.lim.ResetBreaker(bg, "test", "ak_alice"); err != nil || !st.Open {
+	if st, err := p.lim.ResetBreaker(bg, "test", signReset(t, p.approv["alice"], "test", "req_1")); err != nil || !st.Open {
 		t.Fatalf("one vote: %+v %v", st, err)
 	}
 	if d, _ := p.eng.Evaluate(bg, transfer("req_4", "test", tinyAmount)); code(d) != engine.CodeCircuitOpen {
 		t.Fatalf("after one of two votes: %s %v", d.Outcome, d.Reasons)
 	}
-	if st, err := p.lim.ResetBreaker(bg, "test", "ak_bob"); err != nil || st.Open {
+	if st, err := p.lim.ResetBreaker(bg, "test", signReset(t, p.approv["bob"], "test", "req_1")); err != nil || st.Open {
 		t.Fatalf("quorum: %+v %v", st, err)
 	}
 	if d, _ := p.eng.Evaluate(bg, transfer("req_5", "test", tinyAmount)); d.Outcome != model.Allow {
@@ -224,7 +277,7 @@ func TestOpenClawEscalatesAndPerTxCapsSurviveApproval(t *testing.T) {
 			if d.Outcome != model.Escalate || len(ids) != 1 || ids[0] != "large-share-of-balance" {
 				t.Fatalf("OpenClaw: %s %v, want escalate [large-share-of-balance]", d.Outcome, d.Reasons)
 			}
-			d, err := p.eng.Approve(bg, "req_openclaw", "ak_approver")
+			d, err := p.eng.Approve(bg, "req_openclaw", signApprove(t, p.approv["approver"], "req_openclaw", d.PayloadHash))
 			if err != nil {
 				t.Fatal(err)
 			}
