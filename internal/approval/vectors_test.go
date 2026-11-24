@@ -26,7 +26,8 @@ const vectorsFile = "../../spec/vectors/approval-signature-v1.json"
 type vectorKey struct {
 	ID        string `json:"id"`
 	Tenant    string `json:"tenant"`
-	AgentID   string `json:"agent_id,omitempty"`
+	AgentID   string `json:"agent_id,omitempty"` // Owner.AgentID
+	KeyID     string `json:"key_id,omitempty"`   // Owner.KeyID
 	SeedHex   string `json:"seed_hex"`
 	PublicB64 string `json:"public_b64url"`
 	Kid       string `json:"kid"`
@@ -87,7 +88,7 @@ func keySetOf(t *testing.T, keys []vectorKey) *KeySet {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ks = append(ks, Key{ID: vk.ID, Tenant: vk.Tenant, AgentID: vk.AgentID, Public: ed25519.PublicKey(pub)})
+		ks = append(ks, Key{ID: vk.ID, Tenant: vk.Tenant, Owner: Owner{AgentID: vk.AgentID, KeyID: vk.KeyID}, Public: ed25519.PublicKey(pub)})
 	}
 	set, err := NewKeySet(ks)
 	if err != nil {
@@ -101,9 +102,9 @@ func buildVectors(t *testing.T) vectorFile {
 	alice, alicePriv := vecKey("stopbar approval-signature-v1 test key alice")
 	bob, bobPriv := vecKey("stopbar approval-signature-v1 test key bob")
 	outsider, outsiderPriv := vecKey("stopbar approval-signature-v1 test key outsider (never configured)")
-	alice.ID, alice.Tenant = "alice", "acme"
+	alice.ID, alice.Tenant, alice.KeyID = "alice", "acme", "ak_alice"
 	bob.ID, bob.Tenant, bob.AgentID = "bob", "acme", "bob-agent"
-	outsider.ID, outsider.Tenant = "outsider", "acme" // present in the vector for reference only; NOT added to keys below
+	outsider.ID, outsider.Tenant, outsider.KeyID = "outsider", "acme", "ak_outsider" // present in the vector for reference only; NOT added to keys below
 
 	vf := vectorFile{
 		Spec: "approval-signature-v1",
@@ -152,9 +153,10 @@ func buildVectors(t *testing.T) vectorFile {
 		return e
 	}(), "acme", want, nowU, CodeMalformed)
 	addEsc("tampered_payload_hash_under_valid_signature", func() SignedEscalation { e := good; e.PayloadHash = "sha256:tampered"; return e }(), "acme", want, nowU, CodeBadSignature)
-	addEsc("self_approval", signEsc(bobPriv, nil), "acme", EscalationWant{EscalationID: escID, PayloadHash: payloadHash, RequesterID: "bob-agent"}, nowU, CodeSelfApproval)
-	addEsc("self_reject_allowed", signEsc(bobPriv, func(o *EscalationObject) { o.Decision = Reject }), "acme", EscalationWant{EscalationID: escID, PayloadHash: payloadHash, RequesterID: "bob-agent"}, nowU, "OK")
-	addEsc("bound_approver_different_requester_allowed", signEsc(bobPriv, nil), "acme", EscalationWant{EscalationID: escID, PayloadHash: payloadHash, RequesterID: "someone-else"}, nowU, "OK")
+	addEsc("self_approval_by_agent_id", signEsc(bobPriv, nil), "acme", EscalationWant{EscalationID: escID, PayloadHash: payloadHash, RequesterAgentID: "bob-agent"}, nowU, CodeSelfApproval)
+	addEsc("self_approval_by_key_id", signEsc(alicePriv, nil), "acme", EscalationWant{EscalationID: escID, PayloadHash: payloadHash, RequesterKeyID: "ak_alice"}, nowU, CodeSelfApproval)
+	addEsc("self_reject_allowed", signEsc(bobPriv, func(o *EscalationObject) { o.Decision = Reject }), "acme", EscalationWant{EscalationID: escID, PayloadHash: payloadHash, RequesterAgentID: "bob-agent"}, nowU, "OK")
+	addEsc("bound_approver_different_requester_allowed", signEsc(bobPriv, nil), "acme", EscalationWant{EscalationID: escID, PayloadHash: payloadHash, RequesterAgentID: "someone-else"}, nowU, "OK")
 
 	// ---- breaker reset ----
 	tripID := "req_01JD0000000000000000000002"

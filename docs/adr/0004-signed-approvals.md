@@ -46,11 +46,16 @@ thing being decided.
    carries no `iat`. A signature counts only while `now < expiry ≤ now + 1h`,
    checked by the verifier's own clock, so nothing needs to trust how long ago
    it was signed.
-5. **Separation of duties stays explicit.** A requester cannot approve its
-   own escalation. Because approver keys and API keys are different
-   credential types, the binding is a configured `agent_id` on the approver
-   entry (`spec/approval-signature-v1.md` §7); when it matches the
-   escalation's requester, approval (not reject) is refused.
+5. **Separation of duties stays explicit, and is not optional.** A
+   requester cannot approve its own escalation. Because approver keys and
+   API keys are different credential types, every configured approver
+   entry carries a *required* `owner` (`agent_id` and/or `key_id`) binding
+   it to a requester identity (`spec/approval-signature-v1.md` §5, §7); an
+   entry with neither field set fails to load. When `owner.key_id` or
+   `owner.agent_id` matches the escalation's requester, approval (not
+   reject) is refused — the check cannot be silently skipped by omitting
+   the binding, only made moot by it naming an identity that never also
+   requests.
 6. **API keys are removed from approval entirely.** `/v1/approvals/*` and
    `/v1/breakers/*/reset` accept signed envelopes; an API key, having no
    Ed25519 key pair, can never appear in the configured approver set and so

@@ -78,12 +78,21 @@ The object's own fields, plus:
 ## 5. Approver keys
 
 - **Generation**: `stopbar approver keygen <file>` writes an Ed25519 private key tagged `"stopbar-approver-key-ed25519-v1\n"`, mode 0600. The tag differs from the decision key's (`"stopbar-decision-key-ed25519-v1\n"`) and the wallet key's, so no file can be loaded as the wrong kind.
-- **Configuration**: `stopbard` is given the approver *public* keys only (a config file of `{id, tenant, public_key}` entries, or an equivalent flag). `id` is an operator-assigned label for logs and audit records; it is never trusted for lookup. The key actually used to verify a signature is found by **`kid`, recomputed from the configured public key**, exactly as `/v1/keys` entries are (decision-token-v2 §3.1): a mislabelled `id` cannot borrow another key's identity.
+- **Configuration**: `stopbard` is given the approver *public* keys only (a config file of `{id, tenant, owner, public_key}` entries, or an equivalent flag):
+
+  ```json
+  {"approvers": [
+    {"id": "alice", "tenant": "acme", "owner": {"key_id": "ak_alice"}, "public_key": "<b64url>"},
+    {"id": "bob",   "tenant": "acme", "owner": {"agent_id": "bob-agent"}, "public_key": "<b64url>"}
+  ]}
+  ```
+
+  `id` is an operator-assigned label for logs and audit records; it is never trusted for lookup. The key actually used to verify a signature is found by **`kid`, recomputed from the configured public key**, exactly as `/v1/keys` entries are (decision-token-v2 §3.1): a mislabelled `id` cannot borrow another key's identity. **`owner` is required** on every entry — at least one of `agent_id` or `key_id` MUST be set, naming the requester identity this approver key is also bound to (§7). Config loading refuses an entry with neither field set, and refuses two entries that share a `kid` even across different `id`s or tenants.
 - **Never an API key.** An API key has no public/private key pair and cannot produce an Ed25519 signature; `VerifyEscalation`/`VerifyBreakerReset` only ever look a `kid` up in the configured approver set, which API keys are never added to.
 
 ## 6. Verification (escalation approval)
 
-A verifier is given: the configured approver set for the tenant, the escalation's *current* `{escalation_id, payload_hash}` (recomputed at re-run time, never taken from the approval itself), the requester's identity (for the self-approval check), a clock, and the envelope to check. It MUST run these checks in order and stop at the first failure.
+A verifier is given: the configured approver set for the tenant, the escalation's *current* `{escalation_id, payload_hash}` (recomputed at re-run time, never taken from the approval itself), the requester's identity — both its `key_id` and `agent_id`, from the authenticated requester the escalation was created with — for the self-approval check, a clock, and the envelope to check. It MUST run these checks in order and stop at the first failure.
 
 | # | Check | Error code |
 |---|---|---|
@@ -102,7 +111,12 @@ A signature that fails any check counts for nothing: it is not a vote, live or e
 
 ## 7. Self-approval
 
-A requester MUST NOT approve its own escalation (separation of duties). Because approver keys and API keys are different credential types, the binding is explicit: a configured approver entry MAY carry an `agent_id`. When it does, and the escalation's requester identity has the same `agent_id`, step 10 above refuses the approval with `SELF_APPROVAL` regardless of quorum otherwise being met. An approver entry with no configured `agent_id` is never self-approval-blocked; it is the operator's job to bind an approver key to an agent identity only when that agent can also be a requester.
+A requester MUST NOT approve its own escalation (separation of duties). Because approver keys and API keys are different credential types, the binding is explicit and **mandatory**: every configured approver entry has an `owner` naming the requester identity it also represents, via `agent_id`, `key_id`, or both (§5). Step 10 refuses the approval with `SELF_APPROVAL`, regardless of quorum otherwise being met, when **either**:
+
+- `owner.key_id` is set and equals the escalation's requester `key_id`, or
+- `owner.agent_id` is set and equals the escalation's requester `agent_id`.
+
+Either match alone is enough; the two checks are independent, not both required. This does not depend on an optional field being configured: `owner` is required at load time (§5), so a deployment can never have an approver entry that is silently exempt from the self-approval check — at worst, its `owner` names an identity that happens never to also be a requester, and the check then simply never fires for that key.
 
 ## 8. Verification (breaker reset)
 
@@ -126,7 +140,7 @@ There is no self-reset rule: a breaker trip has no single "requester" to exclude
 
 Both flows resolve the same way, via `approval.Tally`:
 
-- **Reject wins immediately.** One valid `reject` resolves the escalation as rejected, regardless of how many approvals are already held. (A breaker reset has no reject; it is either silent — no vote recorded — or a `reset` vote.)
+- **Reject wins immediately: a single-approver veto, by design.** One valid `reject`, from any one configured approver, resolves the escalation as rejected outright — it needs no quorum of its own and is not outvoted by however many `approve` votes are already held, even a full quorum's worth. This is deliberately asymmetric with approval (which needs `M` distinct votes): it is the fail-closed direction. Escalation exists because the engine was not confident enough to allow outright; requiring agreement to let it through but only one dissent to stop it keeps that posture — a single approver can always fall back to denying, but no minority can force an allow past an objection. (A breaker reset has no reject; it is either silent — no vote recorded — or a `reset` vote.)
 - **M distinct keys, never double-counted.** `M` is the configured quorum (`MinQuorumProduction` = 2; `stopbard` refuses to start with a lower quorum unless run with `-dev-world`). A second valid vote from a `kid` that already holds a live vote is refused (`ErrDuplicateVote`); it does not add a second count, and it does not replace the first.
 - **Votes expire.** A vote's own `expiry` (§2/§3) bounds how long it counts. `Tally` discards expired votes before counting toward `M`, so an approver whose vote expired may vote again (a fresh signature, not a resurrected one).
 - **Once resolved, stays resolved.** After `Tally` returns a non-pending resolution (quorum met, or a reject), every later `Add` is refused (`ErrAlreadyResolved`) rather than re-opening or re-counting. This is what makes "approve after reject" and "approve after the quorum already executed" refusals rather than silent no-ops.
@@ -140,7 +154,7 @@ Both flows resolve the same way, via `approval.Tally`:
 | A valid breaker-reset signature replayed on the *next* trip for the same tenant | §8 step 7: `trip_request_id` is bound and checked. |
 | A stale approval used long after signing, or a signature pre-dated to stay valid forever | §6/§8 steps 8–9: checked at verification time, bounded to a 1-hour window, with no `iat` to trust. |
 | The same approver counted twice toward quorum | `Tally` rejects a second live vote from the same `kid` (`ErrDuplicateVote`). |
-| A compromised requester signs its own approval with a stolen or colluding approver key | §7: an approver key bound to the requester's `agent_id` is refused at step 10, independent of quorum. |
+| A compromised requester signs its own approval with a stolen or colluding approver key | §7: an approver key whose required `owner` matches the requester's `key_id` or `agent_id` is refused at step 10, independent of quorum. |
 | An approval or reset signature read as the other, or as a decision token / audit checkpoint | Domain separation (§4): each signing input starts with a distinct, versioned tag. |
 | A decision reached, then "re-approved" after it changed (quorum met, then a late reject; or executed, then approved again) | `Tally`'s `ErrAlreadyResolved` (§9): the first resolution is final. |
 

@@ -8,17 +8,31 @@ import (
 	"os"
 )
 
+// Owner is the requester identity an approver key belongs to, for the
+// self-approval check (spec §7). At least one of AgentID or KeyID MUST be
+// set: every approver entry declares who it belongs to, so self-approval
+// can never silently go unchecked for lack of configuration. Whether that
+// agent or key actually holds evaluate scope is not knowable here — the
+// per-request check (VerifyEscalation) is what matters, not load time.
+type Owner struct {
+	AgentID string `json:"agent_id,omitempty"`
+	KeyID   string `json:"key_id,omitempty"`
+}
+
+// empty reports whether o declares no owner at all.
+func (o Owner) empty() bool { return o.AgentID == "" && o.KeyID == "" }
+
 // Key is one configured approver: the public key a signature is checked
-// against, the tenant it may approve for, and an optional binding to a
-// requester identity (AgentID) used by the self-approval check (spec §7).
-// ID is an operator-assigned label for logs and audit records; it is never
-// used to look a key up — Kid, recomputed from Public, is (spec §5).
+// against, the tenant it may approve for, and the requester identity it is
+// bound to (Owner), used by the self-approval check (spec §7). ID is an
+// operator-assigned label for logs and audit records; it is never used to
+// look a key up — Kid, recomputed from Public, is (spec §5).
 type Key struct {
-	ID      string
-	Tenant  string
-	AgentID string // "" unless this approver is also bound to a requester identity
-	Public  ed25519.PublicKey
-	Kid     string
+	ID     string
+	Tenant string
+	Owner  Owner
+	Public ed25519.PublicKey
+	Kid    string
 }
 
 // KeySet is the configured approver keys, indexed by Kid so a mislabelled
@@ -37,6 +51,9 @@ func NewKeySet(keys []Key) (*KeySet, error) {
 		}
 		if k.Tenant == "" {
 			return nil, fmt.Errorf("approval: key %q: tenant is required", k.ID)
+		}
+		if k.Owner.empty() {
+			return nil, fmt.Errorf("approval: key %q: owner (agent_id and/or key_id) is required", k.ID)
 		}
 		k.Kid = Kid(k.Public)
 		if _, dup := byKid[k.Kid]; dup {
@@ -67,12 +84,25 @@ func (s *KeySet) Len() int {
 
 // configEntry is one approver in the on-disk JSON config (spec §5):
 //
-//	{"approvers": [{"id": "alice", "tenant": "acme", "public_key": "<b64url>"}]}
+//	{"approvers": [
+//	  {"id": "alice", "tenant": "acme", "owner": {"key_id": "ak_alice"}, "public_key": "<b64url>"}
+//	]}
+//
+// owner is required: every entry MUST declare at least one of agent_id or
+// key_id, naming the requester identity this approver is also bound to for
+// the self-approval check (spec §7). An approver that can never also be a
+// requester still names *some* identity (even a placeholder that matches
+// nothing real) — the point is that the field is never silently absent.
 type configEntry struct {
-	ID        string `json:"id"`
-	Tenant    string `json:"tenant"`
-	AgentID   string `json:"agent_id,omitempty"`
-	PublicKey string `json:"public_key"`
+	ID        string    `json:"id"`
+	Tenant    string    `json:"tenant"`
+	Owner     ownerJSON `json:"owner"`
+	PublicKey string    `json:"public_key"`
+}
+
+type ownerJSON struct {
+	AgentID string `json:"agent_id,omitempty"`
+	KeyID   string `json:"key_id,omitempty"`
 }
 
 type configFile struct {
@@ -81,10 +111,11 @@ type configFile struct {
 
 // LoadConfigFile reads the approver public-key configuration stopbard is
 // started with (a config file, or a flag the caller has already merged into
-// the same shape). Every entry needs a non-empty id, tenant and a 32-byte
-// Ed25519 public key; the set rejects a duplicate key (by kid) across any
-// two entries, even for different ids or tenants, since that would make the
-// wrong tenant's approver set accept the same signature.
+// the same shape). Every entry needs a non-empty id, tenant, owner (at
+// least one of agent_id/key_id) and a 32-byte Ed25519 public key; the set
+// rejects a duplicate key (by kid) across any two entries, even for
+// different ids or tenants, since that would make the wrong tenant's
+// approver set accept the same signature.
 func LoadConfigFile(path string) (*KeySet, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -113,11 +144,15 @@ func ParseConfig(b []byte) (*KeySet, error) {
 		if e.Tenant == "" {
 			return nil, fmt.Errorf("approval: approver %q: tenant is required", e.ID)
 		}
+		owner := Owner{AgentID: e.Owner.AgentID, KeyID: e.Owner.KeyID}
+		if owner.empty() {
+			return nil, fmt.Errorf("approval: approver %q: owner (agent_id and/or key_id) is required", e.ID)
+		}
 		pub, err := b64.DecodeString(e.PublicKey)
 		if err != nil || len(pub) != ed25519.PublicKeySize {
 			return nil, fmt.Errorf("approval: approver %q: public_key must be a base64url-encoded Ed25519 public key", e.ID)
 		}
-		keys = append(keys, Key{ID: e.ID, Tenant: e.Tenant, AgentID: e.AgentID, Public: ed25519.PublicKey(pub)})
+		keys = append(keys, Key{ID: e.ID, Tenant: e.Tenant, Owner: owner, Public: ed25519.PublicKey(pub)})
 	}
 	return NewKeySet(keys)
 }

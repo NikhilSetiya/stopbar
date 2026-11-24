@@ -37,9 +37,9 @@ func newFixture(t *testing.T) fixture {
 		t.Fatal(err)
 	}
 	set, err := NewKeySet([]Key{
-		{ID: "alice", Tenant: "acme", Public: alicePub},
-		{ID: "bob", Tenant: "acme", AgentID: "bob-agent", Public: bobPub},
-		{ID: "carol", Tenant: "other-tenant", Public: otherPub},
+		{ID: "alice", Tenant: "acme", Owner: Owner{KeyID: "ak_alice"}, Public: alicePub},
+		{ID: "bob", Tenant: "acme", Owner: Owner{AgentID: "bob-agent"}, Public: bobPub},
+		{ID: "carol", Tenant: "other-tenant", Owner: Owner{KeyID: "ak_carol"}, Public: otherPub},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -211,20 +211,41 @@ func TestVerifyEscalationFailureCases(t *testing.T) {
 	}
 }
 
-func TestVerifyEscalationSelfApproval(t *testing.T) {
+func TestVerifyEscalationSelfApprovalByAgentID(t *testing.T) {
 	f := newFixture(t)
 	now := time.Now()
-	s := signEsc(t, f.bobPriv, nil) // bob is configured with AgentID "bob-agent"
+	s := signEsc(t, f.bobPriv, nil) // bob is configured with Owner.AgentID "bob-agent"
 
 	// The escalation's requester is a different agent: fine.
 	want := f.wantEsc()
-	want.RequesterID = "someone-else"
+	want.RequesterAgentID = "someone-else"
 	if _, err := VerifyEscalation(f.set, "acme", s, want, now); err != nil {
 		t.Fatalf("VerifyEscalation (different requester): %v", err)
 	}
 
 	// The escalation's requester IS bob's bound agent: self-approval.
-	want.RequesterID = "bob-agent"
+	want.RequesterAgentID = "bob-agent"
+	_, err := VerifyEscalation(f.set, "acme", s, want, now)
+	ve, ok := err.(*VerifyError)
+	if !ok || ve.Code != CodeSelfApproval {
+		t.Fatalf("err = %v, want SELF_APPROVAL", err)
+	}
+}
+
+func TestVerifyEscalationSelfApprovalByKeyID(t *testing.T) {
+	f := newFixture(t)
+	now := time.Now()
+	s := signEsc(t, f.alicePriv, nil) // alice is configured with Owner.KeyID "ak_alice"
+
+	// The escalation's requester is a different key: fine.
+	want := f.wantEsc()
+	want.RequesterKeyID = "ak_someone_else"
+	if _, err := VerifyEscalation(f.set, "acme", s, want, now); err != nil {
+		t.Fatalf("VerifyEscalation (different requester): %v", err)
+	}
+
+	// The escalation's requester IS alice's bound key: self-approval.
+	want.RequesterKeyID = "ak_alice"
 	_, err := VerifyEscalation(f.set, "acme", s, want, now)
 	ve, ok := err.(*VerifyError)
 	if !ok || ve.Code != CodeSelfApproval {
@@ -237,7 +258,7 @@ func TestVerifyEscalationSelfApprovalDoesNotBlockReject(t *testing.T) {
 	now := time.Now()
 	s := signEsc(t, f.bobPriv, func(o *EscalationObject) { o.Decision = Reject })
 	want := f.wantEsc()
-	want.RequesterID = "bob-agent"
+	want.RequesterAgentID = "bob-agent"
 	// Self-approval (spec §7) names approval, not reject; a bound approver
 	// may still reject its own escalation.
 	if _, err := VerifyEscalation(f.set, "acme", s, want, now); err != nil {
