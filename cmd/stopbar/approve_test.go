@@ -40,3 +40,40 @@ func TestApproveCmdRejectsMissingID(t *testing.T) {
 		}
 	}
 }
+
+// TestRejectCmd: `reject <id> --url ... --key ...` (id first, like approve)
+// posts to /v1/approvals/<id>/reject, and only a 403 APPROVAL_REJECTED deny
+// counts as success; a self-rejection refusal or an unknown id is an error.
+func TestRejectCmd(t *testing.T) {
+	var gotPath, gotAuth string
+	status, body := http.StatusForbidden, `{"request_id":"req_abc","outcome":"deny","reasons":[{"code":"APPROVAL_REJECTED"}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	if err := rejectCmd([]string{"req_abc", "--url", srv.URL, "--key", "stopbar_sk_ops"}); err != nil {
+		t.Fatalf("rejectCmd: %v", err)
+	}
+	if gotPath != "/v1/approvals/req_abc/reject" || gotAuth != "Bearer stopbar_sk_ops" {
+		t.Fatalf("path/auth = %s %q", gotPath, gotAuth)
+	}
+	for _, c := range []struct {
+		status int
+		body   string
+	}{
+		{http.StatusForbidden, `{"outcome":"deny","reasons":[{"code":"APPROVAL_SELF_APPROVAL"}]}`},
+		{http.StatusNotFound, `{"code":"NOT_FOUND"}`},
+		{http.StatusConflict, `{"code":"ALREADY_RESOLVED"}`},
+	} {
+		status, body = c.status, c.body
+		if err := rejectCmd([]string{"req_abc", "--url", srv.URL}); err == nil {
+			t.Fatalf("rejectCmd accepted HTTP %d %s", c.status, c.body)
+		}
+	}
+	if err := rejectCmd([]string{"--url", srv.URL, "req_abc"}); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("flags-first form: err = %v, want usage", err)
+	}
+}

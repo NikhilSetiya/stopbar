@@ -25,13 +25,19 @@ import (
 var bg = context.Background()
 
 type memPending struct {
-	mu sync.Mutex
-	m  map[string]engine.PendingEscalation
+	mu  sync.Mutex
+	m   map[string]engine.PendingEscalation
+	log *audit.Log // Put appends its audit record here
 }
 
-func (p *memPending) Put(_ context.Context, e engine.PendingEscalation) error {
+func (p *memPending) Put(ctx context.Context, e engine.PendingEscalation, rec *model.AuditEntry) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if rec != nil {
+		if err := p.log.Append(ctx, rec.Type, rec.Body); err != nil {
+			return err
+		}
+	}
 	p.m[e.Request.ID] = e
 	return nil
 }
@@ -41,13 +47,6 @@ func (p *memPending) Get(_ context.Context, id string) (engine.PendingEscalation
 	defer p.mu.Unlock()
 	e, ok := p.m[id]
 	return e, ok, nil
-}
-
-func (p *memPending) Delete(_ context.Context, id string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	delete(p.m, id)
-	return nil
 }
 
 type pipeline struct {
@@ -99,7 +98,7 @@ func newPipeline(t *testing.T, w *devstub.World, cfg limiter.Config) *pipeline {
 		Decoders: []engine.Decoder{evm.Decoder{}}, Enrichers: []engine.Enricher{w, lim},
 		Policy: b, Limiter: lim, Audit: lg,
 		Signer:  &decision.Signer{Keys: ring, Iss: "stopbar:test", Aud: "signer:test"},
-		Pending: &memPending{m: map[string]engine.PendingEscalation{}},
+		Pending: &memPending{m: map[string]engine.PendingEscalation{}, log: lg},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -172,7 +171,7 @@ func TestCircuitBreakerThroughEngine(t *testing.T) {
 			t.Fatalf("%s after trip: %s %v, want deny CIRCUIT_OPEN", id, d.Outcome, d.Reasons)
 		}
 	}
-	if d, _, _, _ := p.eng.Approve(bg, "req_esc", "ak_alice"); d.Outcome != model.Deny || code(d) != engine.CodeCircuitOpen {
+	if d, _ := p.eng.Approve(bg, "req_esc", "ak_alice"); d.Outcome != model.Deny || code(d) != engine.CodeCircuitOpen {
 		t.Fatalf("approval after trip: %s %v, want deny CIRCUIT_OPEN", d.Outcome, d.Reasons)
 	}
 	if d, _ := p.eng.Evaluate(bg, transfer("req_other", "other-tenant", tinyAmount)); d.Outcome != model.Allow {
@@ -225,7 +224,7 @@ func TestOpenClawEscalatesAndPerTxCapsSurviveApproval(t *testing.T) {
 			if d.Outcome != model.Escalate || len(ids) != 1 || ids[0] != "large-share-of-balance" {
 				t.Fatalf("OpenClaw: %s %v, want escalate [large-share-of-balance]", d.Outcome, d.Reasons)
 			}
-			d, _, _, err := p.eng.Approve(bg, "req_openclaw", "ak_approver")
+			d, err := p.eng.Approve(bg, "req_openclaw", "ak_approver")
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,8 @@ const usage = `usage:
   stopbar approve <id> --url URL --key APPROVER_KEY
       approve a pending escalation: stopbard re-evaluates it against current
       state and, if it now allows, returns the signed transaction
+  stopbar reject <id> --url URL --key APPROVER_KEY
+      reject a pending escalation: it is denied, and nothing is signed
   stopbar breaker status --tenant T [--url URL] [--key APPROVER_KEY]
       show the tenant's circuit breaker (open/closed, trip, reset votes, quorum)
   stopbar breaker reset --tenant T --url URL --key APPROVER_KEY [--key APPROVER_KEY ...]
@@ -74,6 +77,10 @@ func main() {
 		}
 	case "approve":
 		if err := approveCmd(os.Args[2:]); err != nil {
+			fail(err.Error())
+		}
+	case "reject":
+		if err := rejectCmd(os.Args[2:]); err != nil {
 			fail(err.Error())
 		}
 	case "breaker":
@@ -237,32 +244,73 @@ func verifyKeys(keysFile, decisionKeyFile string) (map[string]ed25519.PublicKey,
 // against current state (enrich, policy, limiter); if it now allows, the
 // response carries the signed transaction. The caller broadcasts it.
 func approveCmd(args []string) error {
+	resp, err := approvalCall("approve", args, "")
+	if err != nil {
+		return err
+	}
+	if resp.status != http.StatusOK {
+		return fmt.Errorf("escalation not executed (HTTP %d)", resp.status)
+	}
+	return nil
+}
+
+// rejectCmd rejects a pending escalation by id (CS-151): stopbard records it
+// as denied, audited with the approver identity. Success is a 403 deny whose
+// reason is APPROVAL_REJECTED; anything else (self-rejection, already
+// resolved, unknown id) is an error.
+func rejectCmd(args []string) error {
+	resp, err := approvalCall("reject", args, "/reject")
+	if err != nil {
+		return err
+	}
+	var d struct {
+		Outcome string `json:"outcome"`
+		Reasons []struct {
+			Code string `json:"code"`
+		} `json:"reasons"`
+	}
+	_ = json.Unmarshal(resp.body, &d)
+	if resp.status == http.StatusForbidden && d.Outcome == "deny" && len(d.Reasons) > 0 && d.Reasons[len(d.Reasons)-1].Code == "APPROVAL_REJECTED" {
+		return nil
+	}
+	return fmt.Errorf("escalation not rejected (HTTP %d)", resp.status)
+}
+
+type httpResult struct {
+	status int
+	body   []byte
+}
+
+// approvalCall POSTs /v1/approvals/<id><suffix> with the approver key and
+// prints the response.
+func approvalCall(verb string, args []string, suffix string) (httpResult, error) {
+	usage := "usage: stopbar " + verb + " <id> --url URL --key APPROVER_KEY"
 	// The id is the first argument, before the flags. Go's flag package stops at
 	// the first non-flag token, so parse it out before the flags rather than
 	// after (otherwise `approve <id> --url ... --key ...` leaves them unparsed).
 	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
-		return errors.New("usage: stopbar approve <id> --url URL --key APPROVER_KEY")
+		return httpResult{}, errors.New(usage)
 	}
 	idArg := args[0]
-	fs := flag.NewFlagSet("approve", flag.ContinueOnError)
+	fs := flag.NewFlagSet(verb, flag.ContinueOnError)
 	url := fs.String("url", "http://127.0.0.1:7777", "stopbard base URL")
 	key := fs.String("key", "", "approver API key (needs the 'approve' scope)")
 	if err := fs.Parse(args[1:]); err != nil {
-		return err
+		return httpResult{}, err
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: stopbar approve <id> --url URL --key APPROVER_KEY")
+		return httpResult{}, errors.New(usage)
 	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(*url, "/")+"/v1/approvals/"+idArg, nil)
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(*url, "/")+"/v1/approvals/"+neturl.PathEscape(idArg)+suffix, nil)
 	if err != nil {
-		return err
+		return httpResult{}, err
 	}
 	if *key != "" {
 		req.Header.Set("Authorization", "Bearer "+*key)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return httpResult{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
@@ -271,10 +319,7 @@ func approveCmd(args []string) error {
 		pretty.Write(body)
 	}
 	fmt.Printf("HTTP %d\n%s\n", resp.StatusCode, pretty.String())
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("escalation not executed (HTTP %d)", resp.StatusCode)
-	}
-	return nil
+	return httpResult{resp.StatusCode, body}, nil
 }
 
 // keygenCmd generates the keys a deployment needs: the Ed25519 decision key

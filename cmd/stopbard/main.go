@@ -57,6 +57,7 @@ func main() {
 	tenant := flag.String("tenant", "test", "tenant this deployment serves (decision tokens are scoped to it)")
 	authKeys := flag.String("auth-keys", "", "API key store (JSON array of `stopbar keygen api-key` records); enables authentication and non-loopback listening")
 	ratePerMin := flag.Int("rate-per-min", 0, "per-identity request cap per minute (0: no gateway cap)")
+	pendingTTL := flag.Duration("pending-ttl", engine.DefaultPendingTTL, "how long an escalation waits for approve/reject before it expires (deny)")
 	breakerQuorum := flag.Int("breaker-quorum", limiter.DefaultBreakerQuorum, "distinct approver keys needed to reset a tripped circuit breaker (M of N, at least 2; each vote counts for 1h)")
 	configPath := flag.String("config", "", "config file (JSON); its fields set any flag not also given on the command line")
 	flag.Parse()
@@ -69,7 +70,7 @@ func main() {
 		if err := applyConfigFile(*configPath, map[string]*string{
 			"listen": listen, "dev-world": devWorld, "policies": policies, "state-dir": stateDir,
 			"decision-key": decisionKey, "dev-wallet": devWallet, "tenant": tenant, "auth-keys": authKeys,
-		}, checkpointEvery, map[string]*int{"rate-per-min": ratePerMin, "breaker-quorum": breakerQuorum}); err != nil {
+		}, checkpointEvery, map[string]*int{"rate-per-min": ratePerMin, "breaker-quorum": breakerQuorum}, pendingTTL); err != nil {
 			log.Error("stopbard config", "err", err)
 			os.Exit(1)
 		}
@@ -80,7 +81,7 @@ func main() {
 	}
 	if err := serve(*listen, *stateDir, devOpts{world: *devWorld, policies: *policies, decisionKey: *decisionKey,
 		wallet: *devWallet, tenant: *tenant, checkpointEvery: *checkpointEvery, authKeys: *authKeys, ratePerMin: *ratePerMin,
-		breakerQuorum: *breakerQuorum}, log); err != nil {
+		breakerQuorum: *breakerQuorum, pendingTTL: *pendingTTL}, log); err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
 	}
@@ -92,7 +93,7 @@ func main() {
 // instead of a flag soup. It still selects dev-mode components when they are
 // named — a production config needs auth, a real key provider and real
 // enrichers (none of which exist yet).
-func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint64, ints map[string]*int) error {
+func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint64, ints map[string]*int, pendingTTL *time.Duration) error {
 	set := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	b, err := os.ReadFile(path)
@@ -110,6 +111,7 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 		AuthKeys             string `json:"auth_keys"`
 		AuditCheckpointEvery uint64 `json:"audit_checkpoint_every"`
 		RatePerMin           int    `json:"rate_per_min"`
+		PendingTTL           string `json:"pending_ttl"`
 		BreakerQuorum        int    `json:"breaker_quorum"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
@@ -130,6 +132,13 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 		if val != 0 && !set[name] {
 			*ints[name] = val
 		}
+	}
+	if c.PendingTTL != "" && !set["pending-ttl"] {
+		d, err := time.ParseDuration(c.PendingTTL)
+		if err != nil {
+			return fmt.Errorf("config %s: pending_ttl: %w", path, err)
+		}
+		*pendingTTL = d
 	}
 	return nil
 }
@@ -174,7 +183,7 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 		log.Info("authentication enabled", "auth_keys", o.authKeys, "rate_per_min", o.ratePerMin)
 	}
 	runErr := run(addr, gateway.Config{Evaluator: rt.eval, Nonces: nonces, Keys: rt.keys, Counters: rt.counters, Logger: log,
-		Authenticator: authn, Audit: rt.audit, RatePerMin: o.ratePerMin, Approver: rt.approver, Breaker: rt.breaker}, log)
+		Authenticator: authn, Audit: rt.audit, RatePerMin: o.ratePerMin, Approver: rt.approver, Breaker: rt.breaker, Actions: rt.actions}, log)
 	if rt.signed {
 		if err := rt.audit.Checkpoint(); err != nil {
 			log.Error("final audit checkpoint failed", "severity", "high", "err", err)
@@ -188,6 +197,7 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 type devOpts struct {
 	authKeys                                     string
 	ratePerMin, breakerQuorum                    int
+	pendingTTL                                   time.Duration
 	world, policies, decisionKey, wallet, tenant string
 	checkpointEvery                              uint64
 	db                                           *store.DB
@@ -197,6 +207,7 @@ type devOpts struct {
 type runtime struct {
 	eval     gateway.Evaluator
 	approver gateway.Approver
+	actions  gateway.Actions
 	breaker  gateway.Breaker
 	keys     func() []decision.JWK
 	counters func() map[string]uint64
@@ -273,7 +284,7 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		stageTimeout = 10 * time.Second
 		log.Info("enricher: reading balances and prices from the chain (CS-131/132)", "rpc", w.ChainRPC, "feeds", len(w.Feeds))
 	}
-	pending, err := newPendingStore(o.db)
+	pending, err := newPendingStore(o.db, lg)
 	if err != nil {
 		return runtime{}, err
 	}
@@ -312,6 +323,7 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		Signer:       &decision.Signer{Keys: ring, Iss: devIssuer, Aud: devAudience},
 		Audit:        lg,
 		Pending:      pending,
+		PendingTTL:   o.pendingTTL,
 		StageTimeout: stageTimeout,
 		Logger:       log,
 	})
@@ -319,7 +331,7 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		return runtime{}, err
 	}
 	var eval gateway.Evaluator = e
-	var approver gateway.Approver // only in gatekeeper mode (an approval executes a signed tx)
+	var approver gateway.Approver = e // advisory: an approved allow returns the decision token
 	mode := "advisory (allow returns a decision token)"
 	if o.wallet != "" {
 		keys, err := signer.LoadDevWallet(o.wallet)
@@ -350,7 +362,7 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		}
 		return c
 	}
-	return runtime{eval: eval, approver: approver, breaker: lim, keys: ring.JWKS, counters: counters, audit: lg, signed: true}, nil
+	return runtime{eval: eval, approver: approver, actions: e, breaker: lim, keys: ring.JWKS, counters: counters, audit: lg, signed: true}, nil
 }
 
 func run(addr string, gc gateway.Config, log *slog.Logger) error {
@@ -395,28 +407,39 @@ func run(addr string, gc gateway.Config, log *slog.Logger) error {
 	return nil
 }
 
-// pendingStore records escalations awaiting approval in the state DB (CS-152),
-// as JSON keyed by request id. It survives restart with the rest of state.db.
-type pendingStore struct{ db *store.DB }
+// pendingStore records escalations and their lifecycle in the state DB
+// (CS-152), as JSON keyed by request id. Each write carries its audit record in
+// the same bbolt transaction. It survives restart with the rest of state.db.
+type pendingStore struct {
+	db  *store.DB
+	log *audit.Log
+}
 
 // v2: records carry the requester's full identity, which an approved token
 // binds (decision-token v2). v1 records (key ID only) are never read, so an
 // escalation pending across the upgrade cannot be approved; it lapses.
 var pendingBucket = []byte("pending_escalations_v2")
 
-func newPendingStore(db *store.DB) (*pendingStore, error) {
+func newPendingStore(db *store.DB, log *audit.Log) (*pendingStore, error) {
 	if err := db.Bucket(pendingBucket); err != nil {
 		return nil, err
 	}
-	return &pendingStore{db}, nil
+	return &pendingStore{db, log}, nil
 }
 
-func (p *pendingStore) Put(_ context.Context, e engine.PendingEscalation) error {
+func (p *pendingStore) Put(_ context.Context, e engine.PendingEscalation, rec *model.AuditEntry) error {
 	b, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}
-	return p.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(pendingBucket).Put([]byte(e.Request.ID), b) })
+	return p.db.Update(func(tx *bolt.Tx) error {
+		if rec != nil {
+			if err := p.log.AppendTx(tx, *rec); err != nil {
+				return err
+			}
+		}
+		return tx.Bucket(pendingBucket).Put([]byte(e.Request.ID), b)
+	})
 }
 
 func (p *pendingStore) Get(_ context.Context, id string) (engine.PendingEscalation, bool, error) {
@@ -431,10 +454,6 @@ func (p *pendingStore) Get(_ context.Context, id string) (engine.PendingEscalati
 		return json.Unmarshal(v, &e)
 	})
 	return e, found, err
-}
-
-func (p *pendingStore) Delete(_ context.Context, id string) error {
-	return p.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(pendingBucket).Delete([]byte(id)) })
 }
 
 // requireLoopbackUnlessAuth refuses to serve an unauthenticated API beyond this

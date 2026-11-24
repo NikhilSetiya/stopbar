@@ -112,6 +112,9 @@ fi
 step "corpus attacks through live stopbard: real engine + policy, dev stubs (CS-111/112)"
 python3 scripts/e2e_corpus.py "$BIN/stopbard" "$BIN/stopbar"
 
+step "reservation + escalation lifecycle over HTTP: commit/release, poll, reject/approve CLI, timeout (CS-105/151/152)"
+python3 scripts/e2e_lifecycle.py "$BIN/stopbard" "$BIN/stopbar"
+
 step "destination registry: stopbar contacts -> state file -> live stopbard, audited (CS-133)"
 python3 scripts/e2e_contacts.py "$BIN/stopbard" "$BIN/stopbar"
 

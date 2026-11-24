@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NikhilSetiya/stopbar/spec/schemas/escalation_status.v1.schema.json",
+  "title": "Stopbar EscalationStatus v1",
+  "description": "GET /v1/decisions/{request_id} (CS-152, LLD §4.1, §9). Mirrors internal/model.EscalationStatus. `request` is an ActionRequest (action_request.v1.schema.json) and `decision` a Decision (decision.v1.schema.json); scripts/validate_corpus.py checks both nested objects against those schemas. HTTP status: 202 pending, 200 allowed, 403 denied or expired.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id", "state", "reasons", "request", "created_at", "expires_at"],
+  "properties": {
+    "request_id": {"type": "string", "minLength": 1},
+    "state": {"enum": ["pending", "allowed", "denied", "expired"]},
+    "reasons": {"type": "array", "items": {"type": "string"}, "description": "Escalated policy IDs an approver must cover."},
+    "request": {"type": "object"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time", "description": "Approval deadline (pending TTL, default 15m)."},
+    "resolved_by": {"type": "string", "description": "Approver key id; absent for pending and expired."},
+    "resolved_at": {"type": "string", "format": "date-time"},
+    "decision": {"type": "object", "description": "The escalate decision while pending, then the final decision."}
+  },
+  "if": {"properties": {"state": {"enum": ["allowed", "denied", "expired"]}}},
+  "then": {"required": ["resolved_at", "decision"]}
+}
