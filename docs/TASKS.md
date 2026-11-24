@@ -9,7 +9,7 @@ Estimates are focused build days for one engineer. IDs are stable; reference the
 | Phase | Tasks | Est. days |
 |---|---|---|
 | Phase 0 - Foundations (weeks 0-2) | 9 | 9 |
-| Phase 1 - Agent-wallet MVP (weeks 2-8) | 44 | 77 |
+| Phase 1 - Agent-wallet MVP (weeks 2-8) | 45 | 79 |
 | Phase 1R - Research track (parallel, weeks 4-10) | 13 | 25.5 |
 | Phase 2 - Corpus & community (weeks 8-12) | 6 | 12.5 |
 | Phase 3 - Code-mode agents (months 3-9) | 7 | 35 |
@@ -79,6 +79,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 | CS-131 | Price oracle client | Chainlink + CoinGecko with staleness bound and cache. Make amount_usd optional in the schema (amount_usd?) so a stale price reaches the stale-price escalate policy instead of failing closed; policies must guard with `context has amount_usd` (unguarded reads error, and errors deny). Rendered intent says "price unavailable", never $0. | Stale -> price_stale=true, amount_usd absent, starter pack escalates (stale-price); tests with fake clock; rendering shows "price unavailable". | 2d | CS-104 | FR-LIM-5 |
 | CS-132 | Balance provider | RPC balance reads (native + ERC-20) with cache. | Anvil test returns correct balances. | 1d | CS-104 |  |
 | CS-133 | Destination registry | Known destinations per tenant; similarity check (prefix/suffix). | Poisoned address flagged similar_to_known. | 1.5d | CS-104 | FR-IR-2 |
+| CS-134 | Live contact edits (approval + cooling-off) | Edit the destination registry on a running stopbard over the authenticated API (/v1/contacts; stopbar contacts --url/--key), no restart. Additions are pending until approved by an identity other than the requester, then active only after a configurable cooling-off from the approval (-contact-cooling-off / contact_cooling_off, default 24h); until active the destination stays new (policy and soft caps unchanged). Each request is checked against every active and pending entry with the enricher's similarity rule and every match is recorded and shown to the approver; exact duplicates refused. Removals apply at once. Every change audited in the same transaction. Offline state-file path removed (ADR 0004). CS-151 signed approvals will replace the approve-scope identity check. | Pending and cooling-off additions unknown; known at active_from (unit, injected clock); self-approval refused and audited; look-alikes of first/last/pending entries flagged, duplicates refused; removal immediate; e2e against live stopbard with auth on in make e2e and the CI go job. | 2d | CS-133,CS-151,CS-103 | FR-IR-2, FR-POL-5, LLD §4.1, §6.4 |
 
 ### E5 Decoder & intent
 

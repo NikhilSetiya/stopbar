@@ -189,6 +189,7 @@ Controls are rated by tier (PRD §2.4): T1 injected model, T2 agent error, T3 co
 | Controls operator UI | Bybit-style UI swap | Independent intent rendering; approvals bound to payload hash |
 | Agent error (no adversary) | OpenClaw | % of balance caps, escalation |
 | Malicious insider changes policy | Raise caps before attack | M-of-N policy changes, policy-change audit, cooling-off period for cap increases |
+| Allowlists its own destination | Compromised requester or insider adds an attacker address (or a look-alike of a payee) to the destination registry | Additions pending until approved by a different identity, then a cooling-off (default 24h) before they count as known; every look-alike of an existing entry shown to the approver; removals immediate; all changes audited (CS-134, ADR 0004) |
 | Replays old approval | Reuse decision token | Nonce, TTL, payload-hash binding |
 | Uses another caller's approval | Present a decision token issued to a different authenticated caller | Token binds the authenticated requester identity; the signer adapter checks it against the request it signs (decision-token v2) |
 | Compromises Stopbar host | — | Isolated trust domain, co-signer mode (needs two compromises), minimal surface, external audit |
