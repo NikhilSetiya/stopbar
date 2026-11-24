@@ -1,0 +1,151 @@
+# Approval signature — v1
+
+Status: draft (CS-151). Decision: [ADR 0004](../docs/adr/0004-signed-approvals.md).
+
+A signed approval is Stopbar's replacement for API-key approval (issue #32). It
+is a human (or second-agent) countersignature, made with an **approver key**
+that is separate from every API key, over the exact thing being decided: which
+escalation, which payload, approve or reject, and until when. The engine never
+trusts an approval it cannot verify against a configured approver key, and
+never counts two approvals from the same key as two.
+
+The key words MUST, MUST NOT and SHOULD are used as in RFC 2119.
+
+## 1. Design choices
+
+| Choice | Why |
+|---|---|
+| Ed25519, separate key space from API keys and decision keys | An API key is a bearer secret with no signature; it authenticates a *request*, not a *decision*. A compromised API key must not be able to approve anything (LLD §10.3's "separately tagged files" rule extends to approver keys: an approver key file can never be loaded as a decision key file or vice versa). |
+| Sign the object directly, not a JWS | There is no key rotation mid-flow and no third party ever parses the envelope without also holding the object (unlike a decision token, which an adapter must parse generically). A domain-separated raw Ed25519 signature is simpler and just as auditable. |
+| Domain-separated signing input | `sign(domain || JCS(object))`. The domain string names the object kind and version, so an escalation-approval signature can never verify as a breaker-reset signature (or a decision-token, or an audit checkpoint signature) even if the JSON shapes ever coincided. |
+| `kid` carried outside the signed bytes | `kid` is a lookup hint, not a claim: swapping it under a valid signature does not change which key verification actually uses, because Ed25519 verification is keyed. A swapped `kid` just fails against the wrong public key. |
+| Expiry bound at verification time, not issuance time | The object carries no `iat`. A verifier with a trustworthy clock enforces `now < expiry ≤ now + 1h` **when it checks the signature**, so a signature cannot be pre-dated to stay valid indefinitely, and "how long ago it was signed" never has to be tracked or trusted. |
+| Quorum state is pure and storage-agnostic | `Tally` (§5) takes votes and returns a resolution; it persists nothing. Whatever stores pending escalations or breaker trips (`internal/store`, bbolt) owns durability; `Tally` owns only the counting rule, so it is identical for escalation approvals and breaker resets. |
+
+## 2. Escalation approval object
+
+```json
+{"decision":"approve","escalation_id":"<id>","expiry":1700000000,"payload_hash":"sha256:<hex>"}
+```
+
+JCS-canonical, exactly these four members:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `escalation_id` | string | The pending escalation this approval is for. |
+| `payload_hash` | string | `sha256:<hex>` of the JCS-canonical action, recomputed by the engine at re-run time (decision-token-v2 §2). Binds the approval to the exact transaction, not to whatever the approver was shown. |
+| `decision` | string | `approve` or `reject`. Nothing else. |
+| `expiry` | int | Unix seconds. The signature counts for nothing at or after this instant. |
+
+## 3. Breaker reset object
+
+```json
+{"decision":"reset","expiry":1700000000,"tenant":"acme","trip_request_id":"req_123"}
+```
+
+JCS-canonical, exactly these four members:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `tenant` | string | The tenant whose circuit breaker is being reset. |
+| `trip_request_id` | string | `BreakerStatus.trip_request_id`: the request that tripped it. Binds the reset to *this* trip, not a later one for the same tenant. |
+| `decision` | string | Always `reset`. Carried for symmetry with §2 and so a reset signature can never be read as an escalation decision even if the domain tag were ignored. |
+| `expiry` | int | Unix seconds, same rule as §2. |
+
+## 4. Signature
+
+```
+signature = Ed25519(priv, domain || JCS(object))
+```
+
+- Escalation approval domain: the 32 ASCII bytes `"stopbar-approval-escalation-v1\n"`.
+- Breaker reset domain: the 34 ASCII bytes `"stopbar-approval-breaker-reset-v1\n"`.
+
+This is deliberately not a JWS: there is one fixed algorithm (Ed25519), the
+verifier already has the object (it is reconstructing it from current state,
+not reading it out of the envelope), and the domain tag already does the job
+`typ` does for decision tokens.
+
+### 4.1 Wire envelope
+
+The object's own fields, plus:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `kid` | string | RFC 7638 JWK thumbprint of the approver's Ed25519 public key (`decision.Kid`, reused — same thumbprint construction as decision keys, different key space). |
+| `sig` | string | Unpadded base64url signature, 64 bytes decoded. |
+
+## 5. Approver keys
+
+- **Generation**: `stopbar approver keygen <file>` writes an Ed25519 private key tagged `"stopbar-approver-key-ed25519-v1\n"`, mode 0600. The tag differs from the decision key's (`"stopbar-decision-key-ed25519-v1\n"`) and the wallet key's, so no file can be loaded as the wrong kind.
+- **Configuration**: `stopbard` is given the approver *public* keys only (a config file of `{id, tenant, public_key}` entries, or an equivalent flag). `id` is an operator-assigned label for logs and audit records; it is never trusted for lookup. The key actually used to verify a signature is found by **`kid`, recomputed from the configured public key**, exactly as `/v1/keys` entries are (decision-token-v2 §3.1): a mislabelled `id` cannot borrow another key's identity.
+- **Never an API key.** An API key has no public/private key pair and cannot produce an Ed25519 signature; `VerifyEscalation`/`VerifyBreakerReset` only ever look a `kid` up in the configured approver set, which API keys are never added to.
+
+## 6. Verification (escalation approval)
+
+A verifier is given: the configured approver set for the tenant, the escalation's *current* `{escalation_id, payload_hash}` (recomputed at re-run time, never taken from the approval itself), the requester's identity (for the self-approval check), a clock, and the envelope to check. It MUST run these checks in order and stop at the first failure.
+
+| # | Check | Error code |
+|---|---|---|
+| 1 | `kid` is in the configured approver set | `UNKNOWN_KEY` |
+| 2 | That key's configured tenant equals the escalation's tenant | `WRONG_TENANT` |
+| 3 | `sig` is strict unpadded base64url, 64 bytes decoded | `MALFORMED` |
+| 4 | Ed25519 verifies over `domain \|\| JCS(object)`. **No field below is trusted before this passes.** | `BAD_SIGNATURE` |
+| 5 | `decision` is `approve` or `reject` | `BAD_DECISION` |
+| 6 | `escalation_id` equals the escalation being resolved | `WRONG_ESCALATION_ID` |
+| 7 | `payload_hash` equals the one just recomputed from the action about to be re-run | `PAYLOAD_MISMATCH` |
+| 8 | `now < expiry` | `EXPIRED` |
+| 9 | `expiry ≤ now + 1h` | `EXPIRY_TOO_FAR_AHEAD` |
+| 10 | If `decision` is `approve`: the key is not bound (§7) to the escalation's requester | `SELF_APPROVAL` |
+
+A signature that fails any check counts for nothing: it is not a vote, live or expired, and is not stored. Step 6 is also what makes a replayed signature from one escalation worthless on another — `escalation_id` simply will not match.
+
+## 7. Self-approval
+
+A requester MUST NOT approve its own escalation (separation of duties). Because approver keys and API keys are different credential types, the binding is explicit: a configured approver entry MAY carry an `agent_id`. When it does, and the escalation's requester identity has the same `agent_id`, step 10 above refuses the approval with `SELF_APPROVAL` regardless of quorum otherwise being met. An approver entry with no configured `agent_id` is never self-approval-blocked; it is the operator's job to bind an approver key to an agent identity only when that agent can also be a requester.
+
+## 8. Verification (breaker reset)
+
+Same shape, over the §3 object, given the tenant and its breaker's current `trip_request_id`:
+
+| # | Check | Error code |
+|---|---|---|
+| 1 | `kid` is in the configured approver set | `UNKNOWN_KEY` |
+| 2 | That key's configured tenant equals the tenant being reset | `WRONG_TENANT` |
+| 3 | `sig` is strict unpadded base64url, 64 bytes decoded | `MALFORMED` |
+| 4 | Ed25519 verifies over `domain \|\| JCS(object)` | `BAD_SIGNATURE` |
+| 5 | `decision` is `reset` | `BAD_DECISION` |
+| 6 | `tenant` equals the tenant being reset | `WRONG_TENANT` |
+| 7 | `trip_request_id` equals the breaker's current trip | `WRONG_TRIP` |
+| 8 | `now < expiry` | `EXPIRED` |
+| 9 | `expiry ≤ now + 1h` | `EXPIRY_TOO_FAR_AHEAD` |
+
+There is no self-reset rule: a breaker trip has no single "requester" to exclude.
+
+## 9. Quorum (M-of-N)
+
+Both flows resolve the same way, via `approval.Tally`:
+
+- **Reject wins immediately.** One valid `reject` resolves the escalation as rejected, regardless of how many approvals are already held. (A breaker reset has no reject; it is either silent — no vote recorded — or a `reset` vote.)
+- **M distinct keys, never double-counted.** `M` is the configured quorum (`MinQuorumProduction` = 2; `stopbard` refuses to start with a lower quorum unless run with `-dev-world`). A second valid vote from a `kid` that already holds a live vote is refused (`ErrDuplicateVote`); it does not add a second count, and it does not replace the first.
+- **Votes expire.** A vote's own `expiry` (§2/§3) bounds how long it counts. `Tally` discards expired votes before counting toward `M`, so an approver whose vote expired may vote again (a fresh signature, not a resurrected one).
+- **Once resolved, stays resolved.** After `Tally` returns a non-pending resolution (quorum met, or a reject), every later `Add` is refused (`ErrAlreadyResolved`) rather than re-opening or re-counting. This is what makes "approve after reject" and "approve after the quorum already executed" refusals rather than silent no-ops.
+
+## 10. Threats addressed
+
+| Threat | Defence |
+|---|---|
+| A stolen or guessed API key used to approve or reject | API keys are never in the approver set; `UNKNOWN_KEY` at step 1 either way. |
+| A valid approval replayed on a different, later escalation for the same tenant | §6 step 6: `escalation_id` is bound and checked. |
+| A valid breaker-reset signature replayed on the *next* trip for the same tenant | §8 step 7: `trip_request_id` is bound and checked. |
+| A stale approval used long after signing, or a signature pre-dated to stay valid forever | §6/§8 steps 8–9: checked at verification time, bounded to a 1-hour window, with no `iat` to trust. |
+| The same approver counted twice toward quorum | `Tally` rejects a second live vote from the same `kid` (`ErrDuplicateVote`). |
+| A compromised requester signs its own approval with a stolen or colluding approver key | §7: an approver key bound to the requester's `agent_id` is refused at step 10, independent of quorum. |
+| An approval or reset signature read as the other, or as a decision token / audit checkpoint | Domain separation (§4): each signing input starts with a distinct, versioned tag. |
+| A decision reached, then "re-approved" after it changed (quorum met, then a late reject; or executed, then approved again) | `Tally`'s `ErrAlreadyResolved` (§9): the first resolution is final. |
+
+## 11. Versioning
+
+Any change to either object's fields, the domain tags, or the verification order bumps the object's own version (`-v1` → `-v2` in its domain tag) and both versions are specified side by side, as for decision tokens.
+
+Test vectors: [`vectors/approval-signature-v1.json`](vectors/approval-signature-v1.json), generated and checked by `internal/approval/vectors_test.go` (`go test ./internal/approval -run TestApprovalSignatureVectors -update`). They include negative vectors for every check in §6 and §8.
