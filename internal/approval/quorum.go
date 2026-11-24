@@ -42,6 +42,10 @@ type Resolution struct {
 	// Approvers lists the kids counted toward Approved (one per distinct
 	// owner), or the single kid that caused Rejected. Empty while Pending.
 	Approvers []string
+	// Veto is the exact vote that caused Rejected (nil otherwise): the
+	// single reject a caller alerts on and audits (Alerts.Veto,
+	// VetoAuditEntry), not just its kid.
+	Veto *Vote
 }
 
 // Vote is one verified signature to count (the caller has already run
@@ -105,7 +109,8 @@ func (t *Tally) Add(v Vote, now time.Time) (Resolution, error) {
 		}
 	}
 	if v.Decision == Reject {
-		t.resolution = Resolution{Outcome: Rejected, Approvers: []string{v.Kid}}
+		vetoed := v
+		t.resolution = Resolution{Outcome: Rejected, Approvers: []string{v.Kid}, Veto: &vetoed}
 		return t.resolution, nil
 	}
 	if selfApproval(v.Owner, EscalationWant{RequesterKeyID: t.excludeKeyID, RequesterAgentID: t.excludeAgentID}) {
