@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # SDK gate (CS-181/182/183), run by scripts/e2e.sh and the required CI `go` job.
 # Both SDKs' unit tests (mock server, shared encoding fixtures), then each SDK's
-# example agent end to end against a real stopbard: -dev-world, gatekeeper mode,
-# auth on. Allow + signed tx; a Grok-pattern encoded injection labelled decoded
-# and denied; an escalation approved by a separate operator key. Then the run's
-# audit log must verify offline.
+# example agent end to end against real stopbards (-dev-world, auth on): a
+# gatekeeper one (holds the wallet) and, for the TypeScript example's own
+# commit/release, an advisory one. Allow + signed tx; a Grok-pattern encoded
+# injection labelled decoded and denied; escalations polled, approved and
+# rejected by a separate operator key over the real CS-105/152 routes; commit,
+# release and CONFLICT. Then each run's audit log must verify offline.
 # Usage: scripts/e2e_sdk.sh PATH/TO/stopbard PATH/TO/stopbar   (needs node >= 20, npm)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 STOPBARD=$1 CLI=$2
 T="$(mktemp -d)"
-trap 'kill "${PID:-}" 2>/dev/null || true; rm -rf "$T"' EXIT
+PIDS=()
+trap 'kill ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null || true; rm -rf "$T"' EXIT
 
 echo "--- python SDK: unit tests"
 P=sdk/python
@@ -35,21 +38,31 @@ key() { # agent scopes -> secret on stdout, record in $T/rec.<agent>
 AGENT_KEY="$(key wallet-agent evaluate)"
 APPROVE_KEY="$(key operator approve)"
 python3 -c 'import json,sys; print(json.dumps([json.load(open(f)) for f in sys.argv[1:]]))' "$T"/rec.* >"$T/keys.json"
-"$STOPBARD" -listen 127.0.0.1:0 -dev-world "$T/world.json" -dev-wallet "$T/wallet" -tenant demo \
-  -auth-keys "$T/keys.json" -state-dir "$T/state" >"$T/out" 2>"$T/log" &
-PID=$!
-for _ in $(seq 50); do grep -q 'listening on' "$T/out" 2>/dev/null && break; sleep 0.1; done
-ADDR="$(sed -n 's/.*listening on //p' "$T/out")"
-[[ -n "$ADDR" ]] || { echo "stopbard did not start"; cat "$T/log"; exit 1; }
-export STOPBAR_URL="http://$ADDR" STOPBAR_KEY="$AGENT_KEY" STOPBAR_APPROVE_KEY="$APPROVE_KEY" STOPBAR_TENANT=demo
+start() { # name extra-flags... -> address in $T/addr-<name> (not a subshell: PIDS must stick)
+  local n=$1; shift
+  "$STOPBARD" -listen 127.0.0.1:0 -dev-world "$T/world.json" -tenant demo -auth-keys "$T/keys.json" \
+    -state-dir "$T/state-$n" "$@" >"$T/out-$n" 2>"$T/log-$n" &
+  PIDS+=($!)
+  for _ in $(seq 50); do grep -q 'listening on' "$T/out-$n" 2>/dev/null && break; sleep 0.1; done
+  sed -n 's/.*listening on //p' "$T/out-$n" | grep . >"$T/addr-$n" || { echo "stopbard ($n) did not start"; cat "$T/log-$n"; exit 1; }
+}
+start gatekeeper -dev-wallet "$T/wallet"
+start advisory
+GK="$(cat "$T/addr-gatekeeper")" ADV="$(cat "$T/addr-advisory")"
+export STOPBAR_URL="http://$GK" STOPBAR_ADVISORY_URL="http://$ADV" STOPBAR_KEY="$AGENT_KEY" STOPBAR_APPROVE_KEY="$APPROVE_KEY" STOPBAR_TENANT=demo
 
 echo "--- typescript example vs live stopbard"
 node sdk/typescript/dist/examples/protect-agent.js
 echo "--- python example vs live stopbard"
 PYTHONPATH="$P" python3 "$P/examples/protect_agent.py"
 
-python3 -c 'import sys,urllib.request; sys.stdout.buffer.write(urllib.request.urlopen(sys.argv[1]).read())' "$STOPBAR_URL/v1/keys" >"$T/jwks.json"
-kill -TERM "$PID"; wait "$PID" || true
-PID=
-"$CLI" audit verify --state-dir "$T/state" --keys "$T/jwks.json" --require-covered
+for n in gatekeeper advisory; do
+  url="$STOPBAR_URL"; [[ $n == advisory ]] && url="$STOPBAR_ADVISORY_URL"
+  python3 -c 'import sys,urllib.request; sys.stdout.buffer.write(urllib.request.urlopen(sys.argv[1]).read())' "$url/v1/keys" >"$T/jwks-$n.json"
+done
+kill -TERM "${PIDS[@]}"; wait "${PIDS[@]}" || true
+PIDS=()
+for n in gatekeeper advisory; do
+  "$CLI" audit verify --state-dir "$T/state-$n" --keys "$T/jwks-$n.json" --require-covered
+done
 echo "ok   SDK examples (TypeScript, Python) end to end"
