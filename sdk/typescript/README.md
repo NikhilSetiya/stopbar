@@ -47,9 +47,18 @@ rejects with a typed error otherwise, so a missed check can never read a deny as
 an allow. An unreachable server, a timeout or any non-decision response rejects
 with `StopbarUnavailable`: treat it as a deny.
 
-Outside gatekeeper mode, report what happened to an allowed action so its limiter
-reservation is committed or released: `sb.commit(requestId, txRef)` /
-`sb.release(requestId)` (`POST /v1/actions/{id}/commit|release`, LLD §4.1).
+### Lifecycle (LLD §4.1)
+
+```ts
+await sb.commit(d.requestId, txHash);      // broadcast: the spend counts (retry-safe)
+await sb.release(d.requestId, "cancelled"); // abandoned: frees the reservation
+const st = await sb.poll(requestId);       // .state: pending / allowed / denied / expired; only .allowed is actionable
+await ops.approve(requestId);              // an approver key ('approve' scope) that did not request it
+await ops.reject(requestId);               // deny (reason APPROVAL_REJECTED)
+```
+
+Refusals (unknown id, CONFLICT, RESERVATION_EXPIRED, ALREADY_RESOLVED…) reject
+with `StopbarRequestError` (`.status`, `.code`).
 
 ### Provenance labels (taint)
 
