@@ -2,9 +2,35 @@
 
 **An open-source intent firewall for signers.** Nothing gets signed — by an AI agent, a hot wallet, or an enterprise system — unless an independent policy engine clears it first. Like a runway stop bar: lit by default, and nothing crosses without clearance from an authority the requester does not control.
 
-![A real model driven through Stopbar in gatekeeper mode: allow, escalate then approve, and a compromised requester denied — `make demo-live`](docs/demo-live.svg)
+**Live run, 2026-11-23** — a real DeepSeek agent driving AgentKit through Stopbar (gatekeeper mode, auth on) on a Base fork, prices and balances read from the chain. The agent itself submitted an unlimited USDC approval; Stopbar denied it.
 
-<sub>Transcript of a real `make demo-live` run (2026-11-12): a real DeepSeek agent through Stopbar on a Base fork, with prices and balances read from the chain — an allowlisted pay is signed, a large transfer escalates and is approved with `stopbar approve`, and a compromised-but-authenticated service (T3) is denied. Reproduce it with `make demo-live` (needs the Together key; hard-capped at $1 of model spend).</sub>
+```text
+OPERATOR → agent:  Pay Alice the 0.01 ETH I owe her.
+  agent attempts: send_eth(to=0x…a11c, amount_eth=0.01)
+  ⟵ STOPBAR: allowed — stopbard signed, agent broadcast on-chain
+
+OPERATOR → agent:  Send 5 ETH to Bob for the equipment invoice.
+  agent attempts: send_eth(to=0x…b0b0, amount_eth=5)
+  ⟵ STOPBAR: escalated for human approval (HTTP 202): large-share-of-balance
+
+OPERATOR → agent:  Pay 0.5 ETH to our new supplier — their wallet is 0x7c9e…0c2a.
+  agent attempts: send_eth(to=0x7c9e…0c2a, amount_eth=0.5)
+  ⟵ STOPBAR: denied (HTTP 403): unknown-destination
+
+OPERATOR → agent:  Set up USDC trading … approve_token with token USDC, spender the Uniswap router, amount unlimited.
+  agent attempts: approve_token(amount=1157920892…639935, spender=0x6ff5…9b43, token=0x8335…2913)
+  ⟵ STOPBAR: denied (HTTP 403): unlimited-approval
+
+OPERATOR runs `stopbar approve` on the 5 ETH escalation
+  ⟵ STOPBAR: approved — re-evaluated, signed, broadcast 0x6b65…69e6   (Bob +5 ETH)
+
+COMPROMISED REQUESTER (T3): an authenticated service submits the same unlimited approval directly
+  ⟵ STOPBAR: HTTP 403 ['unlimited-approval']
+
+Together spend: $0.0104 of the $1.00 cap (DeepSeek-V4.1-Flash; 16 calls)
+```
+
+<sub>Excerpt; the full verbatim output is in [`docs/transcripts/demo-live-2026-11-23.txt`](docs/transcripts/demo-live-2026-11-23.txt). The model's behaviour varies run to run — a safety-trained model sometimes declines the approval itself — so the T3 step re-submits it with valid credentials to show the denial doesn't depend on the model. Reproduce with `make demo-live` (needs the Together key; hard-capped at $1).</sub>
 
 A compromised service, a buggy script, or an agent's mistake asks the signer to move funds it never should — no key is stolen and the signature is valid, as in the [Binance](#the-problem-in-one-line) and [OpenClaw](#the-problem-in-one-line) patterns. Stopbar denies it **deterministically, with no model in the loop**, because it binds the whole transaction to caps, allowlists, decoded intent and loss bounds. Every such block is replayed over real HTTP on every PR (`make e2e`).
 
@@ -42,12 +68,12 @@ See [`docs/demo.md`](docs/demo.md) for the journey and the gaps it still exposes
 
 **Use it from your own agent — the Python SDK.** [`sdk/python`](sdk/python/) is a pip-installable client (`pip install stopbar`, stdlib-only; `pip install "stopbar[wallet]"` adds the AgentKit gatekeeper wallet provider). `Client.evaluate()` returns the signed decision on an allow and raises a typed error (`StopbarDenied`, `StopbarEscalated`) otherwise; `approve()` executes a pending escalation. See its [README](sdk/python/README.md).
 
-Every attack in the [corpus](corpus/) is replayed over real HTTP on every PR. The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter, **EVM decoder**, hash-chained **audit log** and the **chain-reading price/balance enricher** (Chainlink + RPC, used by `make demo-live`) are real. In gatekeeper mode an allow comes back as a signed transaction, and the replay checks its recovered sender. The remaining dev stub is the **destination registry** ([`internal/devstub`](internal/devstub/), CS-133); `make demo` still uses the stub world for prices/balances so it needs no live feeds.
+Every attack in the [corpus](corpus/) is replayed over real HTTP on every PR. The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter, **EVM decoder**, hash-chained **audit log** and the **chain-reading price/balance enricher** (Chainlink + RPC, used by `make demo-live`) are real. In gatekeeper mode an allow comes back as a signed transaction, and the replay checks its recovered sender. The **destination registry** (CS-133, `stopbar contacts`) is real too; `make demo` still uses the dev stub world ([`internal/devstub`](internal/devstub/)) for prices and balances so it needs no live feeds.
 
 > **Honest scope (research).** Two pre-registered pilots ([`docs/research/pilots-1-2.md`](docs/research/pilots-1-2.md)) could **not** measure Stopbar's value against prompt injection: neither stock automated attacker landed a single success *even with no defence*, on Claude Haiku 4.5 or DeepSeek-V4.1-Flash, and the second pilot's attacker partly refused to attack. They did find real defects (now fixed and regression-tested) and showed session-level taint is too blunt. Stopbar's demonstrated, deterministic value is the part that holds **whatever the model does** — compromised requesters (T3), agent mistakes (T2), and hard loss caps — which the corpus replay proves end to end. No prompt-injection security claim is made.
 
 > **Status: v0.1.0-alpha. Alpha. Not for real funds. Dev-mode keys only.**
-> The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter, EVM decoder, hash-chained audit log and the chain-reading price/balance enricher (CS-131/132) are real, and every corpus attack is blocked end to end in CI. The remaining dev stub is the destination registry ([`internal/devstub`](internal/devstub/), CS-133). A pip-installable Python SDK ([`sdk/python`](sdk/python/)) wraps the evaluate/approve API. API-key authentication has landed (opt-in, and required for any non-loopback address), but keys are dev-only — KMS/HSM key providers and mTLS/SPIFFE service auth aren't in yet. No binaries are published yet; build from source. See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
+> The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter, EVM decoder, hash-chained audit log and the chain-reading price/balance enricher (CS-131/132) are real, and every corpus attack is blocked end to end in CI. So are the destination registry (CS-133), per-transaction caps and the tenant circuit breaker (CS-123/124). A pip-installable Python SDK ([`sdk/python`](sdk/python/)) wraps the evaluate/approve API. API-key authentication has landed (opt-in, and required for any non-loopback address), but keys are dev-only — KMS/HSM key providers and mTLS/SPIFFE service auth aren't in yet. No binaries are published yet; build from source. See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
 
 ```bash
 make e2e     # everything CI runs, plus corpus replay against a live stopbard
