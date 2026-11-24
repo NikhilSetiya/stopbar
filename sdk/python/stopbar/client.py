@@ -11,6 +11,7 @@ import base64
 import datetime
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -170,20 +171,30 @@ class Client:
         status, decoded = self._post("/v1/evaluate", body)
         return self._decision(status, decoded)
 
-    def approve(self, request_id: str) -> Decision:
-        """Approve a pending escalation. Stopbar re-evaluates it against current
-        state; on an allow the returned Decision carries the signed transaction.
-        Needs a key with the 'approve' scope."""
-        status, decoded = self._post(f"/v1/approvals/{_seg(request_id)}", None)
+    def approve(self, request_id: str, approver_key: bytes | str) -> Decision:
+        """Approve a pending escalation (CS-151): fetches what to sign from
+        Stopbar (GET /v1/approvals/{id}), signs it locally with
+        approver_key — a raw 32-byte Ed25519 seed, or a path to a key file
+        written by ``stopbar approver keygen`` / ``stopbar.approval.
+        write_key_file`` — and submits the signature. The private key never
+        leaves this process. On quorum, Stopbar re-evaluates against
+        current state; on an allow the returned Decision carries the
+        signed transaction. Needs the 'approver' extra:
+        ``pip install stopbar[approver]``."""
+        sig = self._sign_escalation(request_id, approver_key, _approval().APPROVE)
+        status, decoded = self._post(f"/v1/approvals/{_seg(request_id)}", sig.to_json())
         return self._decision(status, decoded)
 
-    def reject(self, request_id: str) -> Decision:
-        """Reject a pending escalation: it is denied and nothing is signed. Needs
-        a key with the 'approve' scope that did not request it. Returns the deny
-        (reason APPROVAL_REJECTED); raises StopbarDenied if Stopbar refused the
-        rejection itself (e.g. self-rejection), StopbarRequestError for an unknown
-        or already-resolved escalation."""
-        status, decoded = self._post(f"/v1/approvals/{_seg(request_id)}/reject", None)
+    def reject(self, request_id: str, approver_key: bytes | str) -> Decision:
+        """Sign and submit a reject (CS-151): one valid reject denies the
+        escalation outright, audited with the rejecting owner. approver_key
+        is as for approve(). Returns the deny (reason APPROVAL_REJECTED);
+        raises StopbarDenied if Stopbar refused the signature itself (e.g.
+        self-approval does not apply to reject, but an expired or
+        unrecognised signature does), StopbarRequestError for an unknown or
+        already-resolved escalation."""
+        sig = self._sign_escalation(request_id, approver_key, _approval().REJECT)
+        status, decoded = self._post(f"/v1/approvals/{_seg(request_id)}/reject", sig.to_json())
         if status == 403 and decoded.get("outcome") == "deny" and \
                 (decoded.get("reasons") or [{}])[-1].get("code") == "APPROVAL_REJECTED":
             return Decision(status, decoded)
@@ -191,6 +202,18 @@ class Client:
         if status != 200:
             self._decision(status, decoded)  # raises: escalate / deny / unavailable
         raise StopbarUnavailable(f"Stopbar answered a reject with HTTP {status}: not a rejection")
+
+    def _sign_escalation(self, request_id: str, approver_key: bytes | str, decision: str) -> Any:
+        approval = _approval()
+        seed = approver_key if isinstance(approver_key, bytes) else approval.load_key_file(approver_key)
+        status, decoded = self._request("GET", f"/v1/approvals/{_seg(request_id)}", None)
+        if status != 200:
+            self._refusal(status, decoded)
+            raise StopbarUnavailable(f"could not fetch what to sign (HTTP {status}): {decoded.get('code') or decoded}")
+        return approval.sign_escalation(
+            seed, escalation_id=decoded["escalation_id"], payload_hash=decoded["payload_hash"],
+            decision=decision, expiry=int(time.time()) + 50 * 60,  # comfortably under the 1h bound
+        )
 
     def poll(self, request_id: str) -> EscalationStatus:
         """The escalation's current state (GET /v1/decisions/{id}). Visible to the
@@ -295,8 +318,11 @@ class Session:
         sources = [*self.sources, *(kw.pop("sources", None) or [])]
         return self.client.evaluate(action, labels=merged, sources=sources, **kw)
 
-    def approve(self, request_id: str) -> Decision:
-        return self.client.approve(request_id)
+    def approve(self, request_id: str, approver_key: bytes | str) -> Decision:
+        return self.client.approve(request_id, approver_key)
+
+    def reject(self, request_id: str, approver_key: bytes | str) -> Decision:
+        return self.client.reject(request_id, approver_key)
 
     def poll(self, request_id: str) -> EscalationStatus:
         return self.client.poll(request_id)
@@ -306,6 +332,14 @@ class Session:
 
     def release(self, request_id: str, reason: str | None = None) -> dict[str, Any]:
         return self.client.release(request_id, reason)
+
+
+def _approval() -> Any:
+    """Lazily imports stopbar.approval, so the core client stays importable
+    without the 'approver' extra unless approve/reject is actually called."""
+    from . import approval
+
+    return approval
 
 
 def _seg(request_id: str) -> str:

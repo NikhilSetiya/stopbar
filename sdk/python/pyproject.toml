@@ -20,7 +20,9 @@ Source = "https://github.com/NikhilSetiya/stopbar/tree/main/sdk/python"
 [project.optional-dependencies]
 # The AgentKit gatekeeper wallet provider (stopbar.wallet).
 wallet = ["coinbase-agentkit>=0.1.0", "web3>=6.0.0"]
-dev = ["pytest>=7.0"]
+# Signed approvals (stopbar.approval, CS-151): Ed25519 approve/reject/breaker-reset.
+approver = ["cryptography>=41"]
+dev = ["pytest>=7.0", "cryptography>=41"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["stopbar"]
