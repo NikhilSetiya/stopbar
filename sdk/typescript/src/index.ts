@@ -12,7 +12,9 @@
 //   }
 
 export { Client, Decision, EscalationStatus, Session } from "./client.js";
-export type { ClientOptions, EvaluateOptions, EvmTxParams } from "./client.js";
+export type { ApproverKey, ClientOptions, EvaluateOptions, EvmTxParams } from "./client.js";
+export { APPROVE, REJECT, RESET, generateKey, kid, loadKeyFile, signBreakerReset, signEscalation, writeKeyFile } from "./approval.js";
+export type { SignedBreakerReset, SignedEscalation } from "./approval.js";
 export { detectEncodings, KINDS } from "./encoding.js";
 export type { Encoding } from "./encoding.js";
 export {
