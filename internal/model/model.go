@@ -234,8 +234,44 @@ const (
 	AuditDestination AuditRecordType = "destination_change"
 )
 
-// ErrNoPending means no escalation with that id is awaiting approval (CS-151).
-var ErrNoPending = errors.New("no pending escalation for that id")
+// Lifecycle errors, shared by the engine, the limiter and the gateway (which
+// maps them to HTTP statuses without importing either).
+var (
+	// ErrNoPending means no escalation with that id is visible to the caller (CS-151).
+	ErrNoPending = errors.New("no pending escalation for that id")
+	// ErrResolved means the escalation was already allowed, denied or expired (CS-152).
+	ErrResolved = errors.New("escalation already resolved")
+	// ErrUnknownReservation: no live or committed reservation has that id (CS-105).
+	ErrUnknownReservation = errors.New("limiter: unknown reservation")
+	// ErrReservationExpired: the reservation lapsed before it was committed or released.
+	ErrReservationExpired = errors.New("limiter: reservation expired")
+	// ErrAlreadyCommitted: the reservation was committed (with another tx_ref, for a commit).
+	ErrAlreadyCommitted = errors.New("limiter: reservation is already committed")
+)
+
+// EscalationState is where an escalation is in its lifecycle (CS-152, LLD §9).
+type EscalationState string
+
+const (
+	EscalationPending EscalationState = "pending" // awaiting approve or reject
+	EscalationAllowed EscalationState = "allowed" // approved, and the re-run allowed it
+	EscalationDenied  EscalationState = "denied"  // rejected, or the approved allow could not be executed
+	EscalationExpired EscalationState = "expired" // the approval window passed: deny
+)
+
+// EscalationStatus is GET /v1/decisions/{request_id} (CS-152). Decision is the
+// escalate decision while pending and the final decision once resolved.
+type EscalationStatus struct {
+	RequestID  string          `json:"request_id"`
+	State      EscalationState `json:"state"`
+	Reasons    []string        `json:"reasons"` // escalated policy IDs an approver must cover
+	Request    ActionRequest   `json:"request"`
+	CreatedAt  time.Time       `json:"created_at"`
+	ExpiresAt  time.Time       `json:"expires_at"` // approval deadline (pending TTL)
+	ResolvedBy string          `json:"resolved_by,omitempty"`
+	ResolvedAt *time.Time      `json:"resolved_at,omitempty"`
+	Decision   *Decision       `json:"decision,omitempty"`
+}
 
 // ErrBreakerNotOpen means a reset was asked for a tenant whose circuit breaker
 // is not open (CS-124).

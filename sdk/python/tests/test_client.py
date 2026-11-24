@@ -12,6 +12,7 @@ from stopbar import (
     StopbarAuthError,
     StopbarDenied,
     StopbarEscalated,
+    StopbarRequestError,
     StopbarUnavailable,
 )
 
@@ -20,11 +21,15 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # silence
         pass
 
+    def do_GET(self):
+        self.do_POST()
+
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(n) if n else b""
         self.server.last_body = json.loads(raw) if raw else None
         self.server.last_auth = self.headers.get("Authorization")
+        self.server.last_method, self.server.last_path = self.command, self.path
         status, body = self.server.responder(self.path, self.server.last_body)
         payload = json.dumps(body).encode()
         self.send_response(status)
@@ -37,7 +42,7 @@ class _Handler(BaseHTTPRequestHandler):
 def serve(responder):
     srv = HTTPServer(("127.0.0.1", 0), _Handler)
     srv.responder = responder
-    srv.last_body = srv.last_auth = None
+    srv.last_body = srv.last_auth = srv.last_method = srv.last_path = None
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -115,3 +120,69 @@ def test_unreachable_fails_closed():
     sb = Client("http://127.0.0.1:1", timeout=1)  # nothing listening
     with pytest.raises(StopbarUnavailable):
         sb.evaluate(evm(sb))
+
+
+def test_commit_and_release_settle_the_reservation():
+    srv = serve(lambda path, body: (200, {"request_id": "req_1", "state": path.rsplit("/", 1)[1] + "ted"}))
+    sb = client(srv, api_key="k")
+    assert sb.commit("req_1", "0xabc")["state"] == "committed"
+    assert (srv.last_method, srv.last_path, srv.last_body) == ("POST", "/v1/actions/req_1/commit", {"tx_ref": "0xabc"})
+    sb.release("req_1", "user cancelled")
+    assert (srv.last_path, srv.last_body) == ("/v1/actions/req_1/release", {"reason": "user cancelled"})
+    sb.release("req/../x")  # an id is one path segment, never a path
+    assert srv.last_path == "/v1/actions/req%2F..%2Fx/release" and srv.last_body == {}
+
+
+@pytest.mark.parametrize("status,code", [(404, "NOT_FOUND"), (409, "CONFLICT"), (410, "RESERVATION_EXPIRED"),
+                                         (400, "INVALID_REQUEST")])
+def test_settle_refusals_are_typed(status, code):
+    srv = serve(lambda path, body: (status, {"code": code}))
+    sb = client(srv)
+    with pytest.raises(StopbarRequestError) as ei:
+        sb.commit("req_1", "0xabc")
+    assert ei.value.status == status and ei.value.code == code
+
+
+def test_settle_auth_and_server_errors():
+    srv = serve(lambda path, body: (403, {"code": "FORBIDDEN_SCOPE"}))
+    with pytest.raises(StopbarAuthError):
+        client(srv).release("req_1")
+    srv = serve(lambda path, body: (500, {"code": "INTERNAL"}))
+    with pytest.raises(StopbarUnavailable):
+        client(srv).commit("req_1", "0x1")
+
+
+@pytest.mark.parametrize("status,state,allowed", [(202, "pending", False), (200, "allowed", True),
+                                                  (403, "denied", False), (403, "expired", False)])
+def test_poll_reports_state(status, state, allowed):
+    srv = serve(lambda path, body: (status, {"request_id": "req_1", "state": state,
+                                             "decision": {"request_id": "req_1", "outcome": "allow" if allowed else "deny", "token": "t"}}))
+    st = client(srv, api_key="k").poll("req_1")
+    assert (srv.last_method, srv.last_path) == ("GET", "/v1/decisions/req_1")
+    assert st.state == state and st.allowed is allowed
+    assert st.decision.outcome == ("allow" if allowed else "deny")
+
+
+def test_poll_unknown_raises():
+    srv = serve(lambda path, body: (404, {"code": "NOT_FOUND"}))
+    with pytest.raises(StopbarRequestError):
+        client(srv).poll("nope")
+
+
+def test_reject_returns_the_deny():
+    srv = serve(lambda path, body: (403, {"request_id": "req_1", "outcome": "deny",
+                                          "reasons": [{"code": "APPROVAL_REJECTED", "policy_id": ""}]}))
+    d = client(srv, api_key="ops").reject("req_1")
+    assert (srv.last_method, srv.last_path) == ("POST", "/v1/approvals/req_1/reject")
+    assert d.outcome == "deny" and d.reasons == ["APPROVAL_REJECTED"]
+
+
+def test_reject_refusals_raise():
+    srv = serve(lambda path, body: (403, {"request_id": "req_1", "outcome": "deny",
+                                          "reasons": [{"code": "APPROVAL_SELF_APPROVAL"}]}))
+    with pytest.raises(StopbarDenied):
+        client(srv).reject("req_1")
+    srv = serve(lambda path, body: (409, {"code": "ALREADY_RESOLVED"}))
+    with pytest.raises(StopbarRequestError) as ei:
+        client(srv).reject("req_1")
+    assert ei.value.code == "ALREADY_RESOLVED"

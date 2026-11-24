@@ -18,13 +18,18 @@ import (
 // position the struct defines. Free-form maps (action.args) are exempt; they
 // are hashed verbatim and never decoded into fields.
 func checkExactKeys(body []byte) error {
+	return checkExactKeysAs(body, reflect.TypeOf(model.ActionRequest{}))
+}
+
+// checkExactKeysAs is checkExactKeys against the struct type t.
+func checkExactKeysAs(body []byte, t reflect.Type) error {
 	var v any
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	if err := dec.Decode(&v); err != nil {
 		return fail(CodeMalformedJSON, "%v", err)
 	}
-	return walkKeys(v, reflect.TypeOf(model.ActionRequest{}), "")
+	return walkKeys(v, t, "")
 }
 
 var timeType = reflect.TypeOf(time.Time{})

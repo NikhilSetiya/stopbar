@@ -7,6 +7,7 @@ from jsonschema import Draft202012Validator as V
 corpus = V(json.load(open("corpus/schema.json")))
 req = V(json.load(open("spec/schemas/action_request.v1.schema.json")))
 dec = V(json.load(open("spec/schemas/decision.v1.schema.json")))
+esc = V(json.load(open("spec/schemas/escalation_status.v1.schema.json")))
 checks = [(corpus, f, lambda d: d) for f in glob.glob("corpus/attacks/*.yaml")]
 for f in glob.glob("corpus/attacks/*.yaml"):
     entry = yaml.safe_load(open(f))
@@ -15,6 +16,8 @@ for f in glob.glob("corpus/attacks/*.yaml"):
         checks.append((req, f if i == 0 and "request" in entry else f"{f}#{i}", pick))
 checks += [(req, f, lambda d: d) for f in glob.glob("spec/fixtures/action_request.*.json")]
 checks += [(dec, f, lambda d: d) for f in glob.glob("spec/fixtures/decision.*.json")]
+for f in glob.glob("spec/fixtures/escalation_status.*.json"):  # and its nested request and decision
+    checks += [(esc, f, lambda d: d), (req, f + "#request", lambda d: d["request"]), (dec, f + "#decision", lambda d: d["decision"])]
 brk = V(json.load(open("spec/schemas/breaker_status.v1.schema.json")))
 checks += [(brk, f, lambda d: d) for f in glob.glob("spec/fixtures/breaker_status.*.json")]
 bad = 0

@@ -66,6 +66,16 @@ func TestDecisionFixture(t *testing.T) {
 	}
 }
 
+func TestEscalationStatusFixture(t *testing.T) {
+	st := roundTrip[EscalationStatus](t, "../../spec/fixtures/escalation_status.denied.json")
+	if err := st.Request.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Decision.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBreakerStatusFixture(t *testing.T) {
 	b := roundTrip[BreakerStatus](t, "../../spec/fixtures/breaker_status.open.json")
 	if err := b.Validate(); err != nil {

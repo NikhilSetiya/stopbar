@@ -225,10 +225,12 @@ def main():
             say(f"  {p:48s} → {oc}")
         say(f"\nTogether spend: ${meter.usd:.4f} of the ${CAP_USD:.2f} cap "
             f"({MODEL}; {sum(meter.calls.values())} calls; aborted: {meter.aborted}).")
-        say("Stopbar enforced the allowlist and the large-transfer rule on the agent's real tool calls; a "
-            "safety-trained model may also decline on its own. The unlimited approval the model refused, a "
-            "compromised but fully-authenticated service pushed straight through — and Stopbar denied it anyway: "
-            "the deterministic controls hold whatever the requester is (T3).")
+        agent_approval = ("Stopbar denied the agent's own unlimited approval"
+                          if outcomes[3].startswith("DENIED") else
+                          f"the agent's unlimited approval ended: {outcomes[3]}")
+        say(f"Stopbar enforced the allowlist and the large-transfer rule on the agent's real tool calls; "
+            f"{agent_approval}. A compromised but fully-authenticated service then pushed the same approval "
+            f"straight through: {outcomes[-1]}. The deterministic controls hold whatever the requester is (T3).")
     finally:
         if sb:
             sb.terminate(); sb.wait(timeout=10)

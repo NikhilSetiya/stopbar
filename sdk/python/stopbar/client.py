@@ -12,6 +12,7 @@ import datetime
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ from .errors import (
     StopbarAuthError,
     StopbarDenied,
     StopbarEscalated,
+    StopbarRequestError,
     StopbarUnavailable,
 )
 
@@ -57,6 +59,30 @@ class Decision:
     def reasons(self) -> list[str]:
         rs = [r.get("policy_id") or r.get("code") for r in self.body.get("reasons", [])]
         return [str(r) for r in rs if r]
+
+
+@dataclass
+class EscalationStatus:
+    """GET /v1/decisions/{id}: where an escalation is. ``state`` is "pending",
+    "allowed", "denied" or "expired"; ``decision`` is the escalate decision while
+    pending and the final one after (with the token, and in gatekeeper mode the
+    signed tx, once allowed). Only ``allowed`` is safe to act on."""
+
+    status: int
+    body: dict[str, Any]
+
+    @property
+    def state(self) -> str:
+        return self.body.get("state", "")
+
+    @property
+    def allowed(self) -> bool:
+        return self.status == 200 and self.state == "allowed"
+
+    @property
+    def decision(self) -> Decision | None:
+        d = self.body.get("decision")
+        return Decision(self.status, d) if isinstance(d, dict) else None
 
 
 @dataclass
@@ -144,10 +170,59 @@ class Client:
         """Approve a pending escalation. Stopbar re-evaluates it against current
         state; on an allow the returned Decision carries the signed transaction.
         Needs a key with the 'approve' scope."""
-        status, decoded = self._post(f"/v1/approvals/{request_id}", None)
+        status, decoded = self._post(f"/v1/approvals/{_seg(request_id)}", None)
         return self._decision(status, decoded)
 
+    def reject(self, request_id: str) -> Decision:
+        """Reject a pending escalation: it is denied and nothing is signed. Needs
+        a key with the 'approve' scope that did not request it. Returns the deny
+        (reason APPROVAL_REJECTED); raises StopbarDenied if Stopbar refused the
+        rejection itself (e.g. self-rejection), StopbarRequestError for an unknown
+        or already-resolved escalation."""
+        status, decoded = self._post(f"/v1/approvals/{_seg(request_id)}/reject", None)
+        if status == 403 and decoded.get("outcome") == "deny" and \
+                (decoded.get("reasons") or [{}])[-1].get("code") == "APPROVAL_REJECTED":
+            return Decision(status, decoded)
+        self._refusal(status, decoded)
+        return self._decision(status, decoded)  # raises: a 200/202 is not a rejection
+
+    def poll(self, request_id: str) -> EscalationStatus:
+        """The escalation's current state (GET /v1/decisions/{id}). Visible to the
+        requesting agent and to its tenant's approvers. A pending escalation past
+        its approval window comes back expired (a deny)."""
+        status, decoded = self._request("GET", f"/v1/decisions/{_seg(request_id)}", None)
+        if status in (200, 202, 403) and decoded.get("state"):
+            return EscalationStatus(status, decoded)
+        self._refusal(status, decoded)
+        raise StopbarUnavailable(f"Stopbar returned HTTP {status}: {decoded.get('code') or decoded}")
+
+    def commit(self, request_id: str, tx_ref: str) -> dict[str, Any]:
+        """Report that an allowed action was broadcast (tx_ref: its tx hash), turning
+        its reservation into committed spend. Retrying with the same tx_ref is safe.
+        Returns the body ({"state": "committed", "late": true} if the reservation
+        had lapsed: the spend is still recorded)."""
+        return self._settle(request_id, "commit", {"tx_ref": tx_ref})
+
+    def release(self, request_id: str, reason: str | None = None) -> dict[str, Any]:
+        """Abandon an allowed action and free its reservation. Retrying is safe."""
+        return self._settle(request_id, "release", {"reason": reason} if reason else {})
+
     # ---- internals ----
+
+    def _settle(self, request_id: str, verb: str, body: dict[str, Any]) -> dict[str, Any]:
+        status, decoded = self._post(f"/v1/actions/{_seg(request_id)}/{verb}", body)
+        if status == 200:
+            return decoded
+        self._refusal(status, decoded)
+        raise StopbarUnavailable(f"Stopbar returned HTTP {status}: {decoded.get('code') or decoded}")
+
+    @staticmethod
+    def _refusal(status: int, decoded: dict[str, Any]) -> None:
+        """Raise the typed error for a non-decision refusal, if it is one."""
+        if status == 401 or (status == 403 and decoded.get("code")):
+            raise StopbarAuthError(f"Stopbar auth failed (HTTP {status}): {decoded.get('code') or decoded.get('message')}")
+        if status in (400, 404, 409, 410, 413, 415):
+            raise StopbarRequestError(status, decoded)
 
     def _decision(self, status: int, decoded: dict[str, Any]) -> Decision:
         if status == 200:
@@ -161,11 +236,14 @@ class Client:
         raise StopbarUnavailable(f"Stopbar returned HTTP {status}: {decoded.get('code') or decoded.get('message') or decoded}")
 
     def _post(self, path: str, body: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
+        return self._request("POST", path, body)
+
+    def _request(self, method: str, path: str, body: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
         data = json.dumps(body).encode() if body is not None else None
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json"} if data is not None else {}
         if self.api_key:
             headers["Authorization"] = "Bearer " + self.api_key
-        req = urllib.request.Request(self.base_url + path, data=data, method="POST", headers=headers)
+        req = urllib.request.Request(self.base_url + path, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 return r.status, _json(r.read())
@@ -195,6 +273,20 @@ class Session:
 
     def approve(self, request_id: str) -> Decision:
         return self.client.approve(request_id)
+
+    def poll(self, request_id: str) -> EscalationStatus:
+        return self.client.poll(request_id)
+
+    def commit(self, request_id: str, tx_ref: str) -> dict[str, Any]:
+        return self.client.commit(request_id, tx_ref)
+
+    def release(self, request_id: str, reason: str | None = None) -> dict[str, Any]:
+        return self.client.release(request_id, reason)
+
+
+def _seg(request_id: str) -> str:
+    """A request id as one URL path segment."""
+    return urllib.parse.quote(request_id, safe="")
 
 
 def _json(raw: bytes) -> dict[str, Any]:
