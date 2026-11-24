@@ -115,7 +115,7 @@ python3 scripts/e2e_corpus.py "$BIN/stopbard" "$BIN/stopbar"
 step "reservation + escalation lifecycle over HTTP: commit/release, poll, reject/approve CLI, timeout (CS-105/151/152)"
 python3 scripts/e2e_lifecycle.py "$BIN/stopbard" "$BIN/stopbar"
 
-step "destination registry: stopbar contacts -> state file -> live stopbard, audited (CS-133)"
+step "destination registry: live contact edits over the authenticated API, approval + cooling-off, audited (CS-133/134)"
 python3 scripts/e2e_contacts.py "$BIN/stopbard" "$BIN/stopbar"
 
 step "circuit breaker over HTTP: trip -> CIRCUIT_OPEN, 1-of-2 reset refused, 2-of-2 resets, alert metric, audited (CS-124)"
