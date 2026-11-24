@@ -50,18 +50,24 @@ type breakerResetVector struct {
 	Result string             `json:"result"`
 }
 
-// quorumVector exercises Tally directly (spec §9): Keys are the available
-// kids, Votes lists which key votes and in what order (as an index into
-// Keys, so the same index may repeat — "same key twice"), and RejectAt
-// marks positions in Votes (not Keys) that cast a reject instead of an
-// approve.
+// quorumVector exercises Tally directly (spec §9), independent of any
+// KeySet: each vote carries its own Kid, Owner and Decision, cast in
+// order. ExcludeRequesterKeyID/AgentID (optional) are the requester
+// identity Tally must never count a vote for (defence in depth; spec §7).
 type quorumVector struct {
-	Name     string   `json:"name"`
-	Keys     []string `json:"keys"`
-	Votes    []int    `json:"votes"`
-	RejectAt []int    `json:"reject_at"`
-	Quorum   int      `json:"quorum"`
-	Result   string   `json:"result"` // Pending, Approved or Rejected
+	Name                    string           `json:"name"`
+	Votes                   []quorumVoteSpec `json:"votes"`
+	ExcludeRequesterKeyID   string           `json:"exclude_requester_key_id,omitempty"`
+	ExcludeRequesterAgentID string           `json:"exclude_requester_agent_id,omitempty"`
+	Quorum                  int              `json:"quorum"`
+	Result                  string           `json:"result"` // Pending, Approved or Rejected
+}
+
+type quorumVoteSpec struct {
+	Kid          string `json:"kid"`
+	OwnerAgentID string `json:"owner_agent_id,omitempty"`
+	OwnerKeyID   string `json:"owner_key_id,omitempty"`
+	Decision     string `json:"decision"`
 }
 
 type vectorFile struct {
@@ -188,13 +194,39 @@ func buildVectors(t *testing.T) vectorFile {
 	addReset("malformed_signature_encoding", func() SignedBreakerReset { e := goodReset; e.Sig = "***invalid***"; return e }(), rwant, nowU, CodeMalformed)
 	addReset("tampered_trip_id_under_valid_signature", func() SignedBreakerReset { e := goodReset; e.TripRequestID = "req_tampered"; return e }(), rwant, nowU, CodeBadSignature)
 
-	// ---- quorum (M-of-N) ----
+	// ---- quorum (M-of-N, distinct OWNERS — spec §9) ----
+	av := func(kid, ownerKeyID string, decision string) quorumVoteSpec {
+		return quorumVoteSpec{Kid: kid, OwnerKeyID: ownerKeyID, Decision: decision}
+	}
+	bv := func(kid, ownerAgentID string, decision string) quorumVoteSpec {
+		return quorumVoteSpec{Kid: kid, OwnerAgentID: ownerAgentID, Decision: decision}
+	}
 	vf.Quorums = []quorumVector{
-		{Name: "below_quorum_pending", Keys: []string{alice.Kid, bob.Kid}, Votes: []int{0}, Quorum: 2, Result: "Pending"},
-		{Name: "quorum_met_approved", Keys: []string{alice.Kid, bob.Kid}, Votes: []int{0, 1}, Quorum: 2, Result: "Approved"},
-		{Name: "reject_wins_regardless_of_quorum", Keys: []string{alice.Kid, bob.Kid}, Votes: []int{0, 1}, RejectAt: []int{1}, Quorum: 2, Result: "Rejected"},
-		{Name: "same_key_twice_no_double_count", Keys: []string{alice.Kid}, Votes: []int{0, 0}, Quorum: 2, Result: "Pending"},
-		{Name: "already_resolved_approve_after_reject", Keys: []string{alice.Kid, bob.Kid}, Votes: []int{0, 1}, RejectAt: []int{0}, Quorum: 1, Result: "Rejected"},
+		{Name: "below_quorum_pending", Votes: []quorumVoteSpec{av("k1", "ak_alice", Approve)}, Quorum: 2, Result: "Pending"},
+		{Name: "quorum_met_approved", Votes: []quorumVoteSpec{av("k1", "ak_alice", Approve), bv("k2", "bob-agent", Approve)}, Quorum: 2, Result: "Approved"},
+		{Name: "reject_wins_regardless_of_quorum", Votes: []quorumVoteSpec{av("k1", "ak_alice", Approve), bv("k2", "bob-agent", Reject)}, Quorum: 2, Result: "Rejected"},
+		{Name: "same_key_twice_no_double_count", Votes: []quorumVoteSpec{av("k1", "ak_alice", Approve), av("k1", "ak_alice", Approve)}, Quorum: 2, Result: "Pending"},
+		{Name: "already_resolved_approve_after_reject", Votes: []quorumVoteSpec{av("k1", "ak_alice", Reject), bv("k2", "bob-agent", Approve)}, Quorum: 1, Result: "Rejected"},
+		{
+			Name:   "two_keys_same_owner_count_once",
+			Votes:  []quorumVoteSpec{av("key-a", "ak_shared", Approve), av("key-b", "ak_shared", Approve)},
+			Quorum: 2, Result: "Pending",
+		},
+		{
+			Name:   "distinct_owners_reach_quorum",
+			Votes:  []quorumVoteSpec{av("key-a", "ak_alice2", Approve), bv("key-b", "carol-agent", Approve)},
+			Quorum: 2, Result: "Approved",
+		},
+		{
+			Name:                  "requester_owned_key_alongside_two_others_only_two_count",
+			ExcludeRequesterKeyID: "ak_requester",
+			Votes: []quorumVoteSpec{
+				av("key-requester", "ak_requester", Approve), // excluded: SELF_APPROVAL, never counted
+				av("key-a", "ak_alice3", Approve),
+				bv("key-b", "dave-agent", Approve),
+			},
+			Quorum: 2, Result: "Approved", // only the two non-requester owners count
+		},
 	}
 
 	sort.SliceStable(vf.Escalations, func(i, j int) bool { return vf.Escalations[i].Name < vf.Escalations[j].Name })
@@ -265,22 +297,15 @@ func checkResult(t *testing.T, err error, want string) {
 
 func runQuorumVector(t *testing.T, qv quorumVector) {
 	t.Helper()
-	rejectAt := map[int]bool{}
-	for _, pos := range qv.RejectAt {
-		rejectAt[pos] = true
-	}
-	tally := NewTally(qv.Quorum)
+	tally := NewTally(qv.Quorum, qv.ExcludeRequesterKeyID, qv.ExcludeRequesterAgentID)
 	now := time.Now()
 	var res Resolution
-	for pos, keyIdx := range qv.Votes {
-		decision := Approve
-		if rejectAt[pos] {
-			decision = Reject
-		}
+	for i, vs := range qv.Votes {
+		v := Vote{Kid: vs.Kid, Owner: Owner{AgentID: vs.OwnerAgentID, KeyID: vs.OwnerKeyID}, Decision: vs.Decision, Expiry: now.Add(time.Hour)}
 		var err error
-		res, err = tally.Add(Vote{Kid: qv.Keys[keyIdx], Decision: decision, Expiry: now.Add(time.Hour)}, now)
-		if err != nil && err != ErrDuplicateVote && err != ErrAlreadyResolved {
-			t.Fatalf("vote %d: unexpected error %v", pos, err)
+		res, err = tally.Add(v, now)
+		if _, isVerifyErr := err.(*VerifyError); err != nil && err != ErrDuplicateVote && err != ErrAlreadyResolved && !isVerifyErr {
+			t.Fatalf("vote %d: unexpected error %v", i, err)
 		}
 	}
 	got := map[Outcome]string{Pending: "Pending", Approved: "Approved", Rejected: "Rejected"}[res.Outcome]

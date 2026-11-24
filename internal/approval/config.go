@@ -22,6 +22,16 @@ type Owner struct {
 // empty reports whether o declares no owner at all.
 func (o Owner) empty() bool { return o.AgentID == "" && o.KeyID == "" }
 
+// identity is the canonical, exact identity string Tally dedupes owners on
+// (spec §9): two Keys whose Owner carries exactly the same AgentID and
+// KeyID count as one owner for quorum, no matter how many separate key
+// files or Kids they are configured under. It is deliberately an exact
+// match, not an either-field match like the self-approval check
+// (selfApproval) — quorum dedup only merges two approver entries that an
+// operator configured identically, never two entries that merely share
+// one of two fields.
+func (o Owner) identity() string { return o.AgentID + "\x00" + o.KeyID }
+
 // Key is one configured approver: the public key a signature is checked
 // against, the tenant it may approve for, and the requester identity it is
 // bound to (Owner), used by the self-approval check (spec §7). ID is an

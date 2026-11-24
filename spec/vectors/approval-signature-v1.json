@@ -573,75 +573,140 @@
   "quorums": [
     {
       "name": "below_quorum_pending",
-      "keys": [
-        "F9f2ktCx_G7E4o9nNDYEdZkBB6Z6MM6EHzVLfy8qgkM",
-        "x8VT0azckxPj85bRFyQzf5oMbLaSsEbd986maQBomWI"
-      ],
       "votes": [
-        0
+        {
+          "kid": "k1",
+          "owner_key_id": "ak_alice",
+          "decision": "approve"
+        }
       ],
-      "reject_at": null,
       "quorum": 2,
       "result": "Pending"
     },
     {
       "name": "quorum_met_approved",
-      "keys": [
-        "F9f2ktCx_G7E4o9nNDYEdZkBB6Z6MM6EHzVLfy8qgkM",
-        "x8VT0azckxPj85bRFyQzf5oMbLaSsEbd986maQBomWI"
-      ],
       "votes": [
-        0,
-        1
+        {
+          "kid": "k1",
+          "owner_key_id": "ak_alice",
+          "decision": "approve"
+        },
+        {
+          "kid": "k2",
+          "owner_agent_id": "bob-agent",
+          "decision": "approve"
+        }
       ],
-      "reject_at": null,
       "quorum": 2,
       "result": "Approved"
     },
     {
       "name": "reject_wins_regardless_of_quorum",
-      "keys": [
-        "F9f2ktCx_G7E4o9nNDYEdZkBB6Z6MM6EHzVLfy8qgkM",
-        "x8VT0azckxPj85bRFyQzf5oMbLaSsEbd986maQBomWI"
-      ],
       "votes": [
-        0,
-        1
-      ],
-      "reject_at": [
-        1
+        {
+          "kid": "k1",
+          "owner_key_id": "ak_alice",
+          "decision": "approve"
+        },
+        {
+          "kid": "k2",
+          "owner_agent_id": "bob-agent",
+          "decision": "reject"
+        }
       ],
       "quorum": 2,
       "result": "Rejected"
     },
     {
       "name": "same_key_twice_no_double_count",
-      "keys": [
-        "F9f2ktCx_G7E4o9nNDYEdZkBB6Z6MM6EHzVLfy8qgkM"
-      ],
       "votes": [
-        0,
-        0
+        {
+          "kid": "k1",
+          "owner_key_id": "ak_alice",
+          "decision": "approve"
+        },
+        {
+          "kid": "k1",
+          "owner_key_id": "ak_alice",
+          "decision": "approve"
+        }
       ],
-      "reject_at": null,
       "quorum": 2,
       "result": "Pending"
     },
     {
       "name": "already_resolved_approve_after_reject",
-      "keys": [
-        "F9f2ktCx_G7E4o9nNDYEdZkBB6Z6MM6EHzVLfy8qgkM",
-        "x8VT0azckxPj85bRFyQzf5oMbLaSsEbd986maQBomWI"
-      ],
       "votes": [
-        0,
-        1
-      ],
-      "reject_at": [
-        0
+        {
+          "kid": "k1",
+          "owner_key_id": "ak_alice",
+          "decision": "reject"
+        },
+        {
+          "kid": "k2",
+          "owner_agent_id": "bob-agent",
+          "decision": "approve"
+        }
       ],
       "quorum": 1,
       "result": "Rejected"
+    },
+    {
+      "name": "two_keys_same_owner_count_once",
+      "votes": [
+        {
+          "kid": "key-a",
+          "owner_key_id": "ak_shared",
+          "decision": "approve"
+        },
+        {
+          "kid": "key-b",
+          "owner_key_id": "ak_shared",
+          "decision": "approve"
+        }
+      ],
+      "quorum": 2,
+      "result": "Pending"
+    },
+    {
+      "name": "distinct_owners_reach_quorum",
+      "votes": [
+        {
+          "kid": "key-a",
+          "owner_key_id": "ak_alice2",
+          "decision": "approve"
+        },
+        {
+          "kid": "key-b",
+          "owner_agent_id": "carol-agent",
+          "decision": "approve"
+        }
+      ],
+      "quorum": 2,
+      "result": "Approved"
+    },
+    {
+      "name": "requester_owned_key_alongside_two_others_only_two_count",
+      "votes": [
+        {
+          "kid": "key-requester",
+          "owner_key_id": "ak_requester",
+          "decision": "approve"
+        },
+        {
+          "kid": "key-a",
+          "owner_key_id": "ak_alice3",
+          "decision": "approve"
+        },
+        {
+          "kid": "key-b",
+          "owner_agent_id": "dave-agent",
+          "decision": "approve"
+        }
+      ],
+      "exclude_requester_key_id": "ak_requester",
+      "quorum": 2,
+      "result": "Approved"
     }
   ]
 }
