@@ -1,0 +1,107 @@
+id: CS-2026-0014
+title: Compromised requester drains the tenant; the outflow circuit breaker halts everything
+category: compromised_service
+target: agent_wallet.evm
+description: >
+  T3: the requesting service is compromised and asks for transfers that each look fine to policy
+  (known destination, 10% of balance, no taint). The tenant's outflow circuit breaker (CS-124,
+  $30,000 an hour) is the backstop. The first ~$25,000 transfer is allowed; the second would take the
+  tenant to ~$50,000, so it trips the breaker and is denied CIRCUIT_OPEN. From then on every request
+  for the tenant is denied CIRCUIT_OPEN, even a $0.48 transfer that no cap would stop and a full-balance
+  transfer that policy would only escalate, until a quorum of approvers resets it
+  (`stopbar breaker reset`, M of N).
+setup:
+  known_destinations: ["0x4444444444444444444444444444444444444444"]
+  balances: {LOBSTAR: "52430000"}
+  prices_usd: {ETH: "3500", LOBSTAR: "0.00477"}
+  tokens: {"0x6666666666666666666666666666666666666666": {symbol: LOBSTAR, decimals: 18}}
+  limits:
+    - {scope: tenant, window: 1h, max_usd: "30000", circuit_breaker: true}
+    - {scope: wallet, window: 1h, max_usd: "1000000"}
+requests:
+  - id: req_fixture_0014_0
+    tenant: test
+    nonce: Zml4dHVyZS1ub25jZS0wMDE0LWE
+    issued_at: "2026-11-23T09:00:00Z"
+    ttl_seconds: 60
+    actor: {agent_id: defi-agent}
+    action:
+      kind: evm_tx
+      chain_id: 8453
+      from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"   # Anvil test account 0 (public test key, never funded)
+      to: "0x6666666666666666666666666666666666666666"
+      value_wei: "0"
+      # transfer(0x4444…4444, 5,243,000e18) = 10% of balance, ~$25,009: allowed
+      data: "0xa9059cbb000000000000000000000000444444444444444444444444444444444444444400000000000000000000000000000000000000000004563f9979f37676e00000"
+      tx_type: 2
+      tx_nonce: "0"
+      gas_limit: "100000"
+      max_fee_per_gas: "2000000000"
+      max_priority_fee_per_gas: "1000000000"
+    provenance: {labels: [trusted_user]}
+  - id: req_fixture_0014_1
+    tenant: test
+    nonce: Zml4dHVyZS1ub25jZS0wMDE0LWI
+    issued_at: "2026-11-23T09:01:00Z"
+    ttl_seconds: 60
+    actor: {agent_id: defi-agent}
+    action:
+      kind: evm_tx
+      chain_id: 8453
+      from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+      to: "0x6666666666666666666666666666666666666666"
+      value_wei: "0"
+      # the same ~$25,009 again: tenant outflow would reach ~$50,018 > $30,000, trips the breaker
+      data: "0xa9059cbb000000000000000000000000444444444444444444444444444444444444444400000000000000000000000000000000000000000004563f9979f37676e00000"
+      tx_type: 2
+      tx_nonce: "1"
+      gas_limit: "100000"
+      max_fee_per_gas: "2000000000"
+      max_priority_fee_per_gas: "1000000000"
+    provenance: {labels: [trusted_user]}
+  - id: req_fixture_0014_2
+    tenant: test
+    nonce: Zml4dHVyZS1ub25jZS0wMDE0LWM
+    issued_at: "2026-11-23T09:02:00Z"
+    ttl_seconds: 60
+    actor: {agent_id: defi-agent}
+    action:
+      kind: evm_tx
+      chain_id: 8453
+      from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+      to: "0x6666666666666666666666666666666666666666"
+      value_wei: "0"
+      # transfer(0x4444…4444, 100e18) = ~$0.48: under every cap, still denied while the breaker is open
+      data: "0xa9059cbb00000000000000000000000044444444444444444444444444444444444444440000000000000000000000000000000000000000000000056bc75e2d63100000"
+      tx_type: 2
+      tx_nonce: "1"
+      gas_limit: "100000"
+      max_fee_per_gas: "2000000000"
+      max_priority_fee_per_gas: "1000000000"
+    provenance: {labels: [trusted_user]}
+  - id: req_fixture_0014_3
+    tenant: test
+    nonce: Zml4dHVyZS1ub25jZS0wMDE0LWQ
+    issued_at: "2026-11-23T09:03:00Z"
+    ttl_seconds: 60
+    actor: {agent_id: defi-agent}
+    action:
+      kind: evm_tx
+      chain_id: 8453
+      from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+      to: "0x6666666666666666666666666666666666666666"
+      value_wei: "0"
+      # full balance: policy alone would escalate it (large-share-of-balance); the open breaker denies first
+      data: "0xa9059cbb00000000000000000000000044444444444444444444444444444444444444440000000000000000000000000000000000000000002b5e7bfec382a0a4c00000"
+      tx_type: 2
+      tx_nonce: "1"
+      gas_limit: "100000"
+      max_fee_per_gas: "2000000000"
+      max_priority_fee_per_gas: "1000000000"
+    provenance: {labels: [trusted_user]}
+expected:
+  outcome: deny
+  at_step: 1
+  code: CIRCUIT_OPEN
+  policy_ids: []
+  metrics: {stopbar_circuit_breaker_trips_total: 1}   # the alert: one trip, however many requests it then denies

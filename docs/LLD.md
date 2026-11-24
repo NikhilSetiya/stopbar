@@ -21,7 +21,7 @@ stopbar/
 │   ├── model/               # ActionRequest, Decision, IntentSummary, AuditRecord
 │   ├── normalize/           # raw → ActionRequest
 │   ├── decode/evm/          # ABI decode, risk flags
-│   ├── enrich/              # price, balance, velocity snapshot, provenance, deploy age
+│   ├── enrich/              # price, balance, destination registry, slippage, provenance, deploy age
 │   ├── policy/              # Cedar schema, loader, evaluator, bundle hashing
 │   ├── limiter/             # sliding windows, reserve/commit, circuit breaker
 │   ├── escalate/            # routing, approvals, channels (cli, slack, telegram)
@@ -49,8 +49,15 @@ As implemented in `internal/engine` (CS-104). Components are consumed through th
 ```go
 // engine.Engine implements gateway.Evaluator. Evaluate always returns a decision.
 Evaluate(ctx, model.ActionRequest) (model.Decision, error)
-Commit(ctx, requestID, txRef string) error
-Release(ctx, requestID string) error
+Commit(ctx, requestID, txRef string) error   // POST /v1/actions/{id}/commit (CS-105)
+Release(ctx, requestID, reason string) error // POST /v1/actions/{id}/release
+Owner(requestID string) (tenant, agent string, ok bool) // who may settle it
+// Escalation lifecycle (CS-151/152, §9): approve re-runs; exec (gatekeeper: sign + commit) runs on allow
+// with the recorded requester identity, which the token binds (decision-token v2), not the approver.
+Approve(ctx, id, approver string) (model.Decision, error)
+ApproveWith(ctx, id, approver string, exec Execute) (model.Decision, error)
+Reject(ctx, id, approver string) (model.Decision, error)
+Status(ctx, id string) (model.EscalationStatus, error) // GET /v1/decisions/{id}
 
 type Decoder interface {
     Supports(a model.Action) bool
@@ -68,9 +75,16 @@ type Limiter interface { // derives its own keys/amounts from the enriched reque
     Reserve(ctx, id string, req model.EnrichedRequest, ttl time.Duration, rec *model.AuditEntry) error // ErrCapExceeded, ErrCircuitOpen
     Commit(ctx, id, txRef string, rec *model.AuditEntry) error
     Release(ctx, id string, rec *model.AuditEntry) error // ErrUnknownReservation / ErrReservationExpired: nothing held
+    Owner(id string) (tenant, agent string, ok bool)     // the reservation's requester (CS-105)
+}
+type PendingStore interface { // escalations; Put writes the record AND its audit record in one transaction
+    Put(ctx, e PendingEscalation, rec *model.AuditEntry) error
+    Get(ctx, id string) (PendingEscalation, bool, error)
 }
 type Signer interface { // decision.Signer: Ed25519, stdlib, compact JWS hand-rolled (no JOSE library)
-    Sign(ctx, req model.ActionRequest, d model.Decision) (token string, err error) // spec/decision-token-v1.md
+    // requester is the authenticated auth.Identity (zero when auth is off),
+    // never the body's actor. spec/decision-token-v2.md
+    Sign(ctx, requester auth.Identity, req model.ActionRequest, d model.Decision) (token string, err error)
 }
 // Keys are served as decision.JWK (our own RFC 8037 OKP type, with a status
 // of active or retired) at /v1/keys. There is no jose.JSONWebKey in the core.
@@ -144,9 +158,12 @@ Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decod
   "destination": "0x…",
   "flags": ["new_destination"],          // see §6.2
   "human": "Transfer 50,000 DRB (~$174,000) on Base to 0x9f3…c21 (never seen before).",
+  "swap": null,                          // swaps only: {exact_in, token_in, amount_in, token_out, amount_out}
   "payload_hash": "sha256:…"
 }
 ```
+
+`swap` carries a swap's terms in raw units (token `""` = native) so the enricher can price both sides for `excessive_slippage` (§6.2). Exact-in: `amount_in` is exact and `amount_out` the minimum accepted. Exact-out: `amount_out` is exact and `amount_in` the most paid. Enrichers may append to `flags` (the registry and limiter flags below) but never change anything else in the intent.
 
 ### 3.3 EnrichedRequest (policy context)
 
@@ -156,8 +173,8 @@ Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decod
 | `pct_of_balance` | decimal | balance provider |
 | `approval_usd?` | decimal | price oracle. It's the value a **bounded** approval lets the spender move. It's absent for unlimited approvals and for anything that isn't an approval, so a policy must test `context has approval_usd`. An approval itself counts as $0 of spend (`amount_usd`); its risk lives in this field and in the decoder's flags. The starter pack's `bounded-approval` permits ≤ $1,000 to a known spender. |
 | `velocity.{1m,1h,24h}.usd` / `.count` | decimal/int | limiter snapshot |
-| `destination.known` | bool | destination registry |
-| `destination.similar_to_known` | bool | address-similarity check |
+| `destination.known` | bool | destination registry (§6.4). The sending wallet itself always counts as known. |
+| `destination.similar_to_known` | bool | address-similarity check against the registry (§6.4); false when known |
 | `taint` | set<string> | provenance |
 | `minutes_since_code_change` | int/null | deploy events (Phase 4) |
 | `intent.flags` | set<string> | decoder |
@@ -175,7 +192,7 @@ Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decod
   "reservation_id": null,
   "issued_at": "…",
   "expires_at": "…",                        // = issued_at + 60s default
-  "token": "…"                              // allow only: decision token (spec/decision-token-v1.md)
+  "token": "…"                              // allow only: decision token (spec/decision-token-v2.md)
 }
 ```
 
@@ -218,14 +235,19 @@ Canonicalisation: RFC 8785 (JCS).
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/v1/evaluate` | Evaluate an ActionRequest. Returns the Decision for every outcome: `200` allow (+ signed tx in gatekeeper mode), `202` escalate (with `escalation_id`), `403` deny. |
-| GET | `/v1/decisions/{request_id}` | Poll decision (for escalations) |
-| POST | `/v1/actions/{request_id}/commit` | Report broadcast tx hash → commit reservation |
-| POST | `/v1/actions/{request_id}/release` | Abandon → release reservation |
-| POST | `/v1/approvals/{escalation_id}` | Submit signed approval |
+| GET | `/v1/decisions/{request_id}` | Poll an escalation (CS-152): `model.EscalationStatus` (`spec/schemas/escalation_status.v1.schema.json`) with `state` pending / allowed / denied / expired and the decision. Status as safe as evaluate's: `202` pending, `200` allowed (decision carries the token, and the signed tx in gatekeeper mode), `403` denied or expired. Visible to the requester (evaluate key, same tenant and agent) and its tenant's approvers; anyone else gets `404`. A pending escalation past its window is resolved as expired (audited) when polled. |
+| POST | `/v1/actions/{request_id}/commit` | `{"tx_ref": "0x…"}`: report the broadcast tx → commit reservation (CS-105). `200 {"state":"committed"}`; same tx_ref again `200` (idempotent); a lapsed reservation still records the spend (`200`, `"late": true`); another tx_ref `409 CONFLICT`; released/unknown `404` |
+| POST | `/v1/actions/{request_id}/release` | Optional `{"reason": "…"}`: abandon → release reservation. `200 {"state":"released"}`; again `200` (no-op, nothing audited); committed `409 CONFLICT`; lapsed `410 RESERVATION_EXPIRED`; unknown `404` |
+| POST | `/v1/approvals/{escalation_id}` | Approve: re-evaluate against current state (§9); status is the decision's. Approve-scoped key, same tenant, not the requester |
+| POST | `/v1/approvals/{escalation_id}/reject` | Reject (CS-151): `403` deny with `APPROVAL_REJECTED`, audited with the approver. Same key rules as approve |
+| GET | `/v1/breakers/{tenant}` | Circuit breaker status (CS-124, §7.3) |
+| POST | `/v1/breakers/{tenant}/reset` | One approver's reset vote: `200` closed (quorum met), `202` recorded but still open |
 | POST | `/v1/events/deploy` | Ingest deploy/change event (Phase 4) |
 | GET | `/v1/audit?from=&to=` | Export audit range |
 | GET | `/v1/keys` | JWKS of decision-signing keys |
 | GET | `/healthz`, `/metrics` | Ops |
+
+**Lifecycle routes need authentication** (they act on another request's state; `503 ENGINE_UNAVAILABLE` with auth off). Commit/release take the requester's own `evaluate`-scoped key: the reservation's tenant and agent must match, or the answer is `404` and the attempt is audited (`auth_reject`), because another agent releasing it would free capacity a still-valid token can spend. Approve/reject take an `approve`-scoped key of the escalation's tenant. The settle body gets the evaluate checks (JSON, ≤4 KB, no duplicate or case-folded keys, no unknown fields).
 
 Error body: `{"code": "NONCE_REPLAYED", "message": "…", "request_id": "…", "problems": ["…"]}`. `request_id` appears once it is known, and `problems` only for `INVALID_REQUEST`, listing every problem at once.
 
@@ -244,7 +266,12 @@ Error body: `{"code": "NONCE_REPLAYED", "message": "…", "request_id": "…", "
 | `EXPIRED` | 400 | `now ≥ issued_at + ttl_seconds + 30 s` |
 | `ISSUED_IN_FUTURE` | 400 | `issued_at > now + 30 s` |
 | `NONCE_REPLAYED` | 400 | Nonce already used by this tenant and agent within retention |
-| `ENGINE_UNAVAILABLE` | 503 | No engine configured |
+| `UNAUTHENTICATED` / `FORBIDDEN_SCOPE` / `IDENTITY_MISMATCH` | 401 / 403 / 403 | CS-103 |
+| `CONFLICT` | 409 | Commit with another tx_ref, or release, of a committed reservation (CS-105) |
+| `ALREADY_RESOLVED` | 409 | Approve/reject of an escalation already allowed, denied or expired (CS-152) |
+| `RESERVATION_EXPIRED` | 410 | Release of a reservation that already lapsed (nothing held) |
+| `DUPLICATE_VOTE` | 409 | Breaker reset: the approver already holds a live vote on this trip (CS-124, §7.3) |
+| `ENGINE_UNAVAILABLE` | 503 | No engine configured (or, for lifecycle routes, no auth) |
 | `INTERNAL` | 500 | Engine error or panic, the engine returned an invalid decision or one for a different request, or the nonce store failed |
 
 **The status code alone is safe to act on.** A client that only checks whether the status is 200 can never read a deny as an allow:
@@ -383,10 +410,12 @@ Implemented in `internal/decode/evm` (CS-141/142). It is stdlib-only, like the t
 | `wallet_admin` | Safe owner, threshold, module or guard change |
 | `third_party_from` | `transferFrom`-style move whose source isn't the sender (e.g. spending someone's allowance) |
 | `multi_transfer` | more than one outflow in one transaction |
-| `new_destination` / `similar_destination` / `first_time_contract` | need the tenant's registry, so they're added by the enricher (CS-133), not the decoder |
+| `new_destination` / `similar_destination` | added by the destination registry enricher (§6.4, CS-133), not the decoder: destination not registered (and not the sender) / not registered but similar to a registered address |
+| `first_time_contract` | needs a per-tenant record of contracts called (CS-142) |
 | `opaque` | nesting > depth, or a Universal Router command that isn't decoded |
 | `min_out_zero` | exact-in swap with minimum output 0 (Uniswap V2/V3 routers, SwapRouter02, Universal Router) |
-| `excessive_slippage` | swap minimum output below quoted output × (1 − tenant max slippage, default 3%). Needs a quote, so it's not implemented yet. |
+| `excessive_slippage` | added by the price enricher (CS-145): for any swap at any depth (`IntentSummary.swap`), the out side is worth less than (1 − tenant max slippage, default 3%) of the in side at oracle prices. Exact-in compares the minimum output with the input; exact-out the output with the maximum input. Wrapped native is priced as native. A swap whose tokens can't both be priced sets `price_stale`, so the starter pack escalates instead of trusting an unchecked limit. |
+| `soft_cap_exceeded` | added by the limiter: the request would cross a soft (`escalate`) cap (§7.3a) |
 | `excessive_fee` | fee terms above the chain's limits (`evm.Chains`) |
 | `unknown_call` | selector unknown |
 
@@ -394,11 +423,27 @@ Implemented in `internal/decode/evm` (CS-141/142). It is stdlib-only, like the t
 
 Template per `kind`, amounts formatted with decimals and USD, addresses shortened `0x9f3…c21` **plus** a 6-word checksum phrase derived from the full address (defeats visual look-alike). The rendered text and `payload_hash` are sent together; approvals sign over `payload_hash`.
 
+### 6.4 Destination registry (CS-133, FR-IR-2)
+
+Implemented in `internal/enrich` (`Registry`). It is an engine `Enricher`, wired after the price/balance enricher and before the limiter (whose unknown-destination caps read `destination.known`), in both the chain and the devstub configuration.
+
+- **Storage:** bucket `destinations_v1` in the shared state file, keyed by quoted tenant + lowercase address, value `{address, label, source, added_at}`. It is read on every evaluation, so a change applies to the next request.
+- **Audit:** every add or remove writes a `destination_change` record (`{op, tenant, address, label?, source}`) **in the same transaction** as the change. A no-op change (adding a registered address, removing an absent one) writes nothing.
+- **Facts:** `known` = the destination is registered for the request's tenant, or is the sending wallet. `similar_to_known` = not known, and it shares at least 4 leading **and** 4 trailing hex digits with a registered address, or at least 8 at either end (what wallets and explorers show; a random address matches by chance with probability ~3 × 16⁻⁸). A request with no destination is neither, and tool calls are skipped. The starter pack escalates `address-poisoning` (`dest_similar_to_known && !dest_known`).
+- **Changes:** `stopbar contacts add|remove <address> --state-dir DIR --tenant T [--label L] [--decision-key FILE]` and `stopbar contacts list`. They edit the state file directly, never over the API: registering a destination loosens policy, so it requires the operator's state directory, not a requester credential (a compromised requester, T3, could otherwise allowlist its own address). stopbard holds the file lock, so it must be stopped. `--decision-key` signs an audit checkpoint over the change; otherwise stopbard's next exit checkpoint covers it. With `-dev-world`, the world's `known_destinations` seed the registry for `-tenant` (added if missing, `source: dev-world`, audited).
+
 ## 7. Limiter
 
 ### 7.1 Keys and windows
 
-Key = `(tenant, scope, id, window)` where scope ∈ {`agent`, `wallet`, `wallet+asset`, `destination`, `tenant`}. `destination` scope carries a `max_count` by default (e.g. 5 per 24h for non-allowlisted destinations) so salami draining below per-tx caps is bounded. Windows: 1m, 1h, 24h (configurable).
+Key = `(tenant, scope, id, window)` where scope ∈ {`agent`, `wallet`, `wallet+asset`, `destination`, `tenant`}. `destination` scope carries a `max_count` by default (5 per 24h for destinations not in the registry, as a soft cap that escalates; CS-145) so salami draining below per-tx caps is bounded. Windows: 1m, 1h, 24h (configurable).
+
+**Per-transaction caps** (CS-123, FR-LIM-1) use window `tx`: they judge one request on its own and accumulate nothing. They take `max_usd` (value + max fee, like every USD cap), `max_units` (wallet+asset) and `max_pct_of_balance` (`tx` only; a decimal fraction of the wallet's balance of the moved asset). A `tx` rule can't take `max_count`. An unknown balance on a request that moves value is `ErrNoBalance` and fails closed (`FAIL_CLOSED_LIMITER`), like `ErrUnpriced`.
+
+Size is capped twice, on purpose:
+
+- **Soft, in policy context.** `amount_usd` and `pct_of_balance` (§3.3) let a policy escalate, as the starter pack's `large-share-of-balance` does above 20%. That's how the OpenClaw fixture (CS-2026-0002) escalates.
+- **Hard, in limiter config.** A `tx` rule denies with `CAP_EXCEEDED`. Escalations reserve nothing, so a hard cap doesn't change an escalation, but approval (CS-151) re-runs the limiter. A human can waive an escalation, never a cap. Hard caps hold at T3/T4. Policy thresholds hold only as far as the policy author's numbers.
 
 ### 7.2 Algorithm — sliding window with sub-buckets
 
@@ -424,6 +469,35 @@ Amount is two-dimensional `{usd, count}`; caps can be set on either. Token-count
 
 `tenant` scope with a hard outflow cap per 1h. On breach: all subsequent `evaluate` → deny `CIRCUIT_OPEN` until M-of-N reset. Emits high-severity alert.
 
+Implemented in CS-124 (`internal/limiter/breaker.go`):
+
+- **Config:** a tenant-scope rule with `circuit_breaker: true` (window 1m, 1h or 24h, never `tx`). Breaker rules are checked before every other cap.
+- **Trip:** a `Reserve` that would push the tenant over that rule trips the breaker and returns `ErrCircuitOpen`, so the request is denied `CIRCUIT_OPEN`.
+  - The trip is written to bbolt (`limiter_breakers_v1`) in the same transaction as an audit record of type `breaker` (`event: trip`).
+  - The trip logs at high severity and increments `stopbar_circuit_breaker_trips_total` on `/metrics`. Alert on any increase.
+  - If the trip can't be written, the breaker still opens in memory (failing closed) and the request denies `FAIL_CLOSED_AUDIT`.
+- **While open:** the engine asks `Breaker.CircuitOpen(tenant)` right after normalize, before decode or policy. Every request for the tenant is denied `CIRCUIT_OPEN`, including ones policy would only escalate and approvals of earlier escalations, and `Reserve` refuses too. Other tenants are unaffected. An open breaker survives restart and the window rolling over: only a reset closes it.
+- **Reset (M of N):**
+  - `POST /v1/breakers/{tenant}/reset` records one vote per authenticated approver. Voters use the CS-151 approver API keys (`approve` scope, same tenant). Keys without that scope or tenant get 403, and the rejection is audited.
+  - Each vote is durable and audited (`event: reset_vote`) before it counts, and is bound to the current trip.
+  - An identity that already holds a live vote is refused with `409 DUPLICATE_VOTE`, and nothing is written.
+  - **Votes expire 1 hour after they're cast** (`model.BreakerVoteTTL`; each vote carries `expires_at`). An expired vote no longer counts. `GET` lists it under `expired_votes`, separate from the live `votes`. The next vote discards it and writes an `event: vote_expired` record in the same bbolt transaction as that vote, so a quorum has to be assembled within one hour. `GET` writes nothing.
+  - When `-breaker-quorum` distinct identities hold live votes, the breaker closes (`event: reset`, `stopbar_circuit_breaker_resets_total`). The quorum defaults to 2. stopbard and the limiter both refuse anything below 2 (`model.MinBreakerQuorum`).
+  - The endpoint answers 200 when the vote closed the breaker, 202 when it was recorded below quorum (still open), 404 when the breaker isn't open and 409 for a repeat vote. Reset needs auth even on loopback. `GET /v1/breakers/{tenant}` returns `model.BreakerStatus` (`spec/schemas/breaker_status.v1.schema.json`).
+- **CLI:** `stopbar breaker status --tenant T` and `stopbar breaker reset --tenant T --key K [--key K2 …]`. The reset fails ("reset refused: n of M") while the quorum isn't met.
+- **Tests:**
+  - Corpus CS-2026-0014 trips the breaker over HTTP. The replay checks that every later step keeps denying and that `/metrics` reports the trip.
+  - `scripts/e2e_breaker.py` runs against the live binaries. It checks the quorum-1 refusal, the 1-of-2 refusal, the repeat-vote 409, the 1-hour `expires_at` in `GET` and the 2-of-2 reset.
+  - Expiry itself (vote, more than 1 hour, second vote → still open; two fresh distinct votes → closed; the discard audited with the vote) is unit-tested with an injected clock. stopbard has no clock override, so the e2e can't wait the hour.
+
+**Demo configs** (`research/walletagent/demo.py`, `demo_live.py`, `demo_testnet.py`) each carry a hard per-tx cap (`window: tx`), sized so each journey keeps its outcomes:
+
+| Demo | Per-tx cap | Why the journey is unchanged |
+|---|---|---|
+| `make demo` | `max_usd: 5000`, `max_pct_of_balance: 0.25` | The 0.01 ETH payments fit. The 5 ETH transfer escalates in policy before the limiter runs. The 24h count cap still denies the second payment. |
+| `make demo-live` | `max_usd: 20000`, `max_pct_of_balance: 0.25` | The approved 5 ETH is a tiny share of the 10,000 ETH fork balance and fits under the same $20k as the 1h cap. |
+| `make demo-testnet` | `max_usd: 50000`, `max_pct_of_balance: 0.75` | The approved transfer is 60% of the real balance. |
+
 ### 7.3a Implementation (`internal/limiter`, CS-121/122)
 
 - **One process, one mutex.** `Reserve`, `Commit` and `Release` are serialised. All caps are checked on all five scope keys before anything changes, so a reserve is all-or-nothing.
@@ -435,11 +509,14 @@ Amount is two-dimensional `{usd, count}`; caps can be set on either. Token-count
 - **Windows:** 60 sub-buckets each, counted conservatively. A spend stays counted for up to one sub-bucket (window/60) longer than the window, never shorter.
 - **Lifecycle:**
   - Reserving the same request ID while it is live is a no-op, and re-using a finished ID is `ErrDuplicateReservation`.
-  - Commit or release of an unknown ID returns `ErrUnknownReservation`, and of a lapsed one `ErrReservationExpired`.
+  - Commit or release of an unknown ID returns `ErrUnknownReservation`, and of a lapsed one `ErrReservationExpired`. Committing again with the same tx_ref is a no-op; with another, or releasing a committed one, is `ErrAlreadyCommitted`. Releasing a released one is a no-op (nothing written). These errors live in `model` so the gateway maps them (CS-105).
+  - Each record stores its `tenant` and `agent` (`Owner(id)`), so only the requester can settle it over HTTP. Records from before this field have no owner and cannot be settled over HTTP (fail closed).
   - **A late commit still records the spend**, so loss bounding counts what actually happened.
   - The engine treats unknown or expired IDs on its own best-effort release as "nothing held".
 - **Keys** quote each component, so requester-chosen tenant or agent IDs can't collide. Agent and tenant scopes are only as strong as authentication (CS-103), while wallet scopes are bound to the signing address.
 - **Velocity:** the limiter is also an `Enricher`. It supplies `velocity.{1m,1h,24h}` (committed + reserved, wallet scope) to policy.
+- **Soft caps (`escalate: true`, CS-145):** a rule that escalates instead of denying. The limiter's `Enrich` adds `soft_cap_exceeded` to the intent's flags when the request would exceed one (an unpriced request under a USD soft cap counts as exceeding it), and the starter pack escalates on it (`soft-cap-exceeded`). Approval re-runs enrichment and policy, so an approved request reaches `Reserve` flagged and is let past its soft caps; hard caps still apply. `Reserve` denies an **unflagged** request that would exceed a soft cap (one that raced past `Enrich`), so a soft cap is never crossed without a policy decision that saw the flag. The flag is only a fact: a bundle with no policy on it lets flagged requests through, so its soft caps are advisory (the starter pack escalates). The dev default is the salami cap `{scope: destination, window: 24h, max_count: 5, unknown_destinations_only: true, escalate: true}` (FR-LIM-2a).
+- **Destination rules** skip a request with no destination (nothing to count per destination), and `unknown_destinations_only` rules skip destinations the registry knows (§6.4).
 - **Sweeping costs O(lapsed):** an expiry heap plus a creation-ordered queue for retention (24h + one sub-bucket + max TTL).
 
 ### 7.4 Properties to test
@@ -488,31 +565,33 @@ Rules:
 1. Engine creates `Escalation{id, request_id, intent, payload_hash, required: M, approvers: [..], expires_at}`.
 2. Channel adapters push the rendered intent. Phase 1: CLI (`stopbar approve <id>`) signing with an Ed25519 approver key; Phase 2: Slack/Telegram with deep link to a signing page; Phase 4: WebAuthn passkeys.
 3. Approval payload = `{escalation_id, payload_hash, decision: approve|reject, ts}` signed by approver key. Engine verifies signer ∈ approvers, payload_hash matches, not expired, no duplicates.
-4. Any `reject` → deny. Timeout (default 15m) → deny.
+4. Any `reject` → deny. Timeout (default 15m, `stopbard -pending-ttl`) → deny.
+   **As implemented (CS-151/152):** an escalation is a `PendingEscalation` record (state pending → allowed | denied | expired) written in the same transaction as its audit record: the escalate decision on create; a `decision` deny `APPROVAL_REJECTED` with the approver identity on reject; a `decision` deny `APPROVAL_EXPIRED` on timeout (applied when the record is next touched: poll, approve or reject); an `approval` record with the final decision when an approval allows (in gatekeeper mode after signing and committing, or `denied` if the adapter refuses). Records are kept after resolution so `GET /v1/decisions/{id}` reports the outcome; approve/reject of a resolved one is `409 ALREADY_RESOLVED`. The requester's key may neither approve nor reject (`APPROVAL_SELF_APPROVAL`, audited, stays pending); approvers see only their own tenant. Transitions are serialised, so two approvers cannot both resolve one escalation. If the resolution of an approved allow cannot be recorded, the approval fails closed (`FAIL_CLOSED_AUDIT`, the signed bytes never leave). Approvals today are API keys with the `approve` scope; Ed25519-signed approval payloads (step 3) and quorum are still to come.
 5. **Approval re-evaluates against current state.** It does not replay the old decision. When quorum is reached, the engine re-runs **enrich → policy → limiter → sign** for the same request and `payload_hash`, with the verified approvals as a policy input (`context.approvals`: count and approver IDs). An escalation can wait up to 15 minutes, and in that time prices move, velocity windows fill and the circuit breaker can trip. A human approves the world as it was, but the system signs into the world as it is. The re-run can therefore still deny (for example `CAP_EXCEEDED`, or a deny policy that now matches) or escalate again. Policies decide what an approval satisfies: an escalate policy is written as `forbid … when { … && context.approvals.count < 1 }`, while deny policies ignore approvals. The resulting decision gets a fresh `iat`/`exp` and is audited as its own record, linked to the escalation.
 
 ## 10. Decision tokens and countersignatures
 
 ### 10.1 JWS (gatekeeper / generic)
 
-Normative spec: [`spec/decision-token-v1.md`](../spec/decision-token-v1.md), with vectors in `spec/vectors/decision-token-v1.json`.
+Normative spec: [`spec/decision-token-v2.md`](../spec/decision-token-v2.md), with vectors in `spec/vectors/decision-token-v2.json` (CS-103 increment 2, [ADR 0003](adr/0003-decision-token-v2-identity.md)). v1 ([`spec/decision-token-v1.md`](../spec/decision-token-v1.md)) is frozen: Stopbar no longer issues or accepts it, and a test checks that no v1 vector verifies.
 
-- Algorithm: EdDSA (Ed25519). The header is exactly `{alg, kid, typ}`, and `kid` is the RFC 7638 thumbprint of a key pinned from `/v1/keys`.
-- Claims (closed set, JCS-canonical): `v`, `iss`, `aud`, `tenant`, `request_id`, `nonce`, `outcome`, `payload_hash`, `policy_bundle_hash`, `reservation_id`, `iat`, `exp`.
-- `payload_hash` = sha256 over JCS of the normalised action (spec §2), not a chain tx hash. Gas, nonce and fees are adapter-chosen and capped.
-- Signer adapters **must** run the spec §4 checks in order. The checks include recomputing `payload_hash` from the tx they are about to sign, and single use per `(iss, tenant, nonce)`.
+- Algorithm: EdDSA (Ed25519). The header is exactly `{alg, kid, typ}` with `typ` = `stopbar-decision-v2+jws`, and `kid` is the RFC 7638 thumbprint of a key pinned from `/v1/keys`.
+- Claims (closed set, JCS-canonical): `v` (= 2), `iss`, `aud`, `tenant`, `request_id`, `nonce`, `outcome`, `payload_hash`, `policy_bundle_hash`, `reservation_id`, `iat`, `exp`, and the requester identity `auth_method`, `key_id`, `agent_id`.
+- The identity claims are the **authenticated** `auth.Identity` (method, key ID, the credential's agent), never the body's `actor`. With auth off (loopback dev only) they are `none`, `""`, `""`. The engine passes the identity to `Signer.Sign` explicitly: from the gateway's context on evaluate, and from the pending record's `Requester` on approval, so an approved token binds the requester and never the approver. The signer refuses a malformed identity or one whose tenant is not the request's.
+- `payload_hash` = sha256 over JCS of the normalised action (spec §2, unchanged from v1), not a chain tx hash. Every tx field, including nonce, gas and fees, is bound.
+- Signer adapters **must** run the spec §4 checks in order, given the action about to be signed and the authenticated identity of its request (`Verifier.Verify(token, action, identity)`). The checks include the identity (step 7d, `WRONG_IDENTITY`), recomputing `payload_hash` from the tx they are about to sign, and single use per `(iss, tenant, nonce)`.
 
 ### 10.1a Gatekeeper adapter (`internal/signer`, CS-162; edge)
 
 The adapter is edge code: it uses go-ethereum for secp256k1 and EIP-1559, which the stdlib lacks. It touches no key until the core verifier (`internal/decision`, stdlib only) has accepted the token. `SignTx` runs these steps in order:
 
-1. Verify the token (spec §4). This recomputes `payload_hash` from the exact unsigned tx and spends the token in the adapter's **own** spent store (`-state-dir/adapter-spent.db`, retention max TTL + 2× skew).
+1. Verify the token (decision-token-v2 §4) against the authenticated identity of the request (`SignTx(ctx, token, action, requester)`). This refuses a v1 token and a token bound to any other identity (`WRONG_IDENTITY`), recomputes `payload_hash` from the exact unsigned tx, and spends the token in the adapter's **own** spent store (`-state-dir/adapter-spent.db`, retention max TTL + 2× skew).
 2. Find the key for `from`. If `Options.CodeAt` is set, read `from`'s on-chain code and refuse (`DELEGATED_WALLET`, fail closed on a read error) when it carries EIP-7702 delegation code (`0xef0100 || addr`, `signer.DelegatedTo`) to an address not in `ExpectedDelegates` — a delegated hot wallet can be driven to act as another contract (CS-146; `CodeAt` is wired once `stopbard` has a chain RPC). Type-4 (EIP-7702 SetCode) requests never reach here: the wire schema pins `tx_type` to `2`.
 3. Build the transaction from the approved fields only.
 4. Sign, recover the sender, and require it to equal `from`.
 5. Read the *signed* tx back and require its payload hash to equal the token's.
 
-**Gatekeeper flow:** allow → sign → `Commit(reservation, tx hash)`. If the adapter refuses, or the commit can't be recorded, the reservation is released with the reason audited, the signed bytes are discarded, and the caller gets a 403 with `FAIL_CLOSED_ADAPTER`. `stopbar decode-tx` decodes any signed tx independently: recovered sender, every field, and its payload hash.
+**Gatekeeper flow:** allow → sign → `Commit(reservation, tx hash)`. `Gatekeeper.Evaluate` passes the adapter the identity the gateway authenticated; `Gatekeeper.Approve` passes the requester that `Engine.Approve` returns from the pending record (pending records keep the full `auth.Identity`, in bucket `pending_escalations_v2`). If the adapter refuses, or the commit can't be recorded, the reservation is released with the reason audited, the signed bytes are discarded, and the caller gets a 403 with `FAIL_CLOSED_ADAPTER`. `stopbar decode-tx` decodes any signed tx independently: recovered sender, every field, and its payload hash.
 
 ### 10.2 EIP-712 (co-signer, Phase 4)
 
@@ -541,8 +620,11 @@ Implemented in `internal/audit` (CS-171/172), per `spec/audit-hash-v1.md`.
   |---|---|
   | `request` | the consumed nonce (gateway) |
   | `decision` (allow) | its reservation |
-  | `commit` / `release` | the limiter commit or release |
-  | `decision` (deny/escalate) | nothing, so its own transaction |
+  | `commit` / `release` | the limiter commit or release (with the settler's identity) |
+  | `destination_change` | the registry add or remove (§6.4) |
+  | `decision` (escalate) | the pending escalation record |
+  | `decision` (reject / expiry), `approval` (approved) | the escalation's state change |
+  | `decision` (deny) | nothing, so its own transaction |
 
 - **Append-only.** Records are keyed by big-endian `seq`, and `hash = sha256(JCS({v, seq, ts, type, body, prev_hash}))` via `canon.RecordHash`. No code path updates or deletes a record.
 - **Checkpoints.** Every N records (`-audit-checkpoint-every`, default 1000) and at shutdown, the head `{v, seq, hash, ts}` is signed with the decision key. The signature is over `"stopbar-audit-checkpoint-v1\n" + JCS`, which can never be a token's signing input. (The original sketch used a Merkle root over the range. The chain already commits to every earlier record, so signing the head is enough; Merkle inclusion proofs can be added later without changing records.)
@@ -563,7 +645,10 @@ Implemented in `internal/audit` (CS-171/172), per `spec/audit-hash-v1.md`.
 | `FAIL_CLOSED_AUDIT` | Audit append fails | deny (no unaudited decisions) |
 | `FAIL_CLOSED_ENGINE` | Panic outside any component | deny |
 | `CAP_EXCEEDED` | Reserve failed | deny |
-| `CIRCUIT_OPEN` | Breaker tripped | deny |
+| `CIRCUIT_OPEN` | Breaker tripped: the tripping request, then every request for the tenant until an M-of-N reset (§7.3) | deny |
+| `APPROVAL_REJECTED` | An approver rejected the escalation | deny |
+| `APPROVAL_EXPIRED` | The pending window passed before approval | deny |
+| `APPROVAL_SELF_APPROVAL` | The requester tried to approve or reject its own escalation | deny (stays pending) |
 | `NONCE_REPLAYED` / `EXPIRED` | Gateway | 400 |
 
 Panics recovered at the engine boundary → `deny`.
@@ -639,11 +724,13 @@ tenant: acme
 listen: 127.0.0.1:7777
 store: {kind: bbolt, path: ./data/cs.db}
 policy: {bundle: ./policies, cooling_off_loosen: 24h, activation_quorum: 1}
-limits:                     # internal/limiter Rule; window ∈ 1m | 1h | 24h
+limits:                     # internal/limiter Rule; window ∈ 1m | 1h | 24h | tx (per transaction)
+  - {scope: wallet, window: tx, max_usd: "2500", max_pct_of_balance: "0.5"}   # hard per-tx caps (CS-123)
   - {scope: wallet, window: 1h, max_usd: "5000", max_count: 50}
   - {scope: wallet+asset, window: 24h, max_units: "1000000000000000000000000"}   # raw units; holds with no price
-  - {scope: destination, window: 24h, max_count: 5, unknown_destinations_only: true}
-  - {scope: tenant, window: 1h, max_usd: "20000", circuit_breaker: true}
+  - {scope: destination, window: 24h, max_count: 5, unknown_destinations_only: true, escalate: true}   # salami soft cap
+  - {scope: tenant, window: 1h, max_usd: "20000", circuit_breaker: true}   # reset: -breaker-quorum approvers (CS-124)
+max_slippage: "0.03"        # excessive_slippage threshold (fraction of the swap's value)
 prices: {sources: [chainlink, coingecko], staleness: 15s}
 decision_key: {provider: local, path: ./keys/decision.ed25519}
 signer: {adapter: local, keystore: ./keys/agent-wallet.json}

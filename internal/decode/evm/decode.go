@@ -20,7 +20,9 @@ import (
 )
 
 // Flags (LLD §6.2). Destination flags (new/similar/first-time) need the
-// tenant's registry, so the enricher adds those.
+// tenant's registry, and excessive_slippage needs a price quote, so the
+// enricher adds those (internal/enrich). Swap intents carry their terms in
+// IntentSummary.Swap for that check.
 const (
 	FlagUnlimitedApproval = "unlimited_approval"
 	FlagDelegatecall      = "delegatecall"
@@ -665,7 +667,8 @@ func (d *decoder) swapIntent(exactIn bool, tokenIn, tokenOut string, in, out *bi
 		asset, inName = d.asset(tokenIn), "token "+tokenIn
 	}
 	in2 := model.IntentSummary{Kind: kindTransfer, Op: op, Asset: asset, Amount: in.String(), Destination: recipient, Flags: []string{},
-		Human: fmt.Sprintf("Swap %s%s units of %s for token %s (min out %s), sent to %s", verb, in, inName, tokenOut, out, recipient)}
+		Human: fmt.Sprintf("Swap %s%s units of %s for token %s (min out %s), sent to %s", verb, in, inName, tokenOut, out, recipient),
+		Swap:  &model.Swap{ExactIn: exactIn, TokenIn: tokenIn, AmountIn: in.String(), TokenOut: tokenOut, AmountOut: out.String()}}
 	if exactIn && out.Sign() == 0 {
 		in2.Flags = []string{FlagMinOutZero}
 		in2.Human += " — accepts ANY output (no slippage protection)"

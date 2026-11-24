@@ -15,21 +15,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/canon"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
 
-// Token constants (spec §3, §4).
+// Token constants (spec/decision-token-v2.md §3, §4). Only v2 is issued or
+// accepted; a v1 token fails the header check (its typ is v1's).
 const (
-	TokenType  = "stopbar-decision+jws"
-	MaxTTL     = 300 // seconds, = model.MaxTTL
-	ClockSkew  = 5 * time.Second
-	keyFileTag = "stopbar-decision-key-ed25519-v1\n"
+	TokenType    = "stopbar-decision-v2+jws"
+	TokenVersion = 2
+	MaxTTL       = 300 // seconds, = model.MaxTTL
+	ClockSkew    = 5 * time.Second
+	keyFileTag   = "stopbar-decision-key-ed25519-v1\n"
 )
 
 var b64 = base64.RawURLEncoding.Strict()
 
-// Claims is the exact claim set of spec §3.2.
+// Claims is the exact claim set of spec §3.2: v1's twelve plus the
+// authenticated requester (auth_method, key_id, agent_id), taken from
+// internal/auth and never from the request body.
 type Claims struct {
 	V                int           `json:"v"`
 	Iss              string        `json:"iss"`
@@ -43,10 +48,44 @@ type Claims struct {
 	ReservationID    *string       `json:"reservation_id"`
 	Iat              int64         `json:"iat"`
 	Exp              int64         `json:"exp"`
+	AuthMethod       string        `json:"auth_method"`
+	KeyID            string        `json:"key_id"`
+	AgentID          string        `json:"agent_id"`
 }
 
-var claimNames = []string{"aud", "exp", "iat", "iss", "nonce", "outcome", "payload_hash",
-	"policy_bundle_hash", "request_id", "reservation_id", "tenant", "v"}
+var claimNames = []string{"agent_id", "aud", "auth_method", "exp", "iat", "iss", "key_id", "nonce", "outcome",
+	"payload_hash", "policy_bundle_hash", "request_id", "reservation_id", "tenant", "v"}
+
+// Subject is the requester identity a token binds (spec §3.3). With no
+// authenticated identity (auth off, loopback dev only) it is method "none"
+// with empty key and agent IDs; an authenticated one must carry a key ID
+// and a tenant.
+func Subject(id auth.Identity) (method, keyID, agentID string, err error) {
+	switch id.Method {
+	case "", auth.MethodNone:
+		if id.KeyID != "" || id.AgentID != "" || id.Tenant != "" {
+			return "", "", "", errors.New("decision: unauthenticated identity carries a key, agent or tenant")
+		}
+		return string(auth.MethodNone), "", "", nil
+	case auth.MethodAPIKey, auth.MethodMTLS:
+		if id.KeyID == "" || id.Tenant == "" {
+			return "", "", "", errors.New("decision: authenticated identity needs a key ID and a tenant")
+		}
+		return string(id.Method), id.KeyID, id.AgentID, nil
+	}
+	return "", "", "", fmt.Errorf("decision: unknown auth method %q", id.Method)
+}
+
+// validSubject is the step 5 shape check of the identity claims.
+func validSubject(c Claims) bool {
+	switch auth.Method(c.AuthMethod) {
+	case auth.MethodNone:
+		return c.KeyID == "" && c.AgentID == ""
+	case auth.MethodAPIKey, auth.MethodMTLS:
+		return c.KeyID != ""
+	}
+	return false
+}
 
 // Kid is the RFC 7638 JWK thumbprint of an Ed25519 public key.
 func Kid(pub ed25519.PublicKey) string {
@@ -142,19 +181,28 @@ type Signer struct {
 	Aud  string // the signer adapter the token is for
 }
 
-// Sign builds the spec §3.2 claims from the request and decision and signs
-// them with the active key.
-func (s *Signer) Sign(_ context.Context, req model.ActionRequest, d model.Decision) (string, error) {
+// Sign builds the spec §3.2 claims from the request, the decision and the
+// authenticated requester identity, and signs them with the active key. id
+// is the identity auth established for req, never one the body claims.
+func (s *Signer) Sign(_ context.Context, id auth.Identity, req model.ActionRequest, d model.Decision) (string, error) {
 	if s.Keys == nil || s.Iss == "" || s.Aud == "" {
 		return "", errors.New("decision: signer needs Keys, Iss and Aud")
 	}
 	if d.RequestID != req.ID {
 		return "", errors.New("decision: decision is for a different request")
 	}
+	method, keyID, agentID, err := Subject(id)
+	if err != nil {
+		return "", err
+	}
+	if method != string(auth.MethodNone) && id.Tenant != req.Tenant {
+		return "", errors.New("decision: request tenant differs from the authenticated tenant")
+	}
 	c := Claims{
-		V: 1, Iss: s.Iss, Aud: s.Aud, Tenant: req.Tenant, RequestID: req.ID, Nonce: req.Nonce,
+		V: TokenVersion, Iss: s.Iss, Aud: s.Aud, Tenant: req.Tenant, RequestID: req.ID, Nonce: req.Nonce,
 		Outcome: d.Outcome, PayloadHash: d.PayloadHash, PolicyBundleHash: d.PolicyBundleHash,
 		ReservationID: d.ReservationID, Iat: d.IssuedAt.Unix(), Exp: d.ExpiresAt.Unix(),
+		AuthMethod: method, KeyID: keyID, AgentID: agentID,
 	}
 	if c.Exp <= c.Iat || c.Exp-c.Iat > MaxTTL {
 		return "", fmt.Errorf("decision: token lifetime %ds outside (0, %d]", c.Exp-c.Iat, MaxTTL)
@@ -203,10 +251,11 @@ type Verifier struct {
 }
 
 // Verify runs spec §4 steps 0–11 against the exact action about to be
-// signed. It returns the claims only if every step passes; the token is
-// then spent and can never verify again.
-func (v *Verifier) Verify(tok string, action model.Action) (Claims, error) {
-	c, err := v.check(tok, action)
+// signed and the authenticated identity of the request it came from (the
+// zero Identity when auth is off). It returns the claims only if every step
+// passes; the token is then spent and can never verify again.
+func (v *Verifier) Verify(tok string, action model.Action, id auth.Identity) (Claims, error) {
+	c, err := v.check(tok, action, id)
 	if err != nil {
 		return Claims{}, err
 	}
@@ -230,7 +279,7 @@ func (v *Verifier) now() time.Time {
 }
 
 // check is steps 0–10 (everything but spending).
-func (v *Verifier) check(tok string, action model.Action) (Claims, error) {
+func (v *Verifier) check(tok string, action model.Action, id auth.Identity) (Claims, error) {
 	parts := strings.Split(tok, ".")
 	if len(parts) != 3 {
 		return Claims{}, verr("MALFORMED")
@@ -266,7 +315,7 @@ func (v *Verifier) check(tok string, action model.Action) (Claims, error) {
 	if c, err := canon.Transform(payload); err != nil || !bytes.Equal(c, payload) {
 		return Claims{}, verr("NON_CANONICAL")
 	}
-	// 5. Exactly the twelve claims, each of the right type.
+	// 5. Exactly the fifteen claims, each of the right type.
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &m); err != nil || len(m) != len(claimNames) {
 		return Claims{}, verr("BAD_CLAIMS")
@@ -279,11 +328,11 @@ func (v *Verifier) check(tok string, action model.Action) (Claims, error) {
 	var c Claims
 	dec := json.NewDecoder(bytes.NewReader(payload))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&c); err != nil {
+	if err := dec.Decode(&c); err != nil || !validSubject(c) {
 		return Claims{}, verr("BAD_CLAIMS")
 	}
 	// 6. Version.
-	if c.V != 1 {
+	if c.V != TokenVersion {
 		return Claims{}, verr("BAD_VERSION")
 	}
 	// 7. From and for whom.
@@ -294,6 +343,12 @@ func (v *Verifier) check(tok string, action model.Action) (Claims, error) {
 		return Claims{}, verr("WRONG_AUDIENCE")
 	case c.Tenant != v.Tenant:
 		return Claims{}, verr("WRONG_TENANT")
+	}
+	// 7d. Requested by exactly the identity of the request being signed.
+	method, keyID, agentID, err := Subject(id)
+	if err != nil || c.AuthMethod != method || c.KeyID != keyID || c.AgentID != agentID ||
+		(method != string(auth.MethodNone) && c.Tenant != id.Tenant) {
+		return Claims{}, verr("WRONG_IDENTITY")
 	}
 	// 8. Time.
 	now := v.now().Unix()

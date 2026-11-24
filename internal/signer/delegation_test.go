@@ -44,7 +44,7 @@ func TestSignRefusesDelegatedWallet(t *testing.T) {
 			a := action()
 			r.adapter.codeAt = func(context.Context, common.Address) ([]byte, error) { return tc.code, tc.codeErr }
 			r.adapter.expected = tc.expected
-			_, _, err := r.adapter.SignTx(context.Background(), r.token(t, a, model.Allow), a)
+			_, _, err := r.adapter.SignTx(context.Background(), r.token(t, a, model.Allow), a, who)
 			if tc.refused && !errors.Is(err, ErrDelegatedWallet) {
 				t.Fatalf("want ErrDelegatedWallet, got %v", err)
 			}

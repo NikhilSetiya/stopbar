@@ -29,8 +29,8 @@ step "policy: starter pack validates and combines (CS-007)"
 go test -count=1 -run 'TestSpike' ./internal/policy/
 go test -run='^$' -bench=BenchmarkSpikeEvaluate -benchtime=20000x ./internal/policy/ | grep Benchmark
 
-step "decision token v1: vectors fresh and verify (CS-008)"
-go test -count=1 -run 'TestDecisionTokenVectors|TestPayloadHash' ./internal/decision/
+step "decision token v2: vectors fresh and verify; frozen v1 tokens rejected (CS-008, CS-103)"
+go test -count=1 -run 'TestDecisionTokenVectors|TestFrozenV1VectorsRejected|TestSignerBindsIdentity|TestPayloadHash' ./internal/decision/
 
 step "engine: fail-closed matrix, invariants, gateway wiring (CS-104)"
 go test -race -count=1 ./internal/engine/
@@ -114,6 +114,15 @@ step "SDKs: TypeScript + Python unit tests, encoding detector, examples vs live 
 
 step "corpus attacks through live stopbard: real engine + policy, dev stubs (CS-111/112)"
 python3 scripts/e2e_corpus.py "$BIN/stopbard" "$BIN/stopbar"
+
+step "reservation + escalation lifecycle over HTTP: commit/release, poll, reject/approve CLI, timeout (CS-105/151/152)"
+python3 scripts/e2e_lifecycle.py "$BIN/stopbard" "$BIN/stopbar"
+
+step "destination registry: stopbar contacts -> state file -> live stopbard, audited (CS-133)"
+python3 scripts/e2e_contacts.py "$BIN/stopbard" "$BIN/stopbar"
+
+step "circuit breaker over HTTP: trip -> CIRCUIT_OPEN, 1-of-2 reset refused, 2-of-2 resets, alert metric, audited (CS-124)"
+python3 scripts/e2e_breaker.py "$BIN/stopbard" "$BIN/stopbar"
 
 # Tool pins; keep in step with .github/workflows/ci.yml.
 GOLANGCI_LINT=v2.15.0

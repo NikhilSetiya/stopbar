@@ -5,8 +5,10 @@
 // only) has accepted the decision token for the exact transaction.
 //
 // SignTx, in order:
-//  1. Verify the token (spec §4). This recomputes payload_hash from the
-//     exact unsigned tx and spends the token, so one token gives one signature.
+//  1. Verify the token (decision-token-v2 §4). This recomputes payload_hash
+//     from the exact unsigned tx, requires the token's requester identity to
+//     be the authenticated identity of the request being signed, and spends
+//     the token, so one token gives one signature. v1 tokens are refused.
 //  2. Find the key for `from`. The adapter signs only for addresses it holds.
 //  3. Build the transaction from the approved fields only. Nothing is filled
 //     in after the decision: nonce, gas and fees were all bound by the token.
@@ -30,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
@@ -110,9 +113,11 @@ func (a *Adapter) Addresses() []common.Address {
 	return out
 }
 
-// SignTx returns the raw signed transaction and its hash.
-func (a *Adapter) SignTx(ctx context.Context, token string, act model.Action) ([]byte, common.Hash, error) {
-	claims, err := a.verifier.Verify(token, act) // step 1: core first
+// SignTx returns the raw signed transaction and its hash. requester is the
+// authenticated identity of the request act came from (the zero Identity
+// when auth is off); a token bound to any other identity is refused.
+func (a *Adapter) SignTx(ctx context.Context, token string, act model.Action, requester auth.Identity) ([]byte, common.Hash, error) {
+	claims, err := a.verifier.Verify(token, act, requester) // step 1: core first
 	if err != nil {
 		return nil, common.Hash{}, err
 	}

@@ -46,6 +46,33 @@ except StopbarEscalated as e:
 escalate, 403 is deny. `evaluate` returns the `Decision` on an allow and raises a
 typed error otherwise, so a missed check can never read a deny as an allow.
 
+### Reservations and escalations
+
+An allow reserves cap capacity. In advisory mode (you sign elsewhere) report
+what happened, so caps count real spend and abandoned actions free theirs:
+
+```python
+d = sb.evaluate(action)
+sb.commit(d.request_id, tx_hash)       # broadcast: the spend counts (retry-safe)
+sb.release(d.request_id, "cancelled")  # abandoned: the cap is freed (retry-safe)
+```
+
+An escalation waits for a human (default 15 minutes, then it expires as a deny):
+
+```python
+st = sb.poll(request_id)               # .state: pending / allowed / denied / expired
+if st.allowed:
+    use(st.decision.token)             # or st.decision.signed_tx in gatekeeper mode
+
+ops = Client(url, api_key=approver_key, tenant="demo")  # 'approve' scope
+ops.approve(request_id)                # re-evaluates against current state
+ops.reject(request_id)                 # deny; the requester may do neither
+```
+
+Refusals raise `StopbarRequestError` with `.code` (`NOT_FOUND`, `CONFLICT`,
+`ALREADY_RESOLVED`, `RESERVATION_EXPIRED`, …). The CLI equivalents are
+`stopbar approve <id>` and `stopbar reject <id>`.
+
 ### Provenance labels (taint)
 
 A `Session` accumulates labels as the agent encounters untrusted input; they ride
@@ -62,10 +89,6 @@ hex, Morse, ROT-n and zero-width characters — and adds `decoded` when it finds
 any (the Grok/Bankr pattern: an instruction hidden in Morse in on-chain content).
 Base64 and hex count only when they decode to readable text, so addresses, hashes
 and calldata don't trip it. `stopbar.detect_encodings(text)` exposes the detector.
-
-Outside gatekeeper mode, report what happened to an allowed action so its limiter
-reservation is committed or released: `sb.commit(request_id, tx_ref)` /
-`sb.release(request_id)` (`POST /v1/actions/{id}/commit|release`, LLD §4.1).
 
 > Labels are *claims* from the requester. In v1 they hold against an injected
 > model with an honest harness (T1); against a compromised requester (T3) only
@@ -87,6 +110,12 @@ provider = StopbarWalletProvider(
 
 The provider holds no key: stopbard signs (gatekeeper mode), so an injected or
 compromised agent can't sign around the policy. Off-chain signatures are refused.
+
+**AgentKit telemetry is off.** AgentKit posts the wallet address, network and
+every action name to Coinbase analytics and has no opt-out. Importing
+`stopbar.wallet` stubs both of its call sites (wallet provider initialisation
+and the action decorator) for the whole process, so no AgentKit provider or
+action in it phones home.
 
 ## License
 

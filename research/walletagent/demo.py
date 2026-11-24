@@ -62,7 +62,11 @@ def demo_world(path: pathlib.Path):
         "tokens": {USDC: {"decimals": 6, "symbol": "USDC"},
                    "0x4200000000000000000000000000000000000006": {"decimals": 18, "symbol": "WETH"},
                    "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf": {"decimals": 8, "symbol": "cbBTC"}},
-        "limits": [{"scope": "wallet", "window": "24h", "max_count": 1}],
+        # Hard per-tx cap (CS-123): $5,000 and 25% of the balance per transaction.
+        # The journey stays the same: step 1 (0.01 ETH) fits, step 3 escalates in
+        # policy before the limiter runs, step 6 still hits the 24h count cap.
+        "limits": [{"scope": "wallet", "window": "tx", "max_usd": "5000", "max_pct_of_balance": "0.25"},
+                   {"scope": "wallet", "window": "24h", "max_count": 1}],
     }, indent=2))
     hidden("The DEV world file is the price/balance/allowlist STUB (internal/devstub) — real prices, "
            "balances and a destination registry are CS-131/132/133; the demo hard-codes them.")

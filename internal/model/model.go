@@ -115,7 +115,21 @@ type IntentSummary struct {
 	Flags       []string        `json:"flags"`
 	Human       string          `json:"human"`
 	Calls       []IntentSummary `json:"calls,omitempty"`
-	PayloadHash string          `json:"payload_hash"`
+	// Swap holds a swap's terms, so an enricher can check them against a
+	// price quote (excessive_slippage). Set only on swap intents.
+	Swap        *Swap  `json:"swap,omitempty"`
+	PayloadHash string `json:"payload_hash"`
+}
+
+// Swap is what a swap gives and takes, in raw units. Token "" is the native
+// asset. Exact-in: AmountIn is exact and AmountOut the minimum accepted.
+// Exact-out: AmountOut is exact and AmountIn the most that may be paid.
+type Swap struct {
+	ExactIn   bool   `json:"exact_in"`
+	TokenIn   string `json:"token_in"`
+	AmountIn  string `json:"amount_in"`
+	TokenOut  string `json:"token_out"`
+	AmountOut string `json:"amount_out"`
 }
 
 // Asset is a token on a chain.
@@ -186,7 +200,7 @@ type Decision struct {
 	ReservationID    *string    `json:"reservation_id"`
 	IssuedAt         time.Time  `json:"issued_at"`
 	ExpiresAt        time.Time  `json:"expires_at"`
-	// Token is the decision token (spec/decision-token-v1.md), present only
+	// Token is the decision token (spec/decision-token-v2.md), present only
 	// on allow. It is not part of what it signs.
 	Token string `json:"token,omitempty"`
 	// SignedTx and TxHash are set in gatekeeper mode: the raw signed
@@ -214,10 +228,134 @@ const (
 	AuditRelease      AuditRecordType = "release"
 	AuditOverride     AuditRecordType = "override"
 	AuditAuthReject   AuditRecordType = "auth_reject" // CS-103: a request rejected at the gateway (identity mismatch, scope)
+	AuditBreaker      AuditRecordType = "breaker"     // CS-124: circuit breaker trip, reset vote or reset (body.event)
+	// AuditDestination records a change to a tenant's destination registry
+	// (CS-133), in the same transaction as the change.
+	AuditDestination AuditRecordType = "destination_change"
 )
 
-// ErrNoPending means no escalation with that id is awaiting approval (CS-151).
-var ErrNoPending = errors.New("no pending escalation for that id")
+// Lifecycle errors, shared by the engine, the limiter and the gateway (which
+// maps them to HTTP statuses without importing either).
+var (
+	// ErrNoPending means no escalation with that id is visible to the caller (CS-151).
+	ErrNoPending = errors.New("no pending escalation for that id")
+	// ErrResolved means the escalation was already allowed, denied or expired (CS-152).
+	ErrResolved = errors.New("escalation already resolved")
+	// ErrUnknownReservation: no live or committed reservation has that id (CS-105).
+	ErrUnknownReservation = errors.New("limiter: unknown reservation")
+	// ErrReservationExpired: the reservation lapsed before it was committed or released.
+	ErrReservationExpired = errors.New("limiter: reservation expired")
+	// ErrAlreadyCommitted: the reservation was committed (with another tx_ref, for a commit).
+	ErrAlreadyCommitted = errors.New("limiter: reservation is already committed")
+)
+
+// EscalationState is where an escalation is in its lifecycle (CS-152, LLD §9).
+type EscalationState string
+
+const (
+	EscalationPending EscalationState = "pending" // awaiting approve or reject
+	EscalationAllowed EscalationState = "allowed" // approved, and the re-run allowed it
+	EscalationDenied  EscalationState = "denied"  // rejected, or the approved allow could not be executed
+	EscalationExpired EscalationState = "expired" // the approval window passed: deny
+)
+
+// EscalationStatus is GET /v1/decisions/{request_id} (CS-152). Decision is the
+// escalate decision while pending and the final decision once resolved.
+type EscalationStatus struct {
+	RequestID  string          `json:"request_id"`
+	State      EscalationState `json:"state"`
+	Reasons    []string        `json:"reasons"` // escalated policy IDs an approver must cover
+	Request    ActionRequest   `json:"request"`
+	CreatedAt  time.Time       `json:"created_at"`
+	ExpiresAt  time.Time       `json:"expires_at"` // approval deadline (pending TTL)
+	ResolvedBy string          `json:"resolved_by,omitempty"`
+	ResolvedAt *time.Time      `json:"resolved_at,omitempty"`
+	Decision   *Decision       `json:"decision,omitempty"`
+}
+
+// ErrBreakerNotOpen means a reset was asked for a tenant whose circuit breaker
+// is not open (CS-124).
+var ErrBreakerNotOpen = errors.New("circuit breaker is not open for that tenant")
+
+// BreakerStatus is a tenant's circuit breaker (CS-124, LLD §7.3), as served by
+// GET /v1/breakers/{tenant} and POST /v1/breakers/{tenant}/reset. While open,
+// every evaluation for the tenant is denied CIRCUIT_OPEN. It closes only when
+// Quorum (≥ 2) distinct approvers hold live votes to reset this trip.
+type BreakerStatus struct {
+	Tenant string `json:"tenant"`
+	Open   bool   `json:"open"`
+	// Set exactly while open: when and by which request it tripped, and why.
+	TrippedAt     *time.Time `json:"tripped_at,omitempty"`
+	TripRequestID string     `json:"trip_request_id,omitempty"`
+	Reason        string     `json:"reason,omitempty"`
+	// Votes are the live reset votes, one per approver identity (API key id).
+	// Only these count toward Quorum.
+	Votes []BreakerVote `json:"votes"`
+	// ExpiredVotes have passed their expires_at and no longer count. They are
+	// discarded (and the discard audited) with the next vote.
+	ExpiredVotes []BreakerVote `json:"expired_votes,omitempty"`
+	Quorum       int           `json:"quorum"`
+}
+
+// BreakerVote is one approver's vote to reset a tripped breaker. A vote
+// expires (BreakerVoteTTL after it was cast), so a quorum must be assembled
+// within that window.
+type BreakerVote struct {
+	Approver  string    `json:"approver"`
+	At        time.Time `json:"at"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// BreakerVoteTTL is how long a breaker reset vote counts.
+const BreakerVoteTTL = time.Hour
+
+// MinBreakerQuorum is the fewest distinct approvers a breaker reset needs.
+const MinBreakerQuorum = 2
+
+// ErrDuplicateVote means the approver already holds a live vote on this trip.
+var ErrDuplicateVote = errors.New("this approver already holds a live reset vote on this trip")
+
+// Validate checks a status's invariants, reporting every problem at once.
+func (b BreakerStatus) Validate() error {
+	var p []string
+	if b.Tenant == "" {
+		p = append(p, "tenant is required")
+	}
+	if b.Quorum < MinBreakerQuorum {
+		p = append(p, fmt.Sprintf("quorum must be at least %d", MinBreakerQuorum))
+	}
+	if b.Open != (b.TrippedAt != nil) || b.Open != (b.TripRequestID != "") || b.Open != (b.Reason != "") {
+		p = append(p, "tripped_at, trip_request_id and reason are set exactly when open")
+	}
+	if !b.Open && len(b.Votes)+len(b.ExpiredVotes) > 0 {
+		p = append(p, "a closed breaker has no reset votes")
+	}
+	if b.Open && b.Quorum >= MinBreakerQuorum && len(b.Votes) >= b.Quorum {
+		p = append(p, "an open breaker cannot already hold a quorum of live reset votes")
+	}
+	seen := map[string]bool{}
+	for i, v := range b.Votes {
+		switch {
+		case v.Approver == "":
+			p = append(p, fmt.Sprintf("votes[%d].approver is required", i))
+		case seen[v.Approver]:
+			p = append(p, fmt.Sprintf("votes[%d]: approver %q voted twice", i, v.Approver))
+		}
+		seen[v.Approver] = true
+		if !v.ExpiresAt.After(v.At) {
+			p = append(p, fmt.Sprintf("votes[%d].expires_at must be after at", i))
+		}
+	}
+	for i, v := range b.ExpiredVotes {
+		if v.Approver == "" || !v.ExpiresAt.After(v.At) {
+			p = append(p, fmt.Sprintf("expired_votes[%d] needs an approver and expires_at after at", i))
+		}
+	}
+	if len(p) > 0 {
+		return &ValidationError{Problems: p}
+	}
+	return nil
+}
 
 // AuditEntry is an audit record before the log assigns its sequence number,
 // timestamp and hashes. State stores take one so that the record is written

@@ -49,6 +49,10 @@ BOB = "0x000000000000000000000000000000000000b0b0"
 SUPPLIER = "0x7c9e8a2b4d6f1030a5b8c2e4f6a1b3d5e7f90c2a"  # a real-looking address NOT on the allowlist
 USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 ROUTER = "0x6ff5693b99212da76ad316178a184ab56d299b43"
+# The demo's address book: the frozen PILOT-2 book minus SwapRouter02. No demo
+# journey swaps, and two entries named "Uniswap router" / "Uniswap SwapRouter"
+# made "approve the Uniswap router" ambiguous to the model.
+DEMO_CONTACTS = {k: v for k, v in ADDRESS_BOOK.items() if k != "Uniswap SwapRouter"}
 
 
 def demo_world(path, rpc):
@@ -65,7 +69,10 @@ def demo_world(path, rpc):
             USDC: {"address": USDC_USD_FEED, "max_age_sec": USDC_HEARTBEAT},
         },
         "known_destinations": [ALICE, BOB, ROUTER, "0x2626664c2603336e57b271c5c0b26f421741e481"],
-        "limits": [{"scope": "wallet", "window": "1h", "max_usd": "20000", "max_count": 50}],
+        # Hard per-tx cap (CS-123): the approved 5 ETH is ~50% of the 10 ETH demo
+        # wallet, so the share cap sits above it (60%); max_usd matches the 1h cap.
+        "limits": [{"scope": "wallet", "window": "tx", "max_usd": "20000", "max_pct_of_balance": "0.6"},
+                   {"scope": "wallet", "window": "1h", "max_usd": "20000", "max_count": 50}],
     }, indent=2))
 
 
@@ -125,7 +132,7 @@ def main():
                                      provenance=lambda: ["trusted_user"])
         reads = agent.ReadContext(balances={"ETH": "10", "USDC": "5000", "WETH": "2", "cbBTC": "0.05"},
                                   transactions=[], resources={}, decimals={USDC: 6, ROUTER: 18},
-                                  contacts=ADDRESS_BOOK)
+                                  contacts=DEMO_CONTACTS)
 
         WRITES = {"send_eth", "send_token", "approve_token", "swap", "wrap_eth", "unwrap_weth"}
         outcomes = []
@@ -218,10 +225,12 @@ def main():
             say(f"  {p:48s} → {oc}")
         say(f"\nTogether spend: ${meter.usd:.4f} of the ${CAP_USD:.2f} cap "
             f"({MODEL}; {sum(meter.calls.values())} calls; aborted: {meter.aborted}).")
-        say("Stopbar enforced the allowlist and the large-transfer rule on the agent's real tool calls; a "
-            "safety-trained model may also decline on its own. The unlimited approval the model refused, a "
-            "compromised but fully-authenticated service pushed straight through — and Stopbar denied it anyway: "
-            "the deterministic controls hold whatever the requester is (T3).")
+        agent_approval = ("Stopbar denied the agent's own unlimited approval"
+                          if outcomes[3].startswith("DENIED") else
+                          f"the agent's unlimited approval ended: {outcomes[3]}")
+        say(f"Stopbar enforced the allowlist and the large-transfer rule on the agent's real tool calls; "
+            f"{agent_approval}. A compromised but fully-authenticated service then pushed the same approval "
+            f"straight through: {outcomes[-1]}. The deterministic controls hold whatever the requester is (T3).")
     finally:
         if sb:
             sb.terminate(); sb.wait(timeout=10)

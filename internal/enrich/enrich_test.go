@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -361,6 +362,48 @@ func TestEnrichERC20Transfer(t *testing.T) {
 	}
 	if er.PctOfBalance == nil || *er.PctOfBalance != "0.25" { // 500 of 2000
 		t.Fatalf("PctOfBalance = %v, want 0.25", str(er.PctOfBalance))
+	}
+}
+
+// excessive_slippage from the chain's feeds (CS-145): 3,500 USDC for WETH at
+// $3,500/ETH should yield ~1 WETH (Base WETH is priced as ETH). Below 0.97
+// WETH is flagged at the default 3%; an exact-out swap is judged the same
+// way, its output against its maximum input. A token with no feed can't be
+// checked, so the price is marked stale.
+func TestEnrichSlippage(t *testing.T) {
+	const weth, nofeed = "0x4200000000000000000000000000000000000006", "0x5555555555555555555555555555555555555555"
+	chain := uint64(8453)
+	for _, tt := range []struct {
+		name           string
+		swap           model.Swap
+		flagged, stale bool
+	}{
+		{"exact-in within 3%", model.Swap{ExactIn: true, TokenIn: usdc, AmountIn: "3500000000", TokenOut: weth, AmountOut: "980000000000000000"}, false, false},
+		{"exact-in 5% short", model.Swap{ExactIn: true, TokenIn: usdc, AmountIn: "3500000000", TokenOut: weth, AmountOut: "950000000000000000"}, true, false},
+		{"exact-out pays 10% over", model.Swap{ExactIn: false, TokenIn: usdc, AmountIn: "3850000000", TokenOut: weth, AmountOut: "1000000000000000000"}, true, false},
+		{"exact-out within 3%", model.Swap{ExactIn: false, TokenIn: usdc, AmountIn: "3550000000", TokenOut: weth, AmountOut: "1000000000000000000"}, false, false},
+		{"output token has no feed", model.Swap{ExactIn: true, TokenIn: usdc, AmountIn: "3500000000", TokenOut: nofeed, AmountOut: "1"}, false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newMockNode(time.Unix(1_700_000_000, 0))
+			m.ethWei, m.usdcUnits = big.NewInt(1e18), big.NewInt(100000_000000)
+			sw := tt.swap
+			er := model.EnrichedRequest{
+				Request: model.ActionRequest{Action: model.Action{Kind: model.KindEVMTx, ChainID: &chain, From: wallet, To: usdc, ValueWei: "0", GasLimit: "60000", MaxFeePerGas: "200000000"}},
+				// The swap sits inside a batch: the check walks every depth.
+				Intent: model.IntentSummary{Kind: "transfer", Amount: sw.AmountIn, Destination: wallet, Asset: &model.Asset{Address: usdc}, Flags: []string{},
+					Calls: []model.IntentSummary{{Kind: "transfer", Op: "swap", Swap: &sw}}},
+			}
+			if err := m.enricher(t).Enrich(context.Background(), &er); err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(er.Intent.Flags, FlagExcessiveSlippage); got != tt.flagged || er.PriceStale != tt.stale {
+				t.Fatalf("flagged=%v stale=%v, want %v %v", got, er.PriceStale, tt.flagged, tt.stale)
+			}
+		})
+	}
+	if _, err := New(Config{RPCURL: "http://127.0.0.1:1", MaxSlippage: "1.5"}); err == nil {
+		t.Fatal("max slippage ≥ 1 accepted")
 	}
 }
 
