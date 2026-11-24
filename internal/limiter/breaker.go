@@ -9,19 +9,23 @@ package limiter
 // CircuitOpen refuse every request for the tenant (the engine denies
 // CIRCUIT_OPEN before policy, so escalations and approvals stop too).
 //
-// Only a quorum (at least 2) of distinct approver identities can close it (M of
-// N, the same approver keys that approve escalations, CS-151). Each vote is
-// durable and audited before it counts, is bound to the trip it was cast on,
-// and expires after model.BreakerVoteTTL (1h). An identity with a live vote
-// cannot vote again.
+// Only a quorum (at least 2) of distinct approver OWNERS can close it (M of
+// N, the same Ed25519 approver keys that approve escalations, CS-151;
+// internal/approval). Each reset is an Ed25519-signed envelope
+// (spec/approval-signature-v1.md §3), verified against the configured
+// approver keys and the open trip before it counts toward Quorum
+// (internal/approval.Tally dedupes by owner, not by key — two keys with the
+// same owner count once). A vote is durable and audited before it counts,
+// and expires at the signature's own expiry (bounded to at most 1h ahead).
+// An owner with a live vote cannot vote again.
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
@@ -104,17 +108,32 @@ func approverIDs(votes []model.BreakerVote) []string {
 	return ids
 }
 
-// ResetBreaker records approver's vote to reset the tenant's open breaker and
-// closes it once Quorum distinct approvers hold live votes. A vote counts for
-// model.BreakerVoteTTL (1h); votes that have expired are discarded with this
-// one, and the discard is audited in the same transaction. It returns the
-// status after the vote: still open (quorum not met) or closed. An approver
-// who already holds a live vote is refused (model.ErrDuplicateVote), and a
-// closed breaker returns model.ErrBreakerNotOpen.
-func (l *Limiter) ResetBreaker(_ context.Context, tenant, approver string) (model.BreakerStatus, error) {
-	if approver == "" {
-		return model.BreakerStatus{}, errors.New("limiter: a breaker reset vote needs an authenticated approver identity")
-	}
+// breakerVoteToApproval converts a stored, already-verified vote back into
+// an approval.Vote, so ResetBreaker can replay the tenant's live votes
+// through a fresh approval.Tally on every call (Tally itself persists
+// nothing; the breaker's own store is the durable record, LLD §11).
+func breakerVoteToApproval(v model.BreakerVote) approval.Vote {
+	return approval.Vote{Kid: v.Approver, Owner: approval.Owner{AgentID: v.OwnerAgentID, KeyID: v.OwnerKeyID},
+		Decision: approval.ResetDecision, Expiry: v.ExpiresAt}
+}
+
+// ResetBreaker verifies sig — an Ed25519-signed breaker-reset envelope
+// (spec/approval-signature-v1.md §3) — against the configured approver keys
+// and the tenant's open trip, and records its vote toward Quorum distinct
+// OWNERS (CS-151: two keys configured with the same owner count once,
+// internal/approval.Tally). A vote counts for the signature's own expiry
+// (bounded to at most 1h ahead of when it is checked); votes that have
+// expired are discarded with this one, and the discard is audited in the
+// same transaction. It returns the status after the vote: still open
+// (quorum not met) or closed.
+//
+// A signature that fails verification (unknown key, wrong tenant, bad
+// signature, expired, too far ahead, wrong decision, or bound to a
+// different trip) returns the *approval.VerifyError and changes nothing —
+// it is not a vote and is not stored. An owner that already holds a live
+// vote is refused (model.ErrDuplicateVote), and a closed breaker returns
+// model.ErrBreakerNotOpen.
+func (l *Limiter) ResetBreaker(_ context.Context, tenant string, sig approval.SignedBreakerReset) (model.BreakerStatus, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	b := l.breakers[tenant]
@@ -122,10 +141,26 @@ func (l *Limiter) ResetBreaker(_ context.Context, tenant, approver string) (mode
 		return l.status(tenant), model.ErrBreakerNotOpen
 	}
 	now := l.clock()
-	live, expired := splitVotes(b.Votes, now)
-	if slices.ContainsFunc(live, func(v model.BreakerVote) bool { return v.Approver == approver }) {
-		return l.status(tenant), model.ErrDuplicateVote
+	if l.approvers == nil {
+		return l.status(tenant), errors.New("limiter: no approver keys configured; breaker reset is disabled")
 	}
+	k, verr := approval.VerifyBreakerReset(l.approvers, sig, approval.BreakerResetWant{Tenant: tenant, TripRequestID: b.TripRequestID}, now)
+	if verr != nil {
+		return l.status(tenant), verr
+	}
+
+	live, expired := splitVotes(b.Votes, now)
+	tally := approval.NewTally(l.quorum, "", "") // no requester to exclude for a breaker reset (spec §8)
+	for _, bv := range live {
+		_, _ = tally.Add(breakerVoteToApproval(bv), now)
+	}
+	if _, err := tally.Add(approval.VoteFromBreakerReset(k, sig), now); err != nil {
+		if errors.Is(err, approval.ErrDuplicateVote) {
+			return l.status(tenant), model.ErrDuplicateVote
+		}
+		return l.status(tenant), err
+	}
+
 	var entries []*model.AuditEntry
 	if len(expired) > 0 {
 		entries = append(entries, &model.AuditEntry{Type: model.AuditBreaker, Body: map[string]any{
@@ -133,11 +168,12 @@ func (l *Limiter) ResetBreaker(_ context.Context, tenant, approver string) (mode
 			"expired": expired, "vote_ttl": model.BreakerVoteTTL.String()}})
 	}
 	next := *b
-	next.Votes = append(live, model.BreakerVote{Approver: approver, At: now, ExpiresAt: now.Add(model.BreakerVoteTTL)})
+	next.Votes = append(live, model.BreakerVote{Approver: k.ID, OwnerAgentID: k.Owner.AgentID, OwnerKeyID: k.Owner.KeyID,
+		At: now, ExpiresAt: time.Unix(sig.Expiry, 0)})
 	approvers := approverIDs(next.Votes)
 	body := map[string]any{"event": BreakerResetVote, "tenant": tenant, "trip_request_id": b.TripRequestID,
-		"approver": approver, "approvers": approvers, "votes": len(next.Votes), "quorum": l.quorum}
-	closing := len(next.Votes) >= l.quorum
+		"approver": k.ID, "kid": k.Kid, "owner": k.Owner, "approvers": approvers, "votes": len(next.Votes), "quorum": l.quorum}
+	closing := tally.Resolution().Outcome == approval.Approved
 	stored := next
 	if closing {
 		body["event"] = BreakerReset

@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/canon"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
@@ -50,20 +51,30 @@ const MaxBodyBytes = 64 << 10
 var maxSafeInt = new(big.Rat).SetInt64(1 << 53)
 
 // EvalScope is the scope an API key needs to call /v1/evaluate (and to commit
-// or release its own reservations, CS-105); ApproveScope is the scope an
-// approver key needs to approve or reject an escalation (CS-151).
+// or release its own reservations, CS-105). ApproveScope is kept only as a
+// legacy scope name some deployments may still issue; CS-151 moved approval
+// and breaker-reset authorization entirely to Ed25519 signatures
+// (spec/approval-signature-v1.md) verified against configured approver
+// keys, so no API key scope grants approval authority any more — an API
+// key, holding no such key pair, is cryptographically incapable of
+// producing a valid signature in the first place.
 const (
 	EvalScope    = "evaluate"
 	ApproveScope = "approve"
 )
 
-// Approver drives the escalation lifecycle (CS-151/152): Approve re-evaluates
-// and, if it now allows, executes a pending escalation; Reject denies it;
-// Status reports it. They return model.ErrNoPending for an id the caller
-// cannot see and model.ErrResolved once it is allowed, denied or expired.
+// Approver drives the escalation lifecycle (CS-151/152): Approve verifies a
+// signed envelope and adds its vote, re-evaluating and, on quorum, executing
+// the escalation if it now allows; Reject verifies a signed reject envelope,
+// which denies outright on quorum of one; Status reports the escalation.
+// They return model.ErrNoPending for an id the caller cannot see,
+// approval.ErrDuplicateVote for a second vote from an owner who already
+// holds one, and model.ErrResolved once it is allowed, denied or expired. A
+// signature that fails verification is not a Go error: it comes back as a
+// deny Decision with the VerifyError's code as the reason (CS-151).
 type Approver interface {
-	Approve(ctx context.Context, id, approver string) (model.Decision, error)
-	Reject(ctx context.Context, id, approver string) (model.Decision, error)
+	Approve(ctx context.Context, id string, sig approval.SignedEscalation) (model.Decision, error)
+	Reject(ctx context.Context, id string, sig approval.SignedEscalation) (model.Decision, error)
 	Status(ctx context.Context, id string) (model.EscalationStatus, error)
 }
 
@@ -78,11 +89,15 @@ type Actions interface {
 }
 
 // Breaker is the tenant circuit breaker as the gateway sees it (CS-124, the
-// limiter). ResetBreaker records one approver's vote and returns the status
-// after it; it returns model.ErrBreakerNotOpen for a closed breaker.
+// limiter). ResetBreaker verifies a signed breaker-reset envelope
+// (spec/approval-signature-v1.md §3) against the configured approver keys
+// and the open trip, records its vote, and returns the status after it; it
+// returns model.ErrBreakerNotOpen for a closed breaker, model.ErrDuplicateVote
+// for a second vote from an owner who already holds one, and
+// *approval.VerifyError for a signature that does not verify.
 type Breaker interface {
 	BreakerStatus(tenant string) model.BreakerStatus
-	ResetBreaker(ctx context.Context, tenant, approver string) (model.BreakerStatus, error)
+	ResetBreaker(ctx context.Context, tenant string, sig approval.SignedBreakerReset) (model.BreakerStatus, error)
 }
 
 // Authenticator derives the caller's identity from the request (an API key
@@ -141,7 +156,13 @@ const (
 	CodeConflict          Code = "CONFLICT"          // the reservation is already committed (CS-105)
 	CodeAlreadyResolved   Code = "ALREADY_RESOLVED"  // the escalation was already allowed, denied or expired (CS-152)
 	CodeReservationGone   Code = "RESERVATION_EXPIRED"
-	CodeDuplicateVote     Code = "DUPLICATE_VOTE" // CS-124: the approver already holds a live breaker reset vote
+	CodeDuplicateVote     Code = "DUPLICATE_VOTE" // CS-151: this owner already holds a live vote
+	// CodeInvalidSignature is a breaker-reset envelope that failed Ed25519
+	// verification (CS-151, spec/approval-signature-v1.md §4/§8). Escalation
+	// approve/reject map a failed signature to a deny Decision instead (the
+	// engine's own reason codes), since those routes always have a decision
+	// to answer with; a breaker reset does not.
+	CodeInvalidSignature Code = "INVALID_SIGNATURE"
 )
 
 // ClockSkew is how far issued_at may lead or trail the gateway clock (LLD §4).
@@ -181,6 +202,7 @@ var codeStatus = map[Code]int{
 	CodeAlreadyResolved:   http.StatusConflict,
 	CodeReservationGone:   http.StatusGone,
 	CodeDuplicateVote:     http.StatusConflict,
+	CodeInvalidSignature:  http.StatusBadRequest,
 }
 
 // ErrorBody is the wire shape of every non-2xx response (LLD §4.1).
@@ -263,6 +285,7 @@ func New(cfg Config) *Gateway {
 	}
 	g.route("/v1/evaluate", http.MethodPost, g.evaluate)
 	g.route("/v1/approvals/{id}", http.MethodPost, g.approve)
+	g.routeMethod("GET /v1/approvals/{id}", g.approvalToSign)
 	g.route("/v1/approvals/{id}/reject", http.MethodPost, g.reject)
 	g.route("/v1/decisions/{id}", http.MethodGet, g.poll)
 	g.route("/v1/actions/{id}/commit", http.MethodPost, g.commit)
@@ -289,6 +312,23 @@ func (g *Gateway) route(path, method string, h func(http.ResponseWriter, *http.R
 			g.writeError(w, path, fail(CodeMethodNotAllowed, "%s requires %s", path, method))
 			return
 		}
+		g.wrap(path, h)(w, r)
+	})
+}
+
+// routeMethod registers h for pattern, a Go 1.22+ method-qualified mux
+// pattern (e.g. "GET /v1/approvals/{id}") — used to add a method to a path
+// that route already registered a *different* method's bare pattern for
+// (ServeMux resolves the method-qualified pattern as more specific, so both
+// coexist without conflict).
+func (g *Gateway) routeMethod(pattern string, h func(http.ResponseWriter, *http.Request) error) {
+	g.mux.HandleFunc(pattern, g.wrap(pattern, h))
+}
+
+// wrap adds panic recovery and typed-error writing around h, shared by route
+// and routeMethod.
+func (g *Gateway) wrap(path string, h func(http.ResponseWriter, *http.Request) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if p := recover(); p != nil {
 				g.log.Error("panic in handler", "path", path, "panic", p, "stack", string(debug.Stack()))
@@ -303,7 +343,7 @@ func (g *Gateway) route(path, method string, h func(http.ResponseWriter, *http.R
 			}
 			g.writeError(w, path, ae)
 		}
-	})
+	}
 }
 
 func (g *Gateway) evaluate(w http.ResponseWriter, r *http.Request) error {
@@ -364,40 +404,140 @@ func (g *Gateway) authorize(r *http.Request, id string, scopes ...string) (auth.
 	return identity, nil
 }
 
-// approve re-evaluates and, if it now allows, executes a pending escalation
-// (CS-151/152). It needs an approver-scoped credential; the outcome status is
-// the decision's own (200 allow+executed, 202 still escalated, 403 denied).
+// authenticateOnly authenticates a lifecycle call with no scope requirement
+// (CS-151): approval and breaker-reset authorization is the Ed25519
+// signature in the body, not any API key scope, so an API key here only
+// identifies the HTTP caller for audit and rate limiting. With auth off
+// (loopback dev) it is a no-op and ctx is returned unchanged.
+func (g *Gateway) authenticateOnly(r *http.Request, id string) (context.Context, error) {
+	ctx := r.Context()
+	if g.auth == nil {
+		return ctx, nil
+	}
+	identity, err := g.auth.Authenticate(r)
+	if err != nil {
+		return ctx, withID(fail(CodeUnauthenticated, "missing or invalid credential"), id)
+	}
+	return auth.WithIdentity(ctx, identity), nil
+}
+
+const maxApprovalBytes = 4 << 10
+
+// decodeSigned decodes a small, bounded JSON body into v: well-formed
+// (duplicate keys rejected) and unknown fields rejected. Unlike
+// decodeActionRequest, case-insensitive key matching is not a hazard here —
+// VerifyEscalation/VerifyBreakerReset re-canonicalise the Go struct they
+// decoded into, never the raw wire bytes, so there is nothing for a
+// mismatched body to desynchronise from (contrast ActionRequest's
+// payload_hash, which must bind the exact submitted body).
+func decodeSigned(w http.ResponseWriter, r *http.Request, v any, maxBytes int64) *apiError {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBytes))
+	if err != nil {
+		return fail(CodeBodyTooLarge, "body exceeds %d bytes", maxBytes)
+	}
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+		return fail(CodeUnsupportedMedia, "Content-Type must be application/json")
+	}
+	if _, err := canon.Transform(raw); err != nil {
+		if errors.Is(err, canon.ErrDuplicateKey) {
+			return fail(CodeDuplicateKey, "%v", err)
+		}
+		return fail(CodeMalformedJSON, "%v", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return fail(CodeInvalidRequest, "%s", strings.TrimPrefix(err.Error(), "json: "))
+	}
+	return nil
+}
+
+// approve verifies the posted signed envelope (spec/approval-signature-v1.md
+// §2, decision "approve") and adds its vote; on quorum it re-evaluates and,
+// if it now allows, executes the escalation (CS-151/152). The outcome
+// status is the decision's own (200 allow+executed, 202 still escalated or
+// pending, 403 denied).
 func (g *Gateway) approve(w http.ResponseWriter, r *http.Request) error {
 	return g.resolve(w, r, "/v1/approvals", Approver.Approve)
 }
 
-// reject denies a pending escalation (CS-151/152): 403 with the deny decision.
+// reject verifies the posted signed envelope (decision "reject") and, being
+// a valid vote, denies the escalation outright regardless of quorum
+// (CS-151, LLD §9 step 4): 403 with the deny decision.
 func (g *Gateway) reject(w http.ResponseWriter, r *http.Request) error {
 	return g.resolve(w, r, "/v1/approvals/reject", Approver.Reject)
 }
 
 func (g *Gateway) resolve(w http.ResponseWriter, r *http.Request, route string,
-	fn func(Approver, context.Context, string, string) (model.Decision, error)) error {
+	fn func(Approver, context.Context, string, approval.SignedEscalation) (model.Decision, error)) error {
 	id := r.PathValue("id")
-	if g.approver == nil || g.auth == nil {
+	if g.approver == nil {
 		return withID(fail(CodeEngineUnavailable, "approvals are not configured"), id)
 	}
-	identity, err := g.authorize(r, id, ApproveScope)
+	ctx, err := g.authenticateOnly(r, id)
 	if err != nil {
 		return err
 	}
-	ctx := auth.WithIdentity(r.Context(), identity) // the approver is in the audit record
-	d, err := fn(g.approver, ctx, id, identity.KeyID)
+	var sig approval.SignedEscalation
+	if aerr := decodeSigned(w, r, &sig, maxApprovalBytes); aerr != nil {
+		return withID(aerr, id)
+	}
+	d, err := fn(g.approver, ctx, id, sig)
 	switch {
 	case errors.Is(err, model.ErrNoPending):
 		return withID(fail(CodeNotFound, "no pending escalation for that id"), id)
 	case errors.Is(err, model.ErrResolved):
 		return withID(fail(CodeAlreadyResolved, "the escalation was already resolved; GET /v1/decisions/%s for the outcome", id), id)
+	case errors.Is(err, approval.ErrDuplicateVote):
+		return withID(fail(CodeDuplicateVote, "this owner already holds a live vote on this escalation; a second distinct owner must vote"), id)
 	case err != nil:
 		g.log.Error("approval error", "route", route, "id", id, "err", err)
 		return withID(fail(CodeInternal, "approval failed"), id)
 	}
 	return g.writeJSON(w, route, outcomeStatus[d.Outcome], d)
+}
+
+// EscalationToSign is GET /v1/approvals/{id} (CS-151): everything a CLI
+// needs to build and sign an escalation approve/reject envelope
+// (spec/approval-signature-v1.md §2), without separately decoding
+// GET /v1/decisions/{id}'s full EscalationStatus.
+type EscalationToSign struct {
+	EscalationID string `json:"escalation_id"`
+	PayloadHash  string `json:"payload_hash"`
+	Tenant       string `json:"tenant"`
+	// MaxExpiry is now (the gateway's clock) plus approval.MaxExpiryAhead:
+	// the latest expiry a signature can carry and still verify if submitted
+	// immediately.
+	MaxExpiry int64 `json:"max_expiry"`
+}
+
+// approvalToSign serves GET /v1/approvals/{id}: the object a signature must
+// cover, for a pending escalation only (an id that is not pending or does
+// not exist both answer 404, exactly as poll does, so a caller cannot tell
+// the two apart).
+func (g *Gateway) approvalToSign(w http.ResponseWriter, r *http.Request) error {
+	id := r.PathValue("id")
+	if g.approver == nil {
+		return withID(fail(CodeEngineUnavailable, "approvals are not configured"), id)
+	}
+	ctx, err := g.authenticateOnly(r, id)
+	if err != nil {
+		return err
+	}
+	st, err := g.approver.Status(ctx, id)
+	switch {
+	case errors.Is(err, model.ErrNoPending):
+		return withID(fail(CodeNotFound, "no escalation for that id"), id)
+	case err != nil:
+		g.log.Error("approval-to-sign error", "id", id, "err", err)
+		return withID(fail(CodeInternal, "could not load the escalation"), id)
+	case st.State != model.EscalationPending || st.Decision == nil:
+		return withID(fail(CodeNotFound, "no pending escalation for that id"), id)
+	}
+	return g.writeJSON(w, "/v1/approvals", http.StatusOK, EscalationToSign{
+		EscalationID: id, PayloadHash: st.Decision.PayloadHash, Tenant: st.Request.Tenant,
+		MaxExpiry: g.clock().Add(approval.MaxExpiryAhead).Unix(),
+	})
 }
 
 // stateStatus keeps the poll's status code as safe to act on as /v1/evaluate:
@@ -561,64 +701,54 @@ func decodeSettle(w http.ResponseWriter, r *http.Request, commit bool) (SettleBo
 	return b, nil
 }
 
-// approverFor authenticates an approver of tenant's breaker: a key with the
-// approve scope, issued to that tenant (CS-124 reuses the CS-151 approver keys).
-func (g *Gateway) approverFor(r *http.Request, tenant string) (auth.Identity, error) {
-	id, err := g.auth.Authenticate(r)
-	if err != nil {
-		return id, fail(CodeUnauthenticated, "missing or invalid credential")
-	}
-	req := model.ActionRequest{Tenant: tenant}
-	if !id.HasScope(ApproveScope) {
-		g.auditReject(r.Context(), id, req, "breaker: key lacks the "+ApproveScope+" scope")
-		return id, fail(CodeForbiddenScope, "the API key lacks the %q scope", ApproveScope)
-	}
-	if id.Tenant != tenant {
-		g.auditReject(r.Context(), id, req, "breaker: approver is not of this tenant")
-		return id, fail(CodeIdentityMismatch, "the approver key is not issued to tenant %q", tenant)
-	}
-	return id, nil
-}
-
-// breakerStatus serves a tenant's circuit breaker (CS-124). With auth on, only
-// that tenant's approvers may read it; with auth off (loopback dev) anyone on
+// breakerStatus serves a tenant's circuit breaker (CS-124). Reading it needs
+// no particular scope — with auth on, any authenticated key may read any
+// tenant's status (CS-151 moved authorization for the lifecycle routes to
+// signatures, not API key scopes); with auth off (loopback dev) anyone on
 // the host may.
 func (g *Gateway) breakerStatus(w http.ResponseWriter, r *http.Request) error {
 	tenant := r.PathValue("tenant")
 	if g.breaker == nil {
 		return fail(CodeEngineUnavailable, "no circuit breaker configured")
 	}
-	if g.auth != nil {
-		if _, err := g.approverFor(r, tenant); err != nil {
-			return err
-		}
+	if _, err := g.authenticateOnly(r, tenant); err != nil {
+		return err
 	}
 	return g.writeJSON(w, "/v1/breakers", http.StatusOK, g.breaker.BreakerStatus(tenant))
 }
 
-// breakerReset records the authenticated approver's vote to reset the tenant's
-// open breaker (CS-124). 200 means the vote completed the quorum and the
-// breaker is closed; 202 means the vote is recorded but the quorum is not met,
-// so the breaker stays open (the reset is refused for now). Votes need
-// identities, so this requires auth even on loopback.
+// breakerReset verifies the posted signed breaker-reset envelope
+// (spec/approval-signature-v1.md §3) against the configured approver keys
+// and the tenant's open trip, and records its vote toward the quorum
+// (CS-151, replacing #128's API-key vote mechanism entirely: no API key
+// scope or tenant match is checked here, only the signature). 200 means the
+// vote completed the quorum and the breaker is closed; 202 means the vote
+// is recorded but the quorum is not met, so the breaker stays open.
 func (g *Gateway) breakerReset(w http.ResponseWriter, r *http.Request) error {
 	tenant := r.PathValue("tenant")
-	if g.breaker == nil || g.auth == nil {
-		return fail(CodeEngineUnavailable, "breaker reset needs a circuit breaker and authentication (-auth-keys)")
+	if g.breaker == nil {
+		return fail(CodeEngineUnavailable, "no circuit breaker configured")
 	}
-	id, err := g.approverFor(r, tenant)
+	ctx, err := g.authenticateOnly(r, tenant)
 	if err != nil {
 		return err
 	}
-	st, err := g.breaker.ResetBreaker(auth.WithIdentity(r.Context(), id), tenant, id.KeyID)
-	if errors.Is(err, model.ErrBreakerNotOpen) {
+	var sig approval.SignedBreakerReset
+	if aerr := decodeSigned(w, r, &sig, maxApprovalBytes); aerr != nil {
+		return aerr
+	}
+	st, err := g.breaker.ResetBreaker(ctx, tenant, sig)
+	switch {
+	case errors.Is(err, model.ErrBreakerNotOpen):
 		return fail(CodeNotFound, "the circuit breaker for tenant %q is not open", tenant)
-	}
-	if errors.Is(err, model.ErrDuplicateVote) {
-		return fail(CodeDuplicateVote, "approver %s already holds a live reset vote on this trip; a second distinct approver must vote", id.KeyID)
-	}
-	if err != nil {
-		g.log.Error("breaker reset failed", "tenant", tenant, "approver", id.KeyID, "err", err)
+	case errors.Is(err, model.ErrDuplicateVote):
+		return fail(CodeDuplicateVote, "this owner already holds a live reset vote on this trip; a second distinct owner must vote")
+	case err != nil:
+		var ve *approval.VerifyError
+		if errors.As(err, &ve) {
+			return fail(CodeInvalidSignature, "signature rejected: %s", ve.Code)
+		}
+		g.log.Error("breaker reset failed", "tenant", tenant, "err", err)
 		return fail(CodeInternal, "breaker reset vote not recorded")
 	}
 	status := http.StatusOK

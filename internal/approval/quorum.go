@@ -57,6 +57,24 @@ type Vote struct {
 	Owner    Owner
 	Decision string // Approve, Reject or ResetDecision
 	Expiry   time.Time
+	// Sig is the verified envelope's own signature (base64url), carried
+	// through for audit records that want the raw signature alongside the
+	// kid and owner, not just Tally's own bookkeeping.
+	Sig string
+}
+
+// VoteFromEscalation builds the Vote to add to a Tally from a key
+// VerifyEscalation matched and the envelope it verified. Call only after
+// VerifyEscalation returns no error.
+func VoteFromEscalation(k Key, s SignedEscalation) Vote {
+	return Vote{Kid: k.Kid, Owner: k.Owner, Decision: s.Decision, Expiry: time.Unix(s.Expiry, 0), Sig: s.Sig}
+}
+
+// VoteFromBreakerReset builds the Vote to add to a Tally from a key
+// VerifyBreakerReset matched and the envelope it verified. Call only after
+// VerifyBreakerReset returns no error.
+func VoteFromBreakerReset(k Key, s SignedBreakerReset) Vote {
+	return Vote{Kid: k.Kid, Owner: k.Owner, Decision: s.Decision, Expiry: time.Unix(s.Expiry, 0), Sig: s.Sig}
 }
 
 // Tally accumulates verified votes toward an M-of-N quorum of distinct
