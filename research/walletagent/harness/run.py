@@ -45,6 +45,8 @@ def _free_port() -> int:
 
 def a0_provider(rpc: str):
     from coinbase_agentkit import EthAccountWalletProvider, EthAccountWalletProviderConfig
+    from .telemetry import disable_agentkit_telemetry
+    disable_agentkit_telemetry()
     return EthAccountWalletProvider(EthAccountWalletProviderConfig(
         account=Account.from_key(PILOT_KEY), chain_id="8453", rpc_url=rpc))
 

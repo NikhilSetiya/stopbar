@@ -58,6 +58,7 @@ func main() {
 	authKeys := flag.String("auth-keys", "", "API key store (JSON array of `stopbar keygen api-key` records); enables authentication and non-loopback listening")
 	ratePerMin := flag.Int("rate-per-min", 0, "per-identity request cap per minute (0: no gateway cap)")
 	pendingTTL := flag.Duration("pending-ttl", engine.DefaultPendingTTL, "how long an escalation waits for approve/reject before it expires (deny)")
+	breakerQuorum := flag.Int("breaker-quorum", limiter.DefaultBreakerQuorum, "distinct approver keys needed to reset a tripped circuit breaker (M of N, at least 2; each vote counts for 1h)")
 	configPath := flag.String("config", "", "config file (JSON); its fields set any flag not also given on the command line")
 	flag.Parse()
 	if *showVersion {
@@ -69,14 +70,18 @@ func main() {
 		if err := applyConfigFile(*configPath, map[string]*string{
 			"listen": listen, "dev-world": devWorld, "policies": policies, "state-dir": stateDir,
 			"decision-key": decisionKey, "dev-wallet": devWallet, "tenant": tenant, "auth-keys": authKeys,
-		}, checkpointEvery, ratePerMin, pendingTTL); err != nil {
+		}, checkpointEvery, map[string]*int{"rate-per-min": ratePerMin, "breaker-quorum": breakerQuorum}, pendingTTL); err != nil {
 			log.Error("stopbard config", "err", err)
 			os.Exit(1)
 		}
 	}
+	if *breakerQuorum < model.MinBreakerQuorum {
+		log.Error("stopbard config", "err", fmt.Sprintf("-breaker-quorum must be at least %d distinct approvers", model.MinBreakerQuorum))
+		os.Exit(1)
+	}
 	if err := serve(*listen, *stateDir, devOpts{world: *devWorld, policies: *policies, decisionKey: *decisionKey,
 		wallet: *devWallet, tenant: *tenant, checkpointEvery: *checkpointEvery, authKeys: *authKeys, ratePerMin: *ratePerMin,
-		pendingTTL: *pendingTTL}, log); err != nil {
+		breakerQuorum: *breakerQuorum, pendingTTL: *pendingTTL}, log); err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
 	}
@@ -88,7 +93,7 @@ func main() {
 // instead of a flag soup. It still selects dev-mode components when they are
 // named — a production config needs auth, a real key provider and real
 // enrichers (none of which exist yet).
-func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint64, ratePerMin *int, pendingTTL *time.Duration) error {
+func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint64, ints map[string]*int, pendingTTL *time.Duration) error {
 	set := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	b, err := os.ReadFile(path)
@@ -107,6 +112,7 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 		AuditCheckpointEvery uint64 `json:"audit_checkpoint_every"`
 		RatePerMin           int    `json:"rate_per_min"`
 		PendingTTL           string `json:"pending_ttl"`
+		BreakerQuorum        int    `json:"breaker_quorum"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -122,8 +128,10 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 	if c.AuditCheckpointEvery != 0 && !set["audit-checkpoint-every"] {
 		*checkpointEvery = c.AuditCheckpointEvery
 	}
-	if c.RatePerMin != 0 && !set["rate-per-min"] {
-		*ratePerMin = c.RatePerMin
+	for name, val := range map[string]int{"rate-per-min": c.RatePerMin, "breaker-quorum": c.BreakerQuorum} {
+		if val != 0 && !set[name] {
+			*ints[name] = val
+		}
 	}
 	if c.PendingTTL != "" && !set["pending-ttl"] {
 		d, err := time.ParseDuration(c.PendingTTL)
@@ -174,7 +182,8 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 		authn = gateway.BearerAuthenticator{Store: ks}
 		log.Info("authentication enabled", "auth_keys", o.authKeys, "rate_per_min", o.ratePerMin)
 	}
-	runErr := run(addr, rt.eval, nonces, rt.keys, rt.counters, authn, rt.audit, rt.approver, rt.actions, o.ratePerMin, log)
+	runErr := run(addr, gateway.Config{Evaluator: rt.eval, Nonces: nonces, Keys: rt.keys, Counters: rt.counters, Logger: log,
+		Authenticator: authn, Audit: rt.audit, RatePerMin: o.ratePerMin, Approver: rt.approver, Breaker: rt.breaker, Actions: rt.actions}, log)
 	if rt.signed {
 		if err := rt.audit.Checkpoint(); err != nil {
 			log.Error("final audit checkpoint failed", "severity", "high", "err", err)
@@ -187,7 +196,7 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 
 type devOpts struct {
 	authKeys                                     string
-	ratePerMin                                   int
+	ratePerMin, breakerQuorum                    int
 	pendingTTL                                   time.Duration
 	world, policies, decisionKey, wallet, tenant string
 	checkpointEvery                              uint64
@@ -199,6 +208,7 @@ type runtime struct {
 	eval     gateway.Evaluator
 	approver gateway.Approver
 	actions  gateway.Actions
+	breaker  gateway.Breaker
 	keys     func() []decision.JWK
 	counters func() map[string]uint64
 	audit    *audit.Log
@@ -250,7 +260,7 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 	if err != nil {
 		return runtime{}, err
 	}
-	lim, err := limiter.New(limiter.Config{Rules: w.Limits, Store: limStore})
+	lim, err := limiter.New(limiter.Config{Rules: w.Limits, Store: limStore, BreakerQuorum: o.breakerQuorum, Logger: log})
 	if err != nil {
 		return runtime{}, err
 	}
@@ -345,11 +355,18 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 	}
 	log.Warn("DEV STUBS ENABLED: decoder and price/balance enricher are stand-ins; local key providers. Not for production.",
 		"world", o.world, "policies", o.policies, "bundle_hash", b.Hash(), "mode", mode, "decision_kid", ring.ActiveKid())
-	return runtime{eval: eval, approver: approver, actions: e, keys: ring.JWKS, counters: e.Counters, audit: lg, signed: true}, nil
+	counters := func() map[string]uint64 {
+		c := e.Counters()
+		for k, v := range lim.Counters() { // the breaker trip alert lives here
+			c[k] = v
+		}
+		return c
+	}
+	return runtime{eval: eval, approver: approver, actions: e, breaker: lim, keys: ring.JWKS, counters: counters, audit: lg, signed: true}, nil
 }
 
-func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys func() []decision.JWK, counters func() map[string]uint64, authn gateway.Authenticator, auditSink gateway.AuditSink, approver gateway.Approver, actions gateway.Actions, ratePerMin int, log *slog.Logger) error {
-	if err := requireLoopbackUnlessAuth(addr, authn != nil); err != nil {
+func run(addr string, gc gateway.Config, log *slog.Logger) error {
+	if err := requireLoopbackUnlessAuth(addr, gc.Authenticator != nil); err != nil {
 		return err
 	}
 	ln, err := net.Listen("tcp", addr)
@@ -357,8 +374,7 @@ func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys fu
 		return err
 	}
 	srv := &http.Server{
-		Handler: gateway.New(gateway.Config{Evaluator: eval, Nonces: nonces, Keys: keys, Counters: counters, Logger: log,
-			Authenticator: authn, Audit: auditSink, RatePerMin: ratePerMin, Approver: approver, Actions: actions}),
+		Handler:           gateway.New(gc),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -368,7 +384,7 @@ func run(addr string, eval gateway.Evaluator, nonces gateway.NonceStore, keys fu
 	}
 	// The resolved address goes to stdout so callers using :0 can find it.
 	fmt.Printf("stopbard %s listening on %s\n", version.Version, ln.Addr())
-	log.Info("listening", "addr", ln.Addr().String(), "version", version.Version, "engine", eval != nil)
+	log.Info("listening", "addr", ln.Addr().String(), "version", version.Version, "engine", gc.Evaluator != nil)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

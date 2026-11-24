@@ -9,7 +9,7 @@ hash = "sha256:" + hex( SHA-256( JCS( {
   "v":         1,
   "seq":       <uint64>,
   "ts":        <RFC 3339 string, hashed verbatim>,
-  "type":      <request|decision|approval|policy_change|commit|release|override|auth_reject|destination_change>,
+  "type":      <request|decision|approval|policy_change|commit|release|override|auth_reject|destination_change|breaker>,
   "body":      <event object>,
   "prev_hash": <previous record's hash, or GENESIS>
 } ) ) )

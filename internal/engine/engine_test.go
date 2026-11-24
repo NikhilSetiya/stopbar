@@ -124,6 +124,12 @@ func (l *fakeLimiter) Owner(id string) (string, string, bool) {
 	return "test", "agent", slices.Contains(l.reserved, id)
 }
 
+type breakerFunc func(context.Context, string) (bool, error)
+
+func (f breakerFunc) CircuitOpen(ctx context.Context, tenant string) (bool, error) {
+	return f(ctx, tenant)
+}
+
 type signFunc func(context.Context, model.Decision) (string, error)
 
 func (f signFunc) Sign(ctx context.Context, _ auth.Identity, _ model.ActionRequest, d model.Decision) (string, error) {
@@ -340,6 +346,17 @@ func TestFailClosed(t *testing.T) {
 		}, "", CodePolicyFail, false, true},
 		{"cap exceeded", func(r *rig) { r.limiter.reserveErr = ErrCapExceeded }, "", CodeCapExceeded, true, true},
 		{"circuit open", func(r *rig) { r.limiter.reserveErr = ErrCircuitOpen }, "", CodeCircuitOpen, true, true},
+		// CS-124: an open breaker denies before decode, enrich or policy run.
+		{"breaker open", func(r *rig) {
+			r.cfg.Breaker = breakerFunc(func(_ context.Context, tenant string) (bool, error) { return tenant == "acme", nil })
+			r.cfg.Decoders = []Decoder{noDecoder{}}
+		}, "", CodeCircuitOpen, false, true},
+		{"breaker store down", func(r *rig) {
+			r.cfg.Breaker = breakerFunc(func(context.Context, string) (bool, error) { return false, errors.New("bolt: closed") })
+		}, "", CodeLimiter, false, true},
+		{"breaker panic", func(r *rig) {
+			r.cfg.Breaker = breakerFunc(func(context.Context, string) (bool, error) { panic("boom") })
+		}, "", CodeLimiter, false, true},
 		{"limiter store down", func(r *rig) { r.limiter.reserveErr = errors.New("redis: connection refused") }, "", CodeLimiter, true, true},
 		{"signer error", func(r *rig) {
 			r.cfg.Signer = signFunc(func(context.Context, model.Decision) (string, error) { return "", errors.New("kms throttled") })

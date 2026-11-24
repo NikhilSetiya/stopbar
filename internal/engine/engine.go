@@ -67,6 +67,15 @@ type Limiter interface {
 	Owner(id string) (tenant, agent string, ok bool)
 }
 
+// Breaker reports whether a tenant's circuit breaker is open (CS-124, LLD
+// §7.3). While it is, every evaluation for the tenant is denied CIRCUIT_OPEN
+// before decode or policy run, so escalations and approvals stop too. An
+// error is FAIL_CLOSED_LIMITER. The limiter trips it (Reserve returns
+// ErrCircuitOpen) and only a quorum of approvers resets it.
+type Breaker interface {
+	CircuitOpen(ctx context.Context, tenant string) (bool, error)
+}
+
 // Domain errors a Limiter returns; anything else is FAIL_CLOSED_LIMITER.
 // Commit and Release return ErrUnknownReservation or ErrReservationExpired
 // for an ID with nothing to act on, and ErrAlreadyCommitted for a release (or
@@ -123,10 +132,13 @@ const (
 
 // Config wires an Engine. Every component except Enrichers is required.
 type Config struct {
-	Decoders     []Decoder
-	Enrichers    []Enricher
-	Policy       Policy
-	Limiter      Limiter
+	Decoders  []Decoder
+	Enrichers []Enricher
+	Policy    Policy
+	Limiter   Limiter
+	// Breaker is the tenant circuit breaker (CS-124). nil: the engine uses
+	// Limiter if it implements Breaker, and otherwise has no breaker check.
+	Breaker      Breaker
 	Signer       Signer
 	Audit        AuditLog
 	DecisionTTL  time.Duration // default 60s, at most model.MaxTTL
@@ -240,6 +252,9 @@ func New(cfg Config) (*Engine, error) {
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
+	}
+	if b, ok := cfg.Limiter.(Breaker); ok && cfg.Breaker == nil {
+		cfg.Breaker = b // the limiter that trips the breaker also enforces it
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
@@ -553,6 +568,17 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 	payloadHash, err := decision.PayloadHash(req.Action)
 	if err != nil {
 		return audit(e.deny(req.ID, now, "", failed(CodeNormalize, err)), nil)
+	}
+
+	// circuit breaker (CS-124): a halted tenant gets nothing evaluated.
+	if e.cfg.Breaker != nil {
+		var open bool
+		if err := e.call(ctx, func(ctx context.Context) (err error) { open, err = e.cfg.Breaker.CircuitOpen(ctx, req.Tenant); return }); err != nil {
+			return audit(e.deny(req.ID, now, payloadHash, failed(CodeLimiter, err)), nil)
+		}
+		if open {
+			return audit(e.deny(req.ID, now, payloadHash, failed(CodeCircuitOpen, fmt.Errorf("tenant %q circuit breaker is open", req.Tenant))), nil)
+		}
 	}
 
 	// decode

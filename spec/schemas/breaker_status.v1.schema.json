@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NikhilSetiya/stopbar/spec/schemas/breaker_status.v1.schema.json",
+  "title": "Stopbar circuit breaker status v1",
+  "description": "LLD \u00a77.3 (CS-124). Mirrors internal/model.BreakerStatus. Served by GET /v1/breakers/{tenant} and POST /v1/breakers/{tenant}/reset. Votes expire after 1 hour.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tenant",
+    "open",
+    "votes",
+    "quorum"
+  ],
+  "properties": {
+    "tenant": {
+      "type": "string",
+      "minLength": 1
+    },
+    "open": {
+      "type": "boolean",
+      "description": "While true, every evaluation for the tenant is denied CIRCUIT_OPEN."
+    },
+    "tripped_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "trip_request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "votes": {
+      "type": "array",
+      "description": "Live reset votes for this trip, one per approver identity. Only these count toward quorum.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "approver",
+          "at",
+          "expires_at"
+        ],
+        "properties": {
+          "approver": {
+            "type": "string",
+            "minLength": 1
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "at + 1h: after this the vote no longer counts."
+          }
+        }
+      }
+    },
+    "quorum": {
+      "type": "integer",
+      "minimum": 2,
+      "description": "Distinct approvers with live votes needed to reset (M of N, at least 2)."
+    },
+    "expired_votes": {
+      "type": "array",
+      "description": "Votes past expires_at: they no longer count, and are discarded (audited) with the next vote.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "approver",
+          "at",
+          "expires_at"
+        ],
+        "properties": {
+          "approver": {
+            "type": "string",
+            "minLength": 1
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "at + 1h: after this the vote no longer counts."
+          }
+        }
+      }
+    }
+  },
+  "if": {
+    "properties": {
+      "open": {
+        "const": true
+      }
+    }
+  },
+  "then": {
+    "required": [
+      "tripped_at",
+      "trip_request_id",
+      "reason"
+    ]
+  },
+  "else": {
+    "properties": {
+      "votes": {
+        "maxItems": 0
+      },
+      "expired_votes": {
+        "maxItems": 0
+      }
+    },
+    "not": {
+      "anyOf": [
+        {
+          "required": [
+            "tripped_at"
+          ]
+        },
+        {
+          "required": [
+            "trip_request_id"
+          ]
+        },
+        {
+          "required": [
+            "reason"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -110,7 +110,7 @@ func (f *fakeApprover) Status(ctx context.Context, id string) (model.EscalationS
 		Request: model.ActionRequest{ID: id, Tenant: "acme", Actor: model.Actor{AgentID: "bot"}}}, nil
 }
 
-func call(t *testing.T, h http.Handler, method, path, secret, ctype, body string) (int, map[string]any) {
+func callJSON(t *testing.T, h http.Handler, method, path, secret, ctype, body string) (int, map[string]any) {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	if ctype != "" {
@@ -174,7 +174,7 @@ func TestCommitRelease(t *testing.T) {
 			if c.code == "METHOD_NOT_ALLOWED" {
 				method = http.MethodGet
 			}
-			status, body := call(t, g, method, c.path, c.secret, c.ctype, c.body)
+			status, body := callJSON(t, g, method, c.path, c.secret, c.ctype, c.body)
 			if status != c.status || (c.code != "" && body["code"] != c.code) {
 				t.Fatalf("HTTP %d %v, want %d %s", status, body, c.status, c.code)
 			}
@@ -192,7 +192,7 @@ func TestCommitRelease(t *testing.T) {
 
 	t.Run("disabled without auth or actions", func(t *testing.T) {
 		for _, g := range []*Gateway{New(Config{Actions: act}), New(Config{Authenticator: BearerAuthenticator{Store: lifecycleKeys(t)}})} {
-			if status, body := call(t, g, http.MethodPost, "/v1/actions/r1/release", skBot, "", ""); status != 503 {
+			if status, body := callJSON(t, g, http.MethodPost, "/v1/actions/r1/release", skBot, "", ""); status != 503 {
 				t.Fatalf("HTTP %d %v, want 503", status, body)
 			}
 		}
@@ -204,7 +204,7 @@ func TestApprovalLifecycleRoutes(t *testing.T) {
 	g := New(Config{Authenticator: BearerAuthenticator{Store: lifecycleKeys(t)}, Approver: ap})
 
 	t.Run("reject answers 403 with the deny, as the approver", func(t *testing.T) {
-		status, body := call(t, g, http.MethodPost, "/v1/approvals/e1/reject", skOps, "", "")
+		status, body := callJSON(t, g, http.MethodPost, "/v1/approvals/e1/reject", skOps, "", "")
 		if status != 403 || body["outcome"] != "deny" || ap.approver != "ak_ops" {
 			t.Fatalf("HTTP %d %v approver %q", status, body, ap.approver)
 		}
@@ -224,7 +224,7 @@ func TestApprovalLifecycleRoutes(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ap.err = c.err
-			status, body := call(t, g, http.MethodPost, c.path, c.secret, "", "")
+			status, body := callJSON(t, g, http.MethodPost, c.path, c.secret, "", "")
 			if status != c.status || body["code"] != c.code {
 				t.Fatalf("HTTP %d %v, want %d %s", status, body, c.status, c.code)
 			}
@@ -238,7 +238,7 @@ func TestApprovalLifecycleRoutes(t *testing.T) {
 		} {
 			ap.state = state
 			for _, sk := range []string{skBot, skOps} { // the requester, and an approver
-				status, body := call(t, g, http.MethodGet, "/v1/decisions/e1", sk, "", "")
+				status, body := callJSON(t, g, http.MethodGet, "/v1/decisions/e1", sk, "", "")
 				if status != want || body["state"] != string(state) {
 					t.Fatalf("%s as %s: HTTP %d %v, want %d", state, sk, status, body, want)
 				}
@@ -249,22 +249,22 @@ func TestApprovalLifecycleRoutes(t *testing.T) {
 		for _, c := range []struct{ path, secret string }{
 			{"/v1/decisions/e1", skOther}, {"/v1/decisions/nope", skBot},
 		} {
-			if status, body := call(t, g, http.MethodGet, c.path, c.secret, "", ""); status != 404 {
+			if status, body := callJSON(t, g, http.MethodGet, c.path, c.secret, "", ""); status != 404 {
 				t.Fatalf("%s as %s: HTTP %d %v, want 404", c.path, c.secret, status, body)
 			}
 		}
-		if status, _ := call(t, g, http.MethodGet, "/v1/decisions/e1", "", "", ""); status != 401 {
+		if status, _ := callJSON(t, g, http.MethodGet, "/v1/decisions/e1", "", "", ""); status != 401 {
 			t.Fatalf("unauthenticated poll: HTTP %d", status)
 		}
 	})
 	t.Run("disabled without auth", func(t *testing.T) {
 		g := New(Config{Approver: ap})
 		for _, p := range []string{"/v1/approvals/e1/reject", "/v1/approvals/e1"} {
-			if status, _ := call(t, g, http.MethodPost, p, skOps, "", ""); status != 503 {
+			if status, _ := callJSON(t, g, http.MethodPost, p, skOps, "", ""); status != 503 {
 				t.Fatalf("%s: HTTP %d, want 503", p, status)
 			}
 		}
-		if status, _ := call(t, g, http.MethodGet, "/v1/decisions/e1", skOps, "", ""); status != 503 {
+		if status, _ := callJSON(t, g, http.MethodGet, "/v1/decisions/e1", skOps, "", ""); status != 503 {
 			t.Fatalf("poll: HTTP %d, want 503", status)
 		}
 	})

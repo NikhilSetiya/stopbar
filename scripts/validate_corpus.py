@@ -18,6 +18,8 @@ checks += [(req, f, lambda d: d) for f in glob.glob("spec/fixtures/action_reques
 checks += [(dec, f, lambda d: d) for f in glob.glob("spec/fixtures/decision.*.json")]
 for f in glob.glob("spec/fixtures/escalation_status.*.json"):  # and its nested request and decision
     checks += [(esc, f, lambda d: d), (req, f + "#request", lambda d: d["request"]), (dec, f + "#decision", lambda d: d["decision"])]
+brk = V(json.load(open("spec/schemas/breaker_status.v1.schema.json")))
+checks += [(brk, f, lambda d: d) for f in glob.glob("spec/fixtures/breaker_status.*.json")]
 bad = 0
 for v, f, pick in sorted(checks, key=lambda c: c[1]):
     errs = list(v.iter_errors(pick(yaml.safe_load(open(f.split("#")[0])))))

@@ -105,6 +105,12 @@ provider = StopbarWalletProvider(
 The provider holds no key: stopbard signs (gatekeeper mode), so an injected or
 compromised agent can't sign around the policy. Off-chain signatures are refused.
 
+**AgentKit telemetry is off.** AgentKit posts the wallet address, network and
+every action name to Coinbase analytics and has no opt-out. Importing
+`stopbar.wallet` stubs both of its call sites (wallet provider initialisation
+and the action decorator) for the whole process, so no AgentKit provider or
+action in it phones home.
+
 ## License
 
 Apache-2.0.

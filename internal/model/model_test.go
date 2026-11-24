@@ -76,6 +76,65 @@ func TestEscalationStatusFixture(t *testing.T) {
 	}
 }
 
+func TestBreakerStatusFixture(t *testing.T) {
+	b := roundTrip[BreakerStatus](t, "../../spec/fixtures/breaker_status.open.json")
+	if err := b.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBreakerStatusValidate(t *testing.T) {
+	at := time.Now()
+	open := func() BreakerStatus {
+		return BreakerStatus{Tenant: "t", Open: true, TrippedAt: &at, TripRequestID: "req_1", Reason: "cap",
+			Votes: []BreakerVote{{Approver: "ak_1", At: at, ExpiresAt: at.Add(BreakerVoteTTL)}}, Quorum: 2}
+	}
+	cases := map[string]struct {
+		mut  func(*BreakerStatus)
+		want []string // every problem expected, reported at once
+	}{
+		"ok open":   {func(*BreakerStatus) {}, nil},
+		"ok closed": {func(b *BreakerStatus) { *b = BreakerStatus{Tenant: "t", Votes: []BreakerVote{}, Quorum: 2} }, nil},
+		"everything wrong": {func(b *BreakerStatus) {
+			b.Tenant, b.Quorum, b.TrippedAt = "", 0, nil
+			b.Votes = append(b.Votes, BreakerVote{Approver: "ak_1"}, BreakerVote{})
+		}, []string{"tenant", "quorum", "exactly when open", "voted twice", "approver is required", "expires_at must be after at"}},
+		"quorum below two": {func(b *BreakerStatus) { b.Quorum = 1 }, []string{"quorum must be at least 2"}},
+		"open at quorum": {func(b *BreakerStatus) {
+			b.Votes = append(b.Votes, BreakerVote{Approver: "ak_2", At: at, ExpiresAt: at.Add(BreakerVoteTTL)})
+		}, []string{"quorum of live reset votes"}},
+		"expired votes do not count": {func(b *BreakerStatus) {
+			b.ExpiredVotes = []BreakerVote{{Approver: "ak_2", At: at.Add(-2 * time.Hour), ExpiresAt: at.Add(-time.Hour)}}
+		}, nil},
+		"bad expired vote": {func(b *BreakerStatus) { b.ExpiredVotes = []BreakerVote{{Approver: "ak_2"}} }, []string{"expired_votes[0]"}},
+		"closed with votes": {func(b *BreakerStatus) {
+			b.Open, b.TrippedAt, b.TripRequestID, b.Reason = false, nil, "", ""
+		}, []string{"no reset votes"}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			b := open()
+			c.mut(&b)
+			err := b.Validate()
+			if len(c.want) == 0 {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			var ve *ValidationError
+			if !errors.As(err, &ve) {
+				t.Fatalf("err = %v, want a ValidationError", err)
+			}
+			for _, w := range c.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("missing problem %q in %v", w, err)
+				}
+			}
+		})
+	}
+}
+
 var txType2 = 2
 
 func validEVM() ActionRequest {

@@ -228,6 +228,7 @@ const (
 	AuditRelease      AuditRecordType = "release"
 	AuditOverride     AuditRecordType = "override"
 	AuditAuthReject   AuditRecordType = "auth_reject" // CS-103: a request rejected at the gateway (identity mismatch, scope)
+	AuditBreaker      AuditRecordType = "breaker"     // CS-124: circuit breaker trip, reset vote or reset (body.event)
 	// AuditDestination records a change to a tenant's destination registry
 	// (CS-133), in the same transaction as the change.
 	AuditDestination AuditRecordType = "destination_change"
@@ -270,6 +271,90 @@ type EscalationStatus struct {
 	ResolvedBy string          `json:"resolved_by,omitempty"`
 	ResolvedAt *time.Time      `json:"resolved_at,omitempty"`
 	Decision   *Decision       `json:"decision,omitempty"`
+}
+
+// ErrBreakerNotOpen means a reset was asked for a tenant whose circuit breaker
+// is not open (CS-124).
+var ErrBreakerNotOpen = errors.New("circuit breaker is not open for that tenant")
+
+// BreakerStatus is a tenant's circuit breaker (CS-124, LLD §7.3), as served by
+// GET /v1/breakers/{tenant} and POST /v1/breakers/{tenant}/reset. While open,
+// every evaluation for the tenant is denied CIRCUIT_OPEN. It closes only when
+// Quorum (≥ 2) distinct approvers hold live votes to reset this trip.
+type BreakerStatus struct {
+	Tenant string `json:"tenant"`
+	Open   bool   `json:"open"`
+	// Set exactly while open: when and by which request it tripped, and why.
+	TrippedAt     *time.Time `json:"tripped_at,omitempty"`
+	TripRequestID string     `json:"trip_request_id,omitempty"`
+	Reason        string     `json:"reason,omitempty"`
+	// Votes are the live reset votes, one per approver identity (API key id).
+	// Only these count toward Quorum.
+	Votes []BreakerVote `json:"votes"`
+	// ExpiredVotes have passed their expires_at and no longer count. They are
+	// discarded (and the discard audited) with the next vote.
+	ExpiredVotes []BreakerVote `json:"expired_votes,omitempty"`
+	Quorum       int           `json:"quorum"`
+}
+
+// BreakerVote is one approver's vote to reset a tripped breaker. A vote
+// expires (BreakerVoteTTL after it was cast), so a quorum must be assembled
+// within that window.
+type BreakerVote struct {
+	Approver  string    `json:"approver"`
+	At        time.Time `json:"at"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// BreakerVoteTTL is how long a breaker reset vote counts.
+const BreakerVoteTTL = time.Hour
+
+// MinBreakerQuorum is the fewest distinct approvers a breaker reset needs.
+const MinBreakerQuorum = 2
+
+// ErrDuplicateVote means the approver already holds a live vote on this trip.
+var ErrDuplicateVote = errors.New("this approver already holds a live reset vote on this trip")
+
+// Validate checks a status's invariants, reporting every problem at once.
+func (b BreakerStatus) Validate() error {
+	var p []string
+	if b.Tenant == "" {
+		p = append(p, "tenant is required")
+	}
+	if b.Quorum < MinBreakerQuorum {
+		p = append(p, fmt.Sprintf("quorum must be at least %d", MinBreakerQuorum))
+	}
+	if b.Open != (b.TrippedAt != nil) || b.Open != (b.TripRequestID != "") || b.Open != (b.Reason != "") {
+		p = append(p, "tripped_at, trip_request_id and reason are set exactly when open")
+	}
+	if !b.Open && len(b.Votes)+len(b.ExpiredVotes) > 0 {
+		p = append(p, "a closed breaker has no reset votes")
+	}
+	if b.Open && b.Quorum >= MinBreakerQuorum && len(b.Votes) >= b.Quorum {
+		p = append(p, "an open breaker cannot already hold a quorum of live reset votes")
+	}
+	seen := map[string]bool{}
+	for i, v := range b.Votes {
+		switch {
+		case v.Approver == "":
+			p = append(p, fmt.Sprintf("votes[%d].approver is required", i))
+		case seen[v.Approver]:
+			p = append(p, fmt.Sprintf("votes[%d]: approver %q voted twice", i, v.Approver))
+		}
+		seen[v.Approver] = true
+		if !v.ExpiresAt.After(v.At) {
+			p = append(p, fmt.Sprintf("votes[%d].expires_at must be after at", i))
+		}
+	}
+	for i, v := range b.ExpiredVotes {
+		if v.Approver == "" || !v.ExpiresAt.After(v.At) {
+			p = append(p, fmt.Sprintf("expired_votes[%d] needs an approver and expires_at after at", i))
+		}
+	}
+	if len(p) > 0 {
+		return &ValidationError{Problems: p}
+	}
+	return nil
 }
 
 // AuditEntry is an audit record before the log assigns its sequence number,

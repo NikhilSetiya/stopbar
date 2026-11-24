@@ -75,7 +75,10 @@ def testnet_world(path):
         "chain_rpc": RPC,
         "feeds": {"native": {"address": ETH_USD_FEED, "max_age_sec": ETH_HEARTBEAT}},
         "known_destinations": [BOB, ROUTER],
-        "limits": [{"scope": "wallet", "window": "1h", "max_usd": "50000", "max_count": 50}],
+        # Hard per-tx cap (CS-123): the approved transfer is 60% of the real
+        # balance, so the share cap sits above it (75%).
+        "limits": [{"scope": "wallet", "window": "tx", "max_usd": "50000", "max_pct_of_balance": "0.75"},
+                   {"scope": "wallet", "window": "1h", "max_usd": "50000", "max_count": 50}],
     }, indent=2))
 
 
