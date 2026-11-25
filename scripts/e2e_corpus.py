@@ -172,8 +172,9 @@ for path in sorted(glob.glob("corpus/attacks/*.yaml")):
 
 # Authenticated gatekeeper (CS-103 increment 2). With -auth-keys, an allowed
 # step sent with an API key is signed only under a v2 token that binds that key
-# and its agent (never the body's claim). An escalation approved by another key
-# is signed under a token that binds the requester, not the approver.
+# and its agent (never the body's claim). An escalation approved by two signed
+# approver votes (CS-151, 2-of-2) is signed under a token that binds the
+# requester, not the approvers.
 entries = [yaml.safe_load(open(p)) for p in sorted(glob.glob("corpus/attacks/*.yaml"))]
 cases = [(next(e for e in entries if e["expected"].get("at_step", 0) > 0), 0, False),
          (next(e for e in entries if e["expected"]["outcome"] == "escalate" and "requests" not in e), 0, True)]
@@ -192,17 +193,27 @@ for entry, step, approve in cases:
         keyfile = os.path.join(tmp, "api-keys.json")
         json.dump([keyrec("ak_e2e", body["actor"]["agent_id"], "evaluate", secret),
                    keyrec("ak_e2e_approver", "ops", "approve", approver)], open(keyfile, "w"))
-        proc, addr, _, _ = start(tmp, setup, "-auth-keys", keyfile)
+        approvers = []
+        for who in ("alice", "bob"):
+            kf = os.path.join(tmp, f"approver-{who}.key")
+            out = subprocess.run([stopbar_cli, "approver", "keygen", kf], capture_output=True, text=True, check=True).stdout
+            pub = next(l.rsplit(": ", 1)[1].strip() for l in out.splitlines() if l.startswith("public_key"))
+            approvers.append(({"id": who, "tenant": body["tenant"], "owner": {"agent_id": who}, "public_key": pub}, kf))
+        json.dump({"approvers": [a for a, _ in approvers]}, open(os.path.join(tmp, "approvers.json"), "w"))
+        proc, addr, _, _ = start(tmp, setup, "-auth-keys", keyfile, "-approvers", os.path.join(tmp, "approvers.json"), "-approval-quorum", "2")
         try:
             status, d = post(addr, body, bearer=secret)
             if approve and status == 202:
-                status, d = post(addr, None, bearer=approver, path=f"/v1/approvals/{body['id']}")
+                for _, kf in approvers:  # `stopbar approve` signs locally; the second vote reaches quorum
+                    out = subprocess.run([stopbar_cli, "approve", body["id"], "--url", f"http://{addr}", "--approver-key", kf, "--key", approver],
+                                         capture_output=True, text=True).stdout
+                    status, d = (int(out.split()[1]), json.loads(out.split("\n", 1)[1])) if out.startswith("HTTP ") else (0, {})
             problems = [f"HTTP {status} {d.get('reasons')}, want 200"] if status != 200 else check_signed(step, body, d, want_id)
         finally:
             proc.terminate()
             proc.wait(timeout=10)
     failures += bool(problems)
-    what = "escalate -> approved by ak_e2e_approver" if approve else "allow"
+    what = "escalate -> approved 2-of-2 by signed approver keys" if approve else "allow"
     print("ok  " if not problems else "FAIL", f"authenticated gatekeeper, {entry['id']} {what}: token binds requester ak_e2e",
           "; ".join(problems))
 
