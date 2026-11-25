@@ -6,10 +6,12 @@ whatever the requester is: the deterministic controls (allowlist, large-share,
 unlimited-approval deny) and the chain enricher reading balances and the live
 Chainlink ETH/USD feed over a real RPC.
 
-The wallet key is generated once and kept locally (gitignored, never committed).
-The FIRST run prints the wallet address and the faucet step and stops; fund that
-address with a little Base Sepolia test ETH, then run again to execute the
-journey. Testnet funds are worthless and nothing here uses real money.
+The wallet key lives in research/walletagent/results/testnet-wallet.key
+(gitignored, never committed, so a fresh checkout or worktree does not have it:
+link it from the checkout that does). Without it the demo refuses to run rather
+than quietly using a new, empty wallet. NEW_TESTNET_WALLET=1 creates one on
+purpose; that run prints its address and the faucet step and stops, then fund it
+with a little Base Sepolia test ETH and run again. Testnet funds are worthless and nothing here uses real money.
 """
 import json
 import os
@@ -48,13 +50,20 @@ FAUCET = ("Base Sepolia faucet: https://portal.cdp.coinbase.com/products/faucet 
 SEL_LATEST_ROUND = "0xfeaf968c"  # latestRoundData()
 
 
-def load_or_create_wallet():
-    """Return (priv_hex_no_0x, checksum_address), generating a fresh key on the
-    first run. The key lives only in KEYFILE (mode 0600) and is never committed."""
-    KEYFILE.parent.mkdir(parents=True, exist_ok=True)
+def load_wallet():
+    """Return (priv_hex_no_0x, checksum_address) from KEYFILE (mode 0600, never
+    committed). A missing key is an error, not a new wallet: a silently created
+    one is empty, and the funded one would look lost. NEW_TESTNET_WALLET=1
+    creates one deliberately."""
     if KEYFILE.exists():
         priv = KEYFILE.read_text().strip().splitlines()[-1]
+    elif os.environ.get("NEW_TESTNET_WALLET") != "1":
+        raise SystemExit(f"testnet wallet key not found: {KEYFILE}\n"
+                         "  link your funded key there, e.g. from the main checkout:\n"
+                         f"    ln -s /path/to/stopbar/{KEYFILE.relative_to(REPO)} {KEYFILE}\n"
+                         "  or create a NEW (empty) wallet on purpose: NEW_TESTNET_WALLET=1 make demo-testnet")
     else:
+        KEYFILE.parent.mkdir(parents=True, exist_ok=True)
         priv = Account.create().key.hex()
         priv = priv[2:] if priv.startswith("0x") else priv
         with open(os.open(KEYFILE, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "w") as f:
@@ -100,7 +109,7 @@ def main():
     if not binsb.exists() or not binscli.exists():
         raise SystemExit("build first: bin/stopbard and bin/stopbar")
 
-    priv, addr = load_or_create_wallet()
+    priv, addr = load_wallet()
     w3 = Web3(Web3.HTTPProvider(RPC, request_kwargs={"timeout": 30}))
     if not w3.is_connected():
         raise SystemExit(f"cannot reach Base Sepolia RPC {RPC}")

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # make demo-testnet — scripted (no model, no real money) run of the Stopbar
 # gatekeeper + chain enricher against LIVE Base Sepolia over a public RPC.
-# The first run prints a wallet address to fund from a testnet faucet; fund it,
-# then run again to execute the journey. No Anvil and no Together key needed.
+# It needs the funded wallet key in research/walletagent/results/testnet-wallet.key
+# and refuses to run without it (NEW_TESTNET_WALLET=1 creates a new one to fund),
+# No Anvil and no Together key needed.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
