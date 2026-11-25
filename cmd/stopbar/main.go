@@ -12,7 +12,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -57,13 +56,15 @@ const usage = `usage:
       recompute the audit hash chain and check the signed checkpoints, offline
   stopbar audit export --state-dir DIR [--from N] [--to M]
       print audit records as JSON lines (unverified; run verify first)
-  stopbar contacts add <address> --state-dir DIR --tenant T [--label L] [--decision-key FILE]
-  stopbar contacts remove <address> --state-dir DIR --tenant T [--decision-key FILE]
-  stopbar contacts list --state-dir DIR --tenant T
-      edit or list a tenant's known destinations (the registry behind dest_known
-      and address-poisoning checks). Changes are audited; stop stopbard first,
-      since it holds the state file. --decision-key signs an audit checkpoint
-      over the change; without it the change is covered at stopbard's next exit`
+  stopbar contacts add <address> [--label L] --url URL --key KEY
+  stopbar contacts approve <id> --url URL --key APPROVER_KEY
+  stopbar contacts remove <address> --url URL --key KEY
+  stopbar contacts list --url URL --key KEY
+      edit or list the key's tenant's known destinations (the registry behind
+      dest_known and address-poisoning checks) on a running stopbard. An
+      addition is pending until a different key approves it, then known only
+      after the server's cooling-off period; every existing entry it looks
+      like is shown. A removal applies at once. Every change is audited`
 
 func main() {
 	if len(os.Args) < 2 || os.Args[1] == "version" {
@@ -363,53 +364,30 @@ func signedApprovalCall(verb string, args []string, dec, suffix string) (httpRes
 	if err != nil {
 		return httpResult{}, err
 	}
-	body, err := json.Marshal(sig)
+	status, body, err := callAPI(http.MethodPost, base+"/v1/approvals/"+neturl.PathEscape(idArg)+suffix, *key, sig)
 	if err != nil {
 		return httpResult{}, err
 	}
-	req, err := http.NewRequest(http.MethodPost, base+"/v1/approvals/"+neturl.PathEscape(idArg)+suffix, bytes.NewReader(body))
-	if err != nil {
-		return httpResult{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if *key != "" {
-		req.Header.Set("Authorization", "Bearer "+*key)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return httpResult{}, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	respBody, _ := io.ReadAll(resp.Body)
 	var pretty bytes.Buffer
-	if json.Indent(&pretty, respBody, "", "  ") != nil {
-		pretty.Write(respBody)
+	if json.Indent(&pretty, body, "", "  ") != nil {
+		pretty.Write(body)
 	}
-	fmt.Printf("HTTP %d\n%s\n", resp.StatusCode, pretty.String())
-	return httpResult{resp.StatusCode, respBody}, nil
+	fmt.Printf("HTTP %d\n%s\n", status, pretty.String())
+	return httpResult{status, body}, nil
 }
 
 // fetchEscalationToSign GETs /v1/approvals/<id> (CS-151): stopbard's
 // current view of what a signature over this escalation must cover.
 func fetchEscalationToSign(base, id, key string) (gateway.EscalationToSign, error) {
 	var out gateway.EscalationToSign
-	req, err := http.NewRequest(http.MethodGet, base+"/v1/approvals/"+neturl.PathEscape(id), nil)
+	status, body, err := callAPI(http.MethodGet, base+"/v1/approvals/"+neturl.PathEscape(id), key, nil)
 	if err != nil {
 		return out, err
 	}
-	if key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
+	if status != http.StatusOK {
+		return out, fmt.Errorf("could not fetch what to sign (HTTP %d): %s", status, strings.TrimSpace(string(body)))
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return out, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return out, fmt.Errorf("could not fetch what to sign (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-	if err := json.Unmarshal(respBody, &out); err != nil {
+	if err := json.Unmarshal(body, &out); err != nil {
 		return out, fmt.Errorf("bad escalation-to-sign response: %w", err)
 	}
 	return out, nil

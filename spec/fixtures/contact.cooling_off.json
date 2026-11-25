@@ -1,0 +1,13 @@
+{
+  "id": "ct_9a1b2c3d4e5f6071",
+  "tenant": "acme",
+  "address": "0x9f3c5d1e2a4b6c8d0e1f2a3b4c5d6e7f8a9b0c21",
+  "label": "payroll",
+  "status": "cooling_off",
+  "requested_by": "ak_ops",
+  "requested_at": "2026-11-23T12:00:00Z",
+  "approved_by": "ak_alice",
+  "approved_at": "2026-11-23T12:30:00Z",
+  "active_from": "2026-11-24T12:30:00Z",
+  "similar_to": []
+}

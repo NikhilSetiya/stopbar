@@ -103,7 +103,7 @@ func LoadWorld(path string) (*World, error) {
 		return nil, fmt.Errorf("devstub: world %s: %w", path, err)
 	}
 	for _, d := range w.KnownDestinations {
-		if _, err := enrich.NormalizeAddress(d); err != nil {
+		if _, err := model.NormalizeAddress(d); err != nil {
 			return nil, fmt.Errorf("devstub: world %s: known_destinations: %w", path, err)
 		}
 	}

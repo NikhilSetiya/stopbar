@@ -59,6 +59,66 @@ func TestActionRequestFixtures(t *testing.T) {
 	}
 }
 
+// Contact fixtures (CS-134) round-trip and validate, and the served status
+// matches what the timestamps say at a time inside the fixture's window.
+func TestContactFixtures(t *testing.T) {
+	r := roundTrip[ContactRequest](t, "../../spec/fixtures/contact_request.json")
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC) // after approval, before active_from
+	for _, f := range []string{"contact.pending.json", "contact.cooling_off.json"} {
+		t.Run(f, func(t *testing.T) {
+			c := roundTrip[Contact](t, "../../spec/fixtures/"+f)
+			if err := c.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			if c.StatusAt(at) != c.Status {
+				t.Fatalf("status %q, but the timestamps say %q", c.Status, c.StatusAt(at))
+			}
+		})
+	}
+}
+
+func TestContactValidate(t *testing.T) {
+	at := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	later := at.Add(time.Hour)
+	ok := Contact{ID: "ct_1", Tenant: "t", Address: "0x" + strings.Repeat("a", 40), Status: ContactPendingApproval,
+		RequestedBy: "ak", RequestedAt: at, SimilarTo: []SimilarContact{}}
+	for _, tt := range []struct {
+		name string
+		mut  func(*Contact)
+		want int // problems
+	}{
+		{"valid pending", func(*Contact) {}, 0},
+		{"valid approved", func(c *Contact) {
+			c.ApprovedBy, c.ApprovedAt, c.ActiveFrom, c.Status = "ak2", &at, &later, ContactCoolingOff
+		}, 0},
+		{"everything wrong at once", func(c *Contact) {
+			*c = Contact{Address: "0xABC", Label: strings.Repeat("x", MaxContactLabel+1), Status: "live"}
+		}, 9},
+		{"approval fields half set", func(c *Contact) { c.ApprovedBy = "ak2" }, 1},
+		{"active before approval", func(c *Contact) {
+			c.ApprovedBy, c.ApprovedAt, c.ActiveFrom, c.Status = "ak2", &later, &at, ContactActive
+		}, 1},
+		{"unapproved but active", func(c *Contact) { c.Status = ContactActive }, 1},
+		{"similar to itself", func(c *Contact) { c.SimilarTo = []SimilarContact{{Address: c.Address}} }, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := ok
+			tt.mut(&c)
+			err := c.Validate()
+			var ve *ValidationError
+			switch {
+			case tt.want == 0 && err != nil:
+				t.Fatalf("unexpected: %v", err)
+			case tt.want > 0 && (!errors.As(err, &ve) || len(ve.Problems) != tt.want):
+				t.Fatalf("got %v, want %d problems", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestDecisionFixture(t *testing.T) {
 	d := roundTrip[Decision](t, "../../spec/fixtures/decision.deny.json")
 	if err := d.Validate(); err != nil {

@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -59,6 +60,7 @@ func main() {
 	authKeys := flag.String("auth-keys", "", "API key store (JSON array of `stopbar keygen api-key` records); enables authentication and non-loopback listening")
 	ratePerMin := flag.Int("rate-per-min", 0, "per-identity request cap per minute (0: no gateway cap)")
 	pendingTTL := flag.Duration("pending-ttl", engine.DefaultPendingTTL, "how long an escalation waits for approve/reject before it expires (deny)")
+	coolingOff := flag.Duration("contact-cooling-off", enrich.DefaultCoolingOff, "how long an approved destination-registry addition waits before it counts as known (CS-134)")
 	breakerQuorum := flag.Int("breaker-quorum", limiter.DefaultBreakerQuorum, "distinct approver OWNERS needed (M of N, CS-124/151) to reset a tripped circuit breaker; always at least 2, with no -dev-world exception (internal/limiter.New enforces this unconditionally)")
 	approvalQuorum := flag.Int("approval-quorum", limiter.DefaultBreakerQuorum, "distinct approver OWNERS needed (M of N, CS-151) to approve an escalation; at least 2 unless -dev-world")
 	approversFile := flag.String("approvers", "", "CS-151: approver public-key config (JSON, internal/approval.LoadConfigFile), shared by escalation approve/reject and breaker reset — required for either; without it both are disabled")
@@ -74,7 +76,8 @@ func main() {
 			"listen": listen, "dev-world": devWorld, "policies": policies, "state-dir": stateDir,
 			"decision-key": decisionKey, "dev-wallet": devWallet, "tenant": tenant, "auth-keys": authKeys,
 			"approvers": approversFile,
-		}, checkpointEvery, map[string]*int{"rate-per-min": ratePerMin, "breaker-quorum": breakerQuorum, "approval-quorum": approvalQuorum}, pendingTTL); err != nil {
+		}, checkpointEvery, map[string]*int{"rate-per-min": ratePerMin, "breaker-quorum": breakerQuorum, "approval-quorum": approvalQuorum},
+			map[string]*time.Duration{"pending-ttl": pendingTTL, "contact-cooling-off": coolingOff}); err != nil {
 			log.Error("stopbard config", "err", err)
 			os.Exit(1)
 		}
@@ -95,7 +98,7 @@ func main() {
 	}
 	if err := serve(*listen, *stateDir, devOpts{world: *devWorld, policies: *policies, decisionKey: *decisionKey,
 		wallet: *devWallet, tenant: *tenant, checkpointEvery: *checkpointEvery, authKeys: *authKeys, ratePerMin: *ratePerMin,
-		breakerQuorum: *breakerQuorum, approvalQuorum: *approvalQuorum, pendingTTL: *pendingTTL, approversFile: *approversFile}, log); err != nil {
+		breakerQuorum: *breakerQuorum, approvalQuorum: *approvalQuorum, pendingTTL: *pendingTTL, coolingOff: *coolingOff, approversFile: *approversFile}, log); err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
 	}
@@ -107,7 +110,7 @@ func main() {
 // instead of a flag soup. It still selects dev-mode components when they are
 // named — a production config needs auth, a real key provider and real
 // enrichers (none of which exist yet).
-func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint64, ints map[string]*int, pendingTTL *time.Duration) error {
+func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint64, ints map[string]*int, durs map[string]*time.Duration) error {
 	set := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	b, err := os.ReadFile(path)
@@ -127,6 +130,7 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 		AuditCheckpointEvery uint64 `json:"audit_checkpoint_every"`
 		RatePerMin           int    `json:"rate_per_min"`
 		PendingTTL           string `json:"pending_ttl"`
+		ContactCoolingOff    string `json:"contact_cooling_off"` // Go duration, e.g. "24h"
 		BreakerQuorum        int    `json:"breaker_quorum"`
 		ApprovalQuorum       int    `json:"approval_quorum"`
 	}
@@ -150,12 +154,15 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 			*ints[name] = val
 		}
 	}
-	if c.PendingTTL != "" && !set["pending-ttl"] {
-		d, err := time.ParseDuration(c.PendingTTL)
-		if err != nil {
-			return fmt.Errorf("config %s: pending_ttl: %w", path, err)
+	for name, val := range map[string]string{"pending-ttl": c.PendingTTL, "contact-cooling-off": c.ContactCoolingOff} {
+		if val == "" || set[name] {
+			continue
 		}
-		*pendingTTL = d
+		d, err := time.ParseDuration(val)
+		if err != nil {
+			return fmt.Errorf("config %s: %s: %w", path, strings.ReplaceAll(name, "-", "_"), err)
+		}
+		*durs[name] = d
 	}
 	return nil
 }
@@ -199,8 +206,12 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 		authn = gateway.BearerAuthenticator{Store: ks}
 		log.Info("authentication enabled", "auth_keys", o.authKeys, "rate_per_min", o.ratePerMin)
 	}
+	if rt.contacts != nil && authn == nil {
+		log.Warn("contacts API disabled: it needs -auth-keys (approval is separated by API key)")
+	}
 	runErr := run(addr, gateway.Config{Evaluator: rt.eval, Nonces: nonces, Keys: rt.keys, Counters: rt.counters, Logger: log,
-		Authenticator: authn, Audit: rt.audit, RatePerMin: o.ratePerMin, Approver: rt.approver, Breaker: rt.breaker, Actions: rt.actions}, log)
+		Authenticator: authn, Audit: rt.audit, RatePerMin: o.ratePerMin, Approver: rt.approver, Breaker: rt.breaker, Actions: rt.actions,
+		Contacts: rt.contacts}, log)
 	if rt.signed {
 		if err := rt.audit.Checkpoint(); err != nil {
 			log.Error("final audit checkpoint failed", "severity", "high", "err", err)
@@ -215,7 +226,7 @@ type devOpts struct {
 	authKeys                                     string
 	approversFile                                string
 	ratePerMin, breakerQuorum, approvalQuorum    int
-	pendingTTL                                   time.Duration
+	pendingTTL, coolingOff                       time.Duration
 	world, policies, decisionKey, wallet, tenant string
 	checkpointEvery                              uint64
 	db                                           *store.DB
@@ -227,6 +238,7 @@ type runtime struct {
 	approver gateway.Approver
 	actions  gateway.Actions
 	breaker  gateway.Breaker
+	contacts gateway.Contacts
 	keys     func() []decision.JWK
 	counters func() map[string]uint64
 	audit    *audit.Log
@@ -321,16 +333,24 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 	if err != nil {
 		return runtime{}, err
 	}
-	// The destination registry (CS-133) lives in the state file. The world's
-	// known_destinations seed it for this tenant (added if missing, audited);
-	// `stopbar contacts` edits it while stopbard is stopped.
+	// The destination registry (CS-133/134) lives in the state file. The
+	// world's known_destinations seed it for this tenant, active at once
+	// (added if missing, audited); /v1/contacts edits it live, with approval
+	// and cooling-off for additions.
+	if o.coolingOff < 0 {
+		return runtime{}, errors.New("-contact-cooling-off must not be negative")
+	}
 	reg, err := enrich.OpenRegistry(o.db, lg)
 	if err != nil {
 		return runtime{}, err
 	}
+	reg.CoolingOff = o.coolingOff
+	if o.coolingOff == 0 {
+		log.Warn("-contact-cooling-off 0: an approved destination is known at once, with no window to notice and remove it")
+	}
 	seeded := 0
 	for _, d := range w.KnownDestinations {
-		added, err := reg.Add(o.tenant, d, "", "dev-world", time.Now())
+		added, err := reg.Seed(o.tenant, d, time.Now())
 		if err != nil {
 			return runtime{}, err
 		}
@@ -406,7 +426,7 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		c["stopbar_approval_rejects_total"] = rejects
 		return c
 	}
-	return runtime{eval: eval, approver: approver, actions: e, breaker: lim, keys: ring.JWKS, counters: counters, audit: lg, signed: true}, nil
+	return runtime{eval: eval, approver: approver, actions: e, breaker: lim, contacts: reg, keys: ring.JWKS, counters: counters, audit: lg, signed: true}, nil
 }
 
 func run(addr string, gc gateway.Config, log *slog.Logger) error {
