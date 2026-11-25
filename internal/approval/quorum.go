@@ -52,15 +52,19 @@ type Resolution struct {
 // VerifyEscalation or VerifyBreakerReset; Tally trusts it). Owner is the
 // matched key's configured Owner (spec §5) — it is what Tally dedupes and
 // excludes on, not Kid.
+// Vote's JSON tags matter: it is embedded directly in audit record bodies
+// (Resolution.Veto, VetoAuditEntry), so its wire shape is the audit log's,
+// not merely internal bookkeeping — lowercase, matching every other wire
+// type in the codebase.
 type Vote struct {
-	Kid      string
-	Owner    Owner
-	Decision string // Approve, Reject or ResetDecision
-	Expiry   time.Time
+	Kid      string    `json:"kid"`
+	Owner    Owner     `json:"owner"`
+	Decision string    `json:"decision"` // Approve, Reject or ResetDecision
+	Expiry   time.Time `json:"expiry"`
 	// Sig is the verified envelope's own signature (base64url), carried
 	// through for audit records that want the raw signature alongside the
 	// kid and owner, not just Tally's own bookkeeping.
-	Sig string
+	Sig string `json:"sig,omitempty"`
 }
 
 // VoteFromEscalation builds the Vote to add to a Tally from a key

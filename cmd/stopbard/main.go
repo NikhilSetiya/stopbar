@@ -59,8 +59,9 @@ func main() {
 	authKeys := flag.String("auth-keys", "", "API key store (JSON array of `stopbar keygen api-key` records); enables authentication and non-loopback listening")
 	ratePerMin := flag.Int("rate-per-min", 0, "per-identity request cap per minute (0: no gateway cap)")
 	pendingTTL := flag.Duration("pending-ttl", engine.DefaultPendingTTL, "how long an escalation waits for approve/reject before it expires (deny)")
-	breakerQuorum := flag.Int("breaker-quorum", limiter.DefaultBreakerQuorum, "distinct approver OWNERS needed (M of N, CS-151) to approve an escalation or reset a tripped circuit breaker; at least 2 unless -dev-world")
-	approversFile := flag.String("approvers", "", "CS-151: approver public-key config (JSON, internal/approval.LoadConfigFile) — required for escalation approve/reject and breaker reset; without it both are disabled")
+	breakerQuorum := flag.Int("breaker-quorum", limiter.DefaultBreakerQuorum, "distinct approver OWNERS needed (M of N, CS-124/151) to reset a tripped circuit breaker; always at least 2, with no -dev-world exception (internal/limiter.New enforces this unconditionally)")
+	approvalQuorum := flag.Int("approval-quorum", limiter.DefaultBreakerQuorum, "distinct approver OWNERS needed (M of N, CS-151) to approve an escalation; at least 2 unless -dev-world")
+	approversFile := flag.String("approvers", "", "CS-151: approver public-key config (JSON, internal/approval.LoadConfigFile), shared by escalation approve/reject and breaker reset — required for either; without it both are disabled")
 	configPath := flag.String("config", "", "config file (JSON); its fields set any flag not also given on the command line")
 	flag.Parse()
 	if *showVersion {
@@ -73,22 +74,28 @@ func main() {
 			"listen": listen, "dev-world": devWorld, "policies": policies, "state-dir": stateDir,
 			"decision-key": decisionKey, "dev-wallet": devWallet, "tenant": tenant, "auth-keys": authKeys,
 			"approvers": approversFile,
-		}, checkpointEvery, map[string]*int{"rate-per-min": ratePerMin, "breaker-quorum": breakerQuorum}, pendingTTL); err != nil {
+		}, checkpointEvery, map[string]*int{"rate-per-min": ratePerMin, "breaker-quorum": breakerQuorum, "approval-quorum": approvalQuorum}, pendingTTL); err != nil {
 			log.Error("stopbard config", "err", err)
 			os.Exit(1)
 		}
 	}
-	// CS-151: M-of-N quorum floor, for both escalation approvals and breaker
-	// resets. -dev-world allows a lower quorum (down to 1) for local testing;
-	// a production deployment (no -dev-world) never goes below
-	// approval.MinQuorumProduction (2).
-	if err := approval.ValidateQuorum(*breakerQuorum, *devWorld != ""); err != nil {
+	// -breaker-quorum has no -dev-world exception: internal/limiter.New
+	// enforces at least 2 unconditionally (CS-124, unchanged by CS-151), so
+	// this is just an early, clearer error for the same floor.
+	if *breakerQuorum < model.MinBreakerQuorum {
+		log.Error("stopbard config", "err", fmt.Sprintf("-breaker-quorum must be at least %d distinct approvers", model.MinBreakerQuorum))
+		os.Exit(1)
+	}
+	// -approval-quorum (CS-151, escalation approve/reject): -dev-world allows
+	// a lower quorum (down to 1) for local testing; a production deployment
+	// (no -dev-world) never goes below approval.MinQuorumProduction (2).
+	if err := approval.ValidateQuorum(*approvalQuorum, *devWorld != ""); err != nil {
 		log.Error("stopbard config", "err", err)
 		os.Exit(1)
 	}
 	if err := serve(*listen, *stateDir, devOpts{world: *devWorld, policies: *policies, decisionKey: *decisionKey,
 		wallet: *devWallet, tenant: *tenant, checkpointEvery: *checkpointEvery, authKeys: *authKeys, ratePerMin: *ratePerMin,
-		breakerQuorum: *breakerQuorum, pendingTTL: *pendingTTL, approversFile: *approversFile}, log); err != nil {
+		breakerQuorum: *breakerQuorum, approvalQuorum: *approvalQuorum, pendingTTL: *pendingTTL, approversFile: *approversFile}, log); err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
 	}
@@ -121,6 +128,7 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 		RatePerMin           int    `json:"rate_per_min"`
 		PendingTTL           string `json:"pending_ttl"`
 		BreakerQuorum        int    `json:"breaker_quorum"`
+		ApprovalQuorum       int    `json:"approval_quorum"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -137,7 +145,7 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 	if c.AuditCheckpointEvery != 0 && !set["audit-checkpoint-every"] {
 		*checkpointEvery = c.AuditCheckpointEvery
 	}
-	for name, val := range map[string]int{"rate-per-min": c.RatePerMin, "breaker-quorum": c.BreakerQuorum} {
+	for name, val := range map[string]int{"rate-per-min": c.RatePerMin, "breaker-quorum": c.BreakerQuorum, "approval-quorum": c.ApprovalQuorum} {
 		if val != 0 && !set[name] {
 			*ints[name] = val
 		}
@@ -206,7 +214,7 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 type devOpts struct {
 	authKeys                                     string
 	approversFile                                string
-	ratePerMin, breakerQuorum                    int
+	ratePerMin, breakerQuorum, approvalQuorum    int
 	pendingTTL                                   time.Duration
 	world, policies, decisionKey, wallet, tenant string
 	checkpointEvery                              uint64
@@ -279,7 +287,8 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		if approvers, err = approval.LoadConfigFile(o.approversFile); err != nil {
 			return runtime{}, fmt.Errorf("-approvers %s: %w", o.approversFile, err)
 		}
-		log.Info("approver keys loaded (CS-151)", "approvers", o.approversFile, "keys", approvers.Len(), "quorum", o.breakerQuorum)
+		log.Info("approver keys loaded (CS-151)", "approvers", o.approversFile, "keys", approvers.Len(),
+			"breaker_quorum", o.breakerQuorum, "approval_quorum", o.approvalQuorum)
 	} else {
 		log.Warn("no -approvers: escalation approve/reject and breaker reset are disabled")
 	}
@@ -351,7 +360,7 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		StageTimeout:   stageTimeout,
 		Logger:         log,
 		Approvers:      approvers,
-		ApprovalQuorum: o.breakerQuorum,
+		ApprovalQuorum: o.approvalQuorum,
 		Alerts:         alerts,
 	})
 	if err != nil {
