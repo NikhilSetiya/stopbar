@@ -1,6 +1,6 @@
 # Approval signature — v1
 
-Status: draft (CS-151). Decision: [ADR 0004](../docs/adr/0004-signed-approvals.md).
+Status: draft (CS-151). Decision: [ADR 0005](../docs/adr/0005-signed-approvals.md).
 
 A signed approval is Stopbar's replacement for API-key approval (issue #32). It
 is a human (or second-agent) countersignature, made with an **approver key**
@@ -52,14 +52,33 @@ JCS-canonical, exactly these four members:
 | `decision` | string | Always `reset`. Carried for symmetry with §2 and so a reset signature can never be read as an escalation decision even if the domain tag were ignored. |
 | `expiry` | int | Unix seconds, same rule as §2. |
 
+## 3a. Contact approval object
+
+Approves a pending destination-registry addition (CS-134, LLD §6.4).
+
+```json
+{"address":"0x7a25a1c4e3b2d1f09876543210fedcba98760c21","contact_id":"ct_123","decision":"approve","expiry":1700000000,"tenant":"acme"}
+```
+
+JCS-canonical, exactly these five members:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `tenant` | string | The tenant whose registry the entry is in. |
+| `contact_id` | string | `Contact.id` of the pending addition. |
+| `address` | string | `Contact.address`, lowercase as stored. Binds the signature to the address the approver saw, not only to an id. |
+| `decision` | string | Always `approve`. A pending addition is turned down by removing it, which needs no quorum. |
+| `expiry` | int | Unix seconds, same rule as §2. |
+
 ## 4. Signature
 
 ```
 signature = Ed25519(priv, domain || JCS(object))
 ```
 
-- Escalation approval domain: the 32 ASCII bytes `"stopbar-approval-escalation-v1\n"`.
+- Escalation approval domain: the 31 ASCII bytes `"stopbar-approval-escalation-v1\n"`.
 - Breaker reset domain: the 34 ASCII bytes `"stopbar-approval-breaker-reset-v1\n"`.
+- Contact approval domain: the 28 ASCII bytes `"stopbar-approval-contact-v1\n"`.
 
 This is deliberately not a JWS: there is one fixed algorithm (Ed25519), the
 verifier already has the object (it is reconstructing it from current state,
@@ -136,11 +155,30 @@ Same shape, over the §3 object, given the tenant and its breaker's current `tri
 
 There is no self-reset rule: a breaker trip has no single "requester" to exclude.
 
+## 8a. Verification (contact approval)
+
+Over the §3a object, given the stored pending entry (tenant, id, address) and its requester's `key_id` and `agent_id`:
+
+| # | Check | Error code |
+|---|---|---|
+| 1 | `kid` is in the configured approver set | `UNKNOWN_KEY` |
+| 2 | That key's configured tenant equals the entry's tenant | `WRONG_TENANT` |
+| 3 | `sig` is strict unpadded base64url, 64 bytes decoded | `MALFORMED` |
+| 4 | Ed25519 verifies over `domain \|\| JCS(object)` | `BAD_SIGNATURE` |
+| 5 | `decision` is `approve` | `BAD_DECISION` |
+| 6 | `tenant` equals the entry's tenant | `WRONG_TENANT` |
+| 7 | `contact_id` and `address` equal the stored entry's | `WRONG_CONTACT` |
+| 8 | `now < expiry` | `EXPIRED` |
+| 9 | `expiry ≤ now + 1h` | `EXPIRY_TOO_FAR_AHEAD` |
+| 10 | The key is not bound (§7) to the entry's requester | `SELF_APPROVAL` |
+
+The quorum is the escalation quorum (`-approval-quorum`), counted by §9's rules.
+
 ## 9. Quorum (M-of-N)
 
-Both flows resolve the same way, via `approval.Tally`:
+All three flows resolve the same way, via `approval.Tally`:
 
-- **Reject wins immediately: a single-approver veto, by design.** One valid `reject`, from any one configured approver, resolves the escalation as rejected outright — it needs no quorum of its own and is not outvoted by however many `approve` votes are already held, even a full quorum's worth. This is deliberately asymmetric with approval (which needs `M` distinct votes): it is the fail-closed direction. Escalation exists because the engine was not confident enough to allow outright; requiring agreement to let it through but only one dissent to stop it keeps that posture — a single approver can always fall back to denying, but no minority can force an allow past an objection. (A breaker reset has no reject; it is either silent — no vote recorded — or a `reset` vote.)
+- **Reject wins immediately: a single-approver veto, by design.** One valid `reject`, from any one configured approver, resolves the escalation as rejected outright — it needs no quorum of its own and is not outvoted by however many `approve` votes are already held, even a full quorum's worth. This is deliberately asymmetric with approval (which needs `M` distinct votes): it is the fail-closed direction. Escalation exists because the engine was not confident enough to allow outright; requiring agreement to let it through but only one dissent to stop it keeps that posture — a single approver can always fall back to denying, but no minority can force an allow past an objection. (A breaker reset and a contact approval have no reject; a vote is either cast or not. A contact addition is turned down by removing it.)
 - **`M` distinct OWNERS, never double-counted — not `M` distinct keys.** `Tally` dedupes on the matched key's `owner` (§5), not on `kid`. Two keys configured with the exact same `owner` (both `agent_id` and `key_id` equal, including both empty) are the same owner and count once between them: one person holding two approver key files cannot satisfy a 2-of-N quorum alone. The owner identity is deliberately an **exact** match of the whole `owner` object (`agent_id + "\x00" + key_id` as a canonical string) — not the either-field match §7's self-approval check uses — because quorum dedup only merges entries an operator configured identically on purpose; it never guesses that two differently-configured entries are "probably" the same person. `M` is the configured quorum (`MinQuorumProduction` = 2; `stopbard` refuses to start with a lower quorum unless run with `-dev-world`). A second valid vote whose owner already holds a live vote is refused (`ErrDuplicateVote`); it does not add a second count, and it does not replace the first — this covers both "the same key voted twice" and "a different key with the same owner voted."
 - **A vote owned by the escalation's requester never counts, as defence in depth.** `Tally` is constructed with the requester's `key_id`/`agent_id` to exclude (`NewTally(required, excludeKeyID, excludeAgentID)`; both `""` for a breaker reset, which has no requester, §8). `Add` runs the same either-field check as §7's `SELF_APPROVAL` and refuses such a vote the same way, even though `VerifyEscalation` should already have refused it before it ever reached `Tally` — this is a second, independent enforcement point, not the primary one.
 - **Votes expire.** A vote's own `expiry` (§2/§3) bounds how long it counts. `Tally` discards expired votes before counting toward `M`, so an owner whose vote expired may vote again (a fresh signature, not a resurrected one).
@@ -160,14 +198,15 @@ A single-approver veto is unusual enough to page on, and the record of who cast 
 | A stolen or guessed API key used to approve or reject | API keys are never in the approver set; `UNKNOWN_KEY` at step 1 either way. |
 | A valid approval replayed on a different, later escalation for the same tenant | §6 step 6: `escalation_id` is bound and checked. |
 | A valid breaker-reset signature replayed on the *next* trip for the same tenant | §8 step 7: `trip_request_id` is bound and checked. |
+| A contact approval moved to a different (look-alike) address or entry | §8a step 7: both `contact_id` and `address` are bound and checked. |
 | A stale approval used long after signing, or a signature pre-dated to stay valid forever | §6/§8 steps 8–9: checked at verification time, bounded to a 1-hour window, with no `iat` to trust. |
 | The same approver counted twice toward quorum, including by holding a second approver key file | `Tally` dedupes by `owner`, not `kid` (§9): a second live vote whose owner already holds one is refused (`ErrDuplicateVote`), whether it is the same key or a different key configured with the same owner. |
 | A compromised requester signs its own approval with a stolen or colluding approver key | §7: an approver key whose required `owner` matches the requester's `key_id` or `agent_id` is refused at step 10, independent of quorum. |
-| An approval or reset signature read as the other, or as a decision token / audit checkpoint | Domain separation (§4): each signing input starts with a distinct, versioned tag. |
+| An approval, reset or contact signature read as another kind, or as a decision token / audit checkpoint | Domain separation (§4): each signing input starts with a distinct, versioned tag. |
 | A decision reached, then "re-approved" after it changed (quorum met, then a late reject; or executed, then approved again) | `Tally`'s `ErrAlreadyResolved` (§9): the first resolution is final. |
 
 ## 11. Versioning
 
-Any change to either object's fields, the domain tags, or the verification order bumps the object's own version (`-v1` → `-v2` in its domain tag) and both versions are specified side by side, as for decision tokens.
+Any change to an object's fields, the domain tags, or the verification order bumps the object's own version (`-v1` → `-v2` in its domain tag) and both versions are specified side by side, as for decision tokens.
 
-Test vectors: [`vectors/approval-signature-v1.json`](vectors/approval-signature-v1.json), generated and checked by `internal/approval/vectors_test.go` (`go test ./internal/approval -run TestApprovalSignatureVectors -update`). They include negative vectors for every check in §6 and §8.
+Test vectors: [`vectors/approval-signature-v1.json`](vectors/approval-signature-v1.json), generated and checked by `internal/approval/vectors_test.go` (`go test ./internal/approval -run TestApprovalSignatureVectors -update`). They include negative vectors for every check in §6, §8 and §8a.

@@ -1,14 +1,15 @@
-# ADR 0004: Signed approvals replace API-key approval
+# ADR 0005: Signed approvals replace API-key approval
 
 - Status: **Accepted**
-- Date: 2026-11-24
+- Date: 2026-11-25
 - Task: CS-151 (issue #32)
 - Spec: [`spec/approval-signature-v1.md`](../../spec/approval-signature-v1.md)
 
 ## Context
 
-Escalation approval and circuit-breaker reset (CS-124, #128) were both
-authorised by an API key with an `approve` scope: whoever held that bearer
+Escalation approval, circuit-breaker reset (CS-124, #128) and
+destination-registry additions (CS-134, ADR 0004) were all authorised by an
+API key with an `approve` scope: whoever held that bearer
 secret and called the endpoint counted as an approver, one vote per
 authenticated identity. An API key authenticates a *request* to stopbard; it
 was never meant to authenticate a *decision*, and it carries no signature a
@@ -30,16 +31,20 @@ thing being decided.
    (config file and/or flag), each bound to a tenant and an id.
 2. **The signature covers the decision, not the request.** An escalation
    approval signs `{escalation_id, payload_hash, decision, expiry}`; a
-   breaker reset signs `{tenant, trip_request_id, decision, expiry}`
-   (`spec/approval-signature-v1.md` §2–§4). Both are domain-separated,
+   breaker reset signs `{tenant, trip_request_id, decision, expiry}`; a
+   contact addition signs `{tenant, contact_id, address, decision, expiry}`
+   (`spec/approval-signature-v1.md` §2–§4). Each kind has its own domain
+   tag, so a signature for one never verifies as another. Both are domain-separated,
    JCS-canonical Ed25519 signatures — not a JWS, since there is one fixed
    algorithm and no third party parses the envelope generically the way a
    decision-token adapter does.
-3. **M-of-N, distinct keys, with a floor.** A quorum of `M` distinct
-   approver keys is required for both escalation approval and breaker reset,
-   replacing #128's per-identity vote count with the same rule enforced
-   cryptographically. `M` ≥ 2 unless `stopbard` is run with `-dev-world`; it
-   refuses to start otherwise. A second vote from a key that already holds a
+3. **M-of-N, distinct owners, with a floor.** A quorum of `M` distinct
+   approver *owners* is required for escalation approval, breaker reset and
+   contact additions, replacing #128's per-identity vote count with the same
+   rule enforced cryptographically; two keys with the same owner count once.
+   Two settings: `-approval-quorum` (escalations and contacts) may go down to
+   1 only with `-dev-world`; `-breaker-quorum` never goes below 2, as before
+   (CS-124). `stopbard` refuses to start otherwise. A second vote from a key that already holds a
    live one is refused, not double-counted. Any valid reject resolves an
    escalation immediately, regardless of quorum (`internal/approval.Tally`).
 4. **Expiry is checked at verification time, not issuance time.** The object
@@ -56,8 +61,9 @@ thing being decided.
    reject) is refused — the check cannot be silently skipped by omitting
    the binding, only made moot by it naming an identity that never also
    requests.
-6. **API keys are removed from approval entirely.** `/v1/approvals/*` and
-   `/v1/breakers/*/reset` accept signed envelopes; an API key, having no
+6. **API keys are removed from approval entirely.** `/v1/approvals/*`,
+   `/v1/breakers/*/reset` and `/v1/contacts/{id}/approve` accept signed
+   envelopes; an API key, having no
    Ed25519 key pair, can never appear in the configured approver set and so
    can never produce a valid signature. CS-151/152's existing single-approver
    `Engine.Approve(ctx, id, approver string)` and CS-124's identity-string
@@ -84,7 +90,13 @@ thing being decided.
   does not decide how pending escalations or breaker trips are persisted,
   so it is identical for both flows and does not need to change when the
   pending-escalation storage (CS-152, PR #130) does.
-- Existing demos and the Python SDK must move from a single API-key
-  approval call to generating/holding two or more approver keys and signing
-  locally; this lands with the integration (engine, gateway, CLI, SDKs,
-  e2e) once CS-152's lifecycle endpoints are in place.
+- The CLI (`stopbar approve|reject|breaker reset|contacts approve
+  --approver-key`), both SDKs and the demos sign locally with approver keys
+  (`stopbar approver keygen`); the demos run a 2-of-2 quorum. An API key
+  still carries the HTTP call, for audit and rate limiting only.
+- A failed signature on an escalation is a deny decision
+  (`APPROVAL_SIG_<code>`) that is audited and leaves the escalation pending;
+  on a breaker reset or contact approval it is `400 INVALID_SIGNATURE` and
+  writes nothing.
+- CS-134's contact-approval tier rises from "a second API key" to M-of-N
+  approver signatures; ADR 0004's consequence that pointed here is met.
