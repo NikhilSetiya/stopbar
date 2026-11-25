@@ -21,8 +21,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/audit"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
+	"github.com/NikhilSetiya/stopbar/internal/gateway"
 	"github.com/NikhilSetiya/stopbar/internal/signer"
 	"github.com/NikhilSetiya/stopbar/internal/store"
 	"github.com/NikhilSetiya/stopbar/internal/version"
@@ -34,16 +36,22 @@ const usage = `usage:
   stopbar keygen decision-key <file>     generate a Stopbar decision key (Ed25519, mode 0600)
   stopbar keygen api-key --tenant T [--agent ID] [--scopes a,b]
       generate an API key: the secret (shown once) and the hashed record to store
-  stopbar approve <id> --url URL --key APPROVER_KEY
-      approve a pending escalation: stopbard re-evaluates it against current
-      state and, if it now allows, returns the signed transaction
-  stopbar reject <id> --url URL --key APPROVER_KEY
-      reject a pending escalation: it is denied, and nothing is signed
-  stopbar breaker status --tenant T [--url URL] [--key APPROVER_KEY]
+  stopbar approver keygen <file>
+      generate an Ed25519 approver key (mode 0600): the private key never
+      leaves this machine; give stopbard its public half via the approver
+      config (spec/approval-signature-v1.md §5)
+  stopbar approve <id> --approver-key FILE --url URL [--key API_KEY]
+      fetch what to sign from stopbard, sign it locally with the approver
+      key, and submit the signature (CS-151); on quorum, stopbard
+      re-evaluates against current state and, if it now allows, returns
+      the signed transaction
+  stopbar reject <id> --approver-key FILE --url URL [--key API_KEY]
+      sign and submit a reject (CS-151): one valid reject denies outright
+  stopbar breaker status --tenant T [--url URL] [--key API_KEY]
       show the tenant's circuit breaker (open/closed, trip, reset votes, quorum)
-  stopbar breaker reset --tenant T --url URL --key APPROVER_KEY [--key APPROVER_KEY ...]
-      vote to reset a tripped circuit breaker, once per approver key; it closes
-      only when a quorum of distinct approvers has voted (M of N), else refused
+  stopbar breaker reset --tenant T --url URL --approver-key FILE [--approver-key FILE ...] [--key API_KEY]
+      sign and submit one reset vote per approver key given; it closes only
+      when a quorum of distinct approver OWNERS has voted (M of N), else refused
   stopbar audit verify --state-dir DIR (--keys JWKS.json | --decision-key FILE) [--from N] [--to M] [--require-covered [--allow-empty]]
       recompute the audit hash chain and check the signed checkpoints, offline
   stopbar audit export --state-dir DIR [--from N] [--to M]
@@ -70,6 +78,10 @@ func main() {
 		}
 	case "keygen":
 		if err := keygenCmd(os.Args[2:]); err != nil {
+			fail(err.Error())
+		}
+	case "approver":
+		if err := approverCmd(os.Args[2:]); err != nil {
 			fail(err.Error())
 		}
 	case "contacts":
@@ -241,11 +253,36 @@ func verifyKeys(keysFile, decisionKeyFile string) (map[string]ed25519.PublicKey,
 	return loadKeys(keysFile)
 }
 
-// approveCmd approves a pending escalation by id. stopbard re-evaluates it
-// against current state (enrich, policy, limiter); if it now allows, the
-// response carries the signed transaction. The caller broadcasts it.
+// approverCmd generates the local Ed25519 approver key a human or
+// automation holds to sign escalation approvals/rejects and breaker resets
+// (CS-151, spec/approval-signature-v1.md §5). The private key never leaves
+// the machine it is generated on.
+func approverCmd(args []string) error {
+	if len(args) != 2 || args[0] != "keygen" {
+		return errors.New("usage: stopbar approver keygen <file>")
+	}
+	path := args[1]
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("approver keygen: %s already exists; refusing to overwrite a key", path)
+	}
+	pub, priv, err := approval.GenerateKey()
+	if err != nil {
+		return err
+	}
+	if err := approval.WriteKeyFile(path, priv); err != nil {
+		return err
+	}
+	fmt.Printf("wrote approver key %s (kid %s, mode 0600)\n", path, approval.Kid(pub))
+	fmt.Printf("public_key (base64url, for stopbard's approver config): %s\n", base64.RawURLEncoding.EncodeToString(pub))
+	return nil
+}
+
+// approveCmd fetches the escalation's current {escalation_id, payload_hash}
+// from stopbard, signs an "approve" envelope locally with --approver-key,
+// and submits it (CS-151). On quorum, stopbard re-evaluates against current
+// state and, if it now allows, the response carries the signed transaction.
 func approveCmd(args []string) error {
-	resp, err := approvalCall("approve", args, "")
+	resp, err := signedApprovalCall("approve", args, approval.Approve, "")
 	if err != nil {
 		return err
 	}
@@ -255,12 +292,12 @@ func approveCmd(args []string) error {
 	return nil
 }
 
-// rejectCmd rejects a pending escalation by id (CS-151): stopbard records it
-// as denied, audited with the approver identity. Success is a 403 deny whose
-// reason is APPROVAL_REJECTED; anything else (self-rejection, already
-// resolved, unknown id) is an error.
+// rejectCmd signs and submits a "reject" envelope (CS-151): one valid
+// reject denies the escalation outright, audited with the rejecting owner.
+// Success is a 403 deny whose reason is APPROVAL_REJECTED; anything else
+// (already resolved, unknown id, a refused signature) is an error.
 func rejectCmd(args []string) error {
-	resp, err := approvalCall("reject", args, "/reject")
+	resp, err := signedApprovalCall("reject", args, approval.Reject, "/reject")
 	if err != nil {
 		return err
 	}
@@ -282,10 +319,15 @@ type httpResult struct {
 	body   []byte
 }
 
-// approvalCall POSTs /v1/approvals/<id><suffix> with the approver key and
-// prints the response.
-func approvalCall(verb string, args []string, suffix string) (httpResult, error) {
-	usage := "usage: stopbar " + verb + " <id> --url URL --key APPROVER_KEY"
+// signedApprovalCall is the shared core of approveCmd/rejectCmd: GET
+// /v1/approvals/<id> for what to sign, sign it locally with the approver
+// key at --approver-key (the private key never leaves this process), and
+// POST the signed envelope to /v1/approvals/<id><suffix>. --key, if given,
+// is an optional API key for the HTTP call itself — it identifies the
+// caller for audit and rate limiting only; the signature is what
+// authorizes the approve/reject, never the API key (CS-151).
+func signedApprovalCall(verb string, args []string, dec, suffix string) (httpResult, error) {
+	usage := "usage: stopbar " + verb + " <id> --approver-key FILE --url URL [--key API_KEY]"
 	// The id is the first argument, before the flags. Go's flag package stops at
 	// the first non-flag token, so parse it out before the flags rather than
 	// after (otherwise `approve <id> --url ... --key ...` leaves them unparsed).
@@ -295,14 +337,34 @@ func approvalCall(verb string, args []string, suffix string) (httpResult, error)
 	idArg := args[0]
 	fs := flag.NewFlagSet(verb, flag.ContinueOnError)
 	url := fs.String("url", "http://127.0.0.1:7777", "stopbard base URL")
-	key := fs.String("key", "", "approver API key (needs the 'approve' scope)")
+	key := fs.String("key", "", "API key for the HTTP call itself (optional; never what authorizes the "+verb+")")
+	approverKeyFile := fs.String("approver-key", "", "local approver private key file (required; signs the "+verb+")")
 	if err := fs.Parse(args[1:]); err != nil {
 		return httpResult{}, err
 	}
 	if fs.NArg() != 0 {
 		return httpResult{}, errors.New(usage)
 	}
-	status, body, err := callAPI(http.MethodPost, strings.TrimRight(*url, "/")+"/v1/approvals/"+neturl.PathEscape(idArg)+suffix, *key, nil)
+	if *approverKeyFile == "" {
+		return httpResult{}, errors.New(usage + " (--approver-key is required)")
+	}
+	priv, err := approval.LoadKeyFile(*approverKeyFile)
+	if err != nil {
+		return httpResult{}, err
+	}
+	base := strings.TrimRight(*url, "/")
+	toSign, err := fetchEscalationToSign(base, idArg, *key)
+	if err != nil {
+		return httpResult{}, err
+	}
+	sig, err := approval.SignEscalation(priv, approval.EscalationObject{
+		EscalationID: toSign.EscalationID, PayloadHash: toSign.PayloadHash, Decision: dec,
+		Expiry: time.Now().Add(50 * time.Minute).Unix(), // comfortably under the 1h bound, clock skew included
+	})
+	if err != nil {
+		return httpResult{}, err
+	}
+	status, body, err := callAPI(http.MethodPost, base+"/v1/approvals/"+neturl.PathEscape(idArg)+suffix, *key, sig)
 	if err != nil {
 		return httpResult{}, err
 	}
@@ -312,6 +374,23 @@ func approvalCall(verb string, args []string, suffix string) (httpResult, error)
 	}
 	fmt.Printf("HTTP %d\n%s\n", status, pretty.String())
 	return httpResult{status, body}, nil
+}
+
+// fetchEscalationToSign GETs /v1/approvals/<id> (CS-151): stopbard's
+// current view of what a signature over this escalation must cover.
+func fetchEscalationToSign(base, id, key string) (gateway.EscalationToSign, error) {
+	var out gateway.EscalationToSign
+	status, body, err := callAPI(http.MethodGet, base+"/v1/approvals/"+neturl.PathEscape(id), key, nil)
+	if err != nil {
+		return out, err
+	}
+	if status != http.StatusOK {
+		return out, fmt.Errorf("could not fetch what to sign (HTTP %d): %s", status, strings.TrimSpace(string(body)))
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return out, fmt.Errorf("bad escalation-to-sign response: %w", err)
+	}
+	return out, nil
 }
 
 // keygenCmd generates the keys a deployment needs: the Ed25519 decision key

@@ -14,7 +14,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
@@ -78,22 +80,29 @@ func (f *fakeActions) Release(ctx context.Context, id, reason string) error {
 	return f.err
 }
 
-// fakeApprover serves one escalation "e1" requested by acme/bot.
+// fakeApprover serves one escalation "e1" requested by acme/bot. It does not
+// verify Ed25519 signatures itself (internal/approval and internal/engine
+// cover that); it records the envelope it was given, for assertions.
 type fakeApprover struct {
 	state    model.EscalationState
 	err      error
-	approver string
+	sig      approval.SignedEscalation
+	decision *model.Decision // Status's decision, when set
+	verdict  *model.Decision // Approve's answer, when set (e.g. a refused signature's deny)
 }
 
-func (f *fakeApprover) Approve(_ context.Context, id, approver string) (model.Decision, error) {
-	f.approver = approver
+func (f *fakeApprover) Approve(_ context.Context, id string, sig approval.SignedEscalation) (model.Decision, error) {
+	f.sig = sig
 	if f.err != nil {
 		return model.Decision{}, f.err
 	}
+	if f.verdict != nil {
+		return *f.verdict, nil
+	}
 	return model.Decision{RequestID: id, Outcome: model.Allow}, nil
 }
-func (f *fakeApprover) Reject(_ context.Context, id, approver string) (model.Decision, error) {
-	f.approver = approver
+func (f *fakeApprover) Reject(_ context.Context, id string, sig approval.SignedEscalation) (model.Decision, error) {
+	f.sig = sig
 	if f.err != nil {
 		return model.Decision{}, f.err
 	}
@@ -106,8 +115,25 @@ func (f *fakeApprover) Status(ctx context.Context, id string) (model.EscalationS
 	if f.err != nil {
 		return model.EscalationStatus{}, f.err
 	}
-	return model.EscalationStatus{RequestID: id, State: f.state,
+	return model.EscalationStatus{RequestID: id, State: f.state, Decision: f.decision,
 		Request: model.ActionRequest{ID: id, Tenant: "acme", Actor: model.Actor{AgentID: "bot"}}}, nil
+}
+
+// escBody is the JSON body of an escalation approve/reject envelope for "e1"
+// (not necessarily cryptographically valid — fakeApprover never checks the
+// signature bytes, only internal/approval and internal/engine do that).
+func escBody(t *testing.T, decision string) string {
+	t.Helper()
+	b, err := json.Marshal(approval.SignedEscalation{
+		EscalationObject: approval.EscalationObject{
+			EscalationID: "e1", PayloadHash: "sha256:" + strings.Repeat("a", 64), Decision: decision, Expiry: time.Now().Add(time.Minute).Unix(),
+		},
+		Kid: "kid_ops", Sig: "ZmFrZS1zaWduYXR1cmUtNjQtYnl0ZXMtcGFkZGVkLW91dC1mb3ItdGhlLWZha2UtYXBwcm92ZXIu",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 func callJSON(t *testing.T, h http.Handler, method, path, secret, ctype, body string) (int, map[string]any) {
@@ -203,30 +229,38 @@ func TestApprovalLifecycleRoutes(t *testing.T) {
 	ap := &fakeApprover{state: model.EscalationPending}
 	g := New(Config{Authenticator: BearerAuthenticator{Store: lifecycleKeys(t)}, Approver: ap})
 
-	t.Run("reject answers 403 with the deny, as the approver", func(t *testing.T) {
-		status, body := callJSON(t, g, http.MethodPost, "/v1/approvals/e1/reject", skOps, "", "")
-		if status != 403 || body["outcome"] != "deny" || ap.approver != "ak_ops" {
-			t.Fatalf("HTTP %d %v approver %q", status, body, ap.approver)
+	t.Run("reject answers 403 with the deny, verifying the posted envelope", func(t *testing.T) {
+		status, body := callJSON(t, g, http.MethodPost, "/v1/approvals/e1/reject", skOps, "application/json", escBody(t, approval.Reject))
+		if status != 403 || body["outcome"] != "deny" || ap.sig.Kid != "kid_ops" || ap.sig.Decision != approval.Reject {
+			t.Fatalf("HTTP %d %v sig %+v", status, body, ap.sig)
 		}
 	})
+	// CS-151: authorization is the signature, not the API key's scope — any
+	// authenticated key (here skBot, which has only "evaluate") may submit
+	// a reject envelope; it is the engine/limiter that verifies it.
 	for _, c := range []struct {
-		name, path, secret string
-		err                error
-		status             int
-		code               string
+		name, path, secret, decision string
+		err                          error
+		status                       int
+		code                         string
 	}{
-		{"approve resolved", "/v1/approvals/e1", skOps, model.ErrResolved, 409, "ALREADY_RESOLVED"},
-		{"reject resolved", "/v1/approvals/e1/reject", skOps, model.ErrResolved, 409, "ALREADY_RESOLVED"},
-		{"reject unknown", "/v1/approvals/e1/reject", skOps, model.ErrNoPending, 404, "NOT_FOUND"},
-		{"reject needs approve scope", "/v1/approvals/e1/reject", skBot, nil, 403, "FORBIDDEN_SCOPE"},
-		{"reject unauthenticated", "/v1/approvals/e1/reject", "", nil, 401, "UNAUTHENTICATED"},
-		{"reject store down", "/v1/approvals/e1/reject", skOps, errors.New("disk"), 500, "INTERNAL"},
+		{"approve resolved", "/v1/approvals/e1", skOps, approval.Approve, model.ErrResolved, 409, "ALREADY_RESOLVED"},
+		{"reject resolved", "/v1/approvals/e1/reject", skOps, approval.Reject, model.ErrResolved, 409, "ALREADY_RESOLVED"},
+		{"reject unknown", "/v1/approvals/e1/reject", skOps, approval.Reject, model.ErrNoPending, 404, "NOT_FOUND"},
+		{"reject from a non-approve-scoped key still reaches the approver", "/v1/approvals/e1/reject", skBot, approval.Reject, nil, 403, ""},
+		{"reject unauthenticated", "/v1/approvals/e1/reject", "", approval.Reject, nil, 401, "UNAUTHENTICATED"},
+		{"reject store down", "/v1/approvals/e1/reject", skOps, approval.Reject, errors.New("disk"), 500, "INTERNAL"},
+		{"duplicate vote", "/v1/approvals/e1/reject", skOps, approval.Reject, approval.ErrDuplicateVote, 409, "DUPLICATE_VOTE"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ap.err = c.err
-			status, body := callJSON(t, g, http.MethodPost, c.path, c.secret, "", "")
-			if status != c.status || body["code"] != c.code {
-				t.Fatalf("HTTP %d %v, want %d %s", status, body, c.status, c.code)
+			body := escBody(t, c.decision)
+			if c.secret == "" {
+				body = "" // unauthenticated: never reaches body decoding
+			}
+			status, got := callJSON(t, g, http.MethodPost, c.path, c.secret, "application/json", body)
+			if status != c.status || (c.code != "" && got["code"] != c.code) {
+				t.Fatalf("HTTP %d %v, want %d %s", status, got, c.status, c.code)
 			}
 		})
 	}
@@ -257,15 +291,102 @@ func TestApprovalLifecycleRoutes(t *testing.T) {
 			t.Fatalf("unauthenticated poll: HTTP %d", status)
 		}
 	})
-	t.Run("disabled without auth", func(t *testing.T) {
-		g := New(Config{Approver: ap})
+	t.Run("approve/reject need only an Approver configured; auth is optional", func(t *testing.T) {
+		// No Approver at all: still 503, regardless of auth or body.
+		none := New(Config{})
 		for _, p := range []string{"/v1/approvals/e1/reject", "/v1/approvals/e1"} {
-			if status, _ := callJSON(t, g, http.MethodPost, p, skOps, "", ""); status != 503 {
-				t.Fatalf("%s: HTTP %d, want 503", p, status)
+			if status, _ := callJSON(t, none, http.MethodPost, p, skOps, "application/json", escBody(t, approval.Reject)); status != 503 {
+				t.Fatalf("%s with no approver: HTTP %d, want 503", p, status)
 			}
 		}
+		// Approver configured but no Authenticator (loopback dev, CS-151): the
+		// signed envelope alone is enough; no credential is required at all.
+		ap2 := &fakeApprover{}
+		noAuth := New(Config{Approver: ap2})
+		status, body := callJSON(t, noAuth, http.MethodPost, "/v1/approvals/e1/reject", "", "application/json", escBody(t, approval.Reject))
+		if status != 403 || body["outcome"] != "deny" {
+			t.Fatalf("reject without auth: HTTP %d %v", status, body)
+		}
+	})
+	t.Run("poll still needs auth configured (unlike approve/reject)", func(t *testing.T) {
+		g := New(Config{Approver: ap})
 		if status, _ := callJSON(t, g, http.MethodGet, "/v1/decisions/e1", skOps, "", ""); status != 503 {
 			t.Fatalf("poll: HTTP %d, want 503", status)
 		}
 	})
+}
+
+// TestApprovalEnvelopeFailures (CS-151): a malformed signed envelope never
+// reaches the approver, a refused signature answers with the engine's deny
+// (403, safe to act on), and GET /v1/approvals/{id} serves what to sign only
+// for a pending escalation.
+func TestApprovalEnvelopeFailures(t *testing.T) {
+	good := escBody(t, approval.Approve)
+	for _, path := range []string{"/v1/approvals/e1", "/v1/approvals/e1/reject"} {
+		for _, c := range []struct {
+			name, ctype, body string
+			status            int
+			code              Code
+		}{
+			{"wrong content type", "text/plain", good, 415, CodeUnsupportedMedia},
+			{"empty body", "application/json", "", 400, CodeMalformedJSON},
+			{"not JSON", "application/json", "{", 400, CodeMalformedJSON},
+			{"duplicate key", "application/json", strings.Replace(good, `{"escalation_id"`, `{"kid":"x","escalation_id"`, 1), 400, CodeDuplicateKey},
+			{"unknown field", "application/json", strings.Replace(good, `"kid"`, `"approver":"me","kid"`, 1), 400, CodeInvalidRequest},
+			{"oversized", "application/json", strings.Replace(good, `"kid":"kid_ops"`, `"kid":"`+strings.Repeat("k", 5000)+`"`, 1), 413, CodeBodyTooLarge},
+		} {
+			t.Run(path+" "+c.name, func(t *testing.T) {
+				ap := &fakeApprover{state: model.EscalationPending}
+				g := New(Config{Authenticator: BearerAuthenticator{Store: lifecycleKeys(t)}, Approver: ap})
+				status, got := callJSON(t, g, http.MethodPost, path, skOps, c.ctype, c.body)
+				if status != c.status || got["code"] != string(c.code) {
+					t.Fatalf("HTTP %d %v, want %d %s", status, got, c.status, c.code)
+				}
+				if ap.sig.Kid != "" {
+					t.Fatalf("a malformed envelope reached the approver: %+v", ap.sig)
+				}
+			})
+		}
+	}
+
+	t.Run("a refused signature answers 403 with the engine's reason", func(t *testing.T) {
+		ap := &fakeApprover{verdict: &model.Decision{RequestID: "e1", Outcome: model.Deny, Reasons: []model.Reason{{Code: "APPROVAL_SIG_PAYLOAD_MISMATCH"}}}}
+		g := New(Config{Authenticator: BearerAuthenticator{Store: lifecycleKeys(t)}, Approver: ap})
+		status, got := callJSON(t, g, http.MethodPost, "/v1/approvals/e1", skOps, "application/json", good)
+		reasons, _ := got["reasons"].([]any)
+		if status != 403 || got["outcome"] != "deny" || len(reasons) != 1 || reasons[0].(map[string]any)["code"] != "APPROVAL_SIG_PAYLOAD_MISMATCH" {
+			t.Fatalf("HTTP %d %v", status, got)
+		}
+	})
+
+	ph := "sha256:" + strings.Repeat("b", 64)
+	for _, c := range []struct {
+		name, path, secret string
+		state              model.EscalationState
+		decision           *model.Decision
+		err                error
+		status             int
+	}{
+		{"pending: what to sign", "/v1/approvals/e1", skOps, model.EscalationPending, &model.Decision{PayloadHash: ph}, nil, 200},
+		{"resolved: nothing to sign", "/v1/approvals/e1", skOps, model.EscalationAllowed, &model.Decision{PayloadHash: ph}, nil, 404},
+		{"unknown id", "/v1/approvals/nope", skOps, model.EscalationPending, &model.Decision{PayloadHash: ph}, nil, 404},
+		{"unauthenticated", "/v1/approvals/e1", "", model.EscalationPending, &model.Decision{PayloadHash: ph}, nil, 401},
+		{"store down", "/v1/approvals/e1", skOps, model.EscalationPending, nil, errors.New("disk"), 500},
+	} {
+		t.Run("GET "+c.name, func(t *testing.T) {
+			ap := &fakeApprover{state: c.state, decision: c.decision, err: c.err}
+			g := New(Config{Authenticator: BearerAuthenticator{Store: lifecycleKeys(t)}, Approver: ap})
+			status, got := callJSON(t, g, http.MethodGet, c.path, c.secret, "", "")
+			if status != c.status {
+				t.Fatalf("HTTP %d %v, want %d", status, got, c.status)
+			}
+			if status == 200 {
+				maxExp, _ := got["max_expiry"].(float64)
+				if got["escalation_id"] != "e1" || got["payload_hash"] != ph || got["tenant"] != "acme" ||
+					int64(maxExp) > time.Now().Add(approval.MaxExpiryAhead).Unix()+1 {
+					t.Fatalf("to-sign %v", got)
+				}
+			}
+		})
+	}
 }

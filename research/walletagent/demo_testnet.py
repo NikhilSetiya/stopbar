@@ -23,7 +23,7 @@ from web3 import Web3
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from harness import chain, run  # noqa: E402
-from demo import gen_api_key, hdr, post_evaluate, reasons, say, start_stopbard, write_decision_key  # noqa: E402
+from demo import gen_api_key, gen_approvers, hdr, post_evaluate, reasons, say, signed_approve, start_stopbard, write_decision_key  # noqa: E402
 
 REPO = HERE.parents[1]
 RPC = os.environ.get("STOPBAR_SEPOLIA_RPC", "https://sepolia.base.org")
@@ -131,7 +131,8 @@ def main():
     worldf, config, statedir, keys_store = out / "world.json", out / "config.json", out / "state", out / "api-keys.json"
     write_decision_key(binscli, dec_key)
     api_secret = gen_api_key(binscli, keys_store, "demo", "wallet-agent", "evaluate")
-    approve_secret = gen_api_key(binscli, keys_store, "demo", "operator", "approve")
+    operator_secret = gen_api_key(binscli, keys_store, "demo", "operator", "approve")  # the approvers' HTTP credential: sees escalations, authorizes nothing
+    approvers_cfg, approver_keys = gen_approvers(binscli, out, "demo")  # two humans, 2-of-2 signed approval (CS-151)
     with open(os.open(wallet_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "w") as f:
         f.write("stopbar-dev-wallet-secp256k1-v1\n" + priv + "\n")
     testnet_world(worldf)
@@ -143,7 +144,7 @@ def main():
             "listen": f"127.0.0.1:{port}", "policies": str(HERE / "policies" / "demo"),
             "state_dir": str(statedir), "dev_world": str(worldf), "dev_wallet": str(wallet_file),
             "decision_key": str(dec_key), "tenant": "demo", "audit_checkpoint_every": 1,
-            "auth_keys": str(keys_store), "rate_per_min": 600,
+            "auth_keys": str(keys_store), "rate_per_min": 600, "approvers": str(approvers_cfg),
         }, indent=2))
         sb, url = start_stopbard(binsb, config, out / "stopbard.log")
         say(f"stopbard up at {url} (gatekeeper, allowlist policy, auth on, chain enricher → Base Sepolia)\n")
@@ -178,14 +179,8 @@ def main():
         say(f"  ⟵ STOPBAR: HTTP {st} {reasons(d)}  (large share of a REAL {bal / 1e18:.5f} ETH balance)")
         if st == 202:
             esc_id = d["request_id"]
-            say(f"  escalated id: {esc_id} — operator runs `stopbar approve` (re-reads chain balance + price)")
-            r = subprocess.run([str(binscli), "approve", esc_id, "--url", url, "--key", approve_secret],
-                               capture_output=True, text=True)
-            body = r.stdout.split("\n", 1)[1] if "\n" in r.stdout else "{}"
-            try:
-                ad = json.loads(body)
-            except ValueError:
-                ad = {}
+            say(f"  escalated id: {esc_id} — two approvers sign `stopbar approve` (re-reads chain balance + price)")
+            ad = signed_approve(binscli, url, esc_id, approver_keys, operator_secret)
             if ad.get("signed_tx"):
                 say("  ⟵ STOPBAR: approved — re-evaluated against current chain state, signed, payload bound")
                 say(f"           (not broadcast, to keep the testnet balance; set BROADCAST_APPROVE=1 to send)")

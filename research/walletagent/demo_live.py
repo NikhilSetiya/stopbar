@@ -5,7 +5,7 @@ The operator gives the agent plain-language tasks. Normal ones are allowed and
 broadcast (balances change on-chain). When the operator then asks for a transfer
 to an address that is not on the allowlist and an unlimited token approval,
 Stopbar denies both and the agent sees the reasons; a large transfer escalates.
-The operator then runs `stopbar approve <id>`, which re-evaluates the escalation
+Two approvers then each sign `stopbar approve <id> --approver-key`, which re-evaluates the escalation
 against current state and, if it still passes, signs and executes it (CS-151/152).
 
 Prices and balances are read from the chain (CS-131/132, Chainlink + RPC), and
@@ -29,7 +29,7 @@ from harness import agent, chain, run, spend, world  # noqa: E402
 from harness.tasks import ADDRESS_BOOK  # noqa: E402
 from stopbar import Client  # noqa: E402  (the published SDK — CS-182)
 from stopbar.wallet import StopbarWalletProvider  # noqa: E402
-from demo import gen_api_key, hdr, post_evaluate, reasons, say, start_stopbard, write_decision_key  # noqa: E402
+from demo import gen_api_key, gen_approvers, hdr, post_evaluate, reasons, say, signed_approve, start_stopbard, write_decision_key  # noqa: E402
 
 # Base mainnet Chainlink USD feeds — prices come from the chain, no API key.
 # Each feed carries its own documented heartbeat (max_age_sec): ETH/USD updates
@@ -101,7 +101,8 @@ def main():
     worldf, config, statedir, keys_store = out / "world.json", out / "config.json", out / "state", out / "api-keys.json"
     write_decision_key(binscli, dec_key)
     api_secret = gen_api_key(binscli, keys_store, "demo", "wallet-agent", "evaluate")
-    approve_secret = gen_api_key(binscli, keys_store, "demo", "operator", "approve")  # the human approver
+    operator_secret = gen_api_key(binscli, keys_store, "demo", "operator", "approve")  # the approvers' HTTP credential: sees escalations, authorizes nothing
+    approvers_cfg, approver_keys = gen_approvers(binscli, out, "demo")  # two humans, 2-of-2 signed approval (CS-151)
     with open(os.open(wallet_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "w") as f:
         f.write("stopbar-dev-wallet-secp256k1-v1\n" + run.PILOT_KEY[2:] + "\n")
 
@@ -119,7 +120,7 @@ def main():
             "listen": f"127.0.0.1:{port}", "policies": str(HERE / "policies" / "demo"),
             "state_dir": str(statedir), "dev_world": str(worldf), "dev_wallet": str(wallet_file),
             "decision_key": str(dec_key), "tenant": "demo", "audit_checkpoint_every": 1,
-            "auth_keys": str(keys_store), "rate_per_min": 600,
+            "auth_keys": str(keys_store), "rate_per_min": 600, "approvers": str(approvers_cfg),
         }, indent=2))
         sb, url = start_stopbard(binsb, config, out / "stopbard.log")
         say(f"stopbard up at {url} (gatekeeper, allowlist policy, auth on, chain enricher)\n")
@@ -171,7 +172,7 @@ def main():
                  "with token USDC, spender the Uniswap router, amount unlimited. Go ahead and submit it.")
 
         # ---- human approval of the escalation (CS-151/152) ----
-        hdr("HUMAN APPROVES THE ESCALATION — the operator runs `stopbar approve` on the 5 ETH transfer")
+        hdr("HUMAN APPROVES THE ESCALATION — two approvers each sign `stopbar approve` on the 5 ETH transfer")
         esc = next((e for e in prov.decisions if e["status"] == 202), None)
         if esc is None:
             say("  the model produced no escalation this run, so there is nothing to approve")
@@ -180,13 +181,7 @@ def main():
             esc_id = esc["decision"]["request_id"]
             say(f"  escalated request id: {esc_id}  (approving re-runs enrich, policy and the limiter against current state)")
             say("  before: " + balances(w3))
-            r = subprocess.run([str(binscli), "approve", esc_id, "--url", url, "--key", approve_secret],
-                               capture_output=True, text=True)
-            body = r.stdout.split("\n", 1)[1] if "\n" in r.stdout else "{}"
-            try:
-                ad = json.loads(body)
-            except ValueError:
-                ad = {}
+            ad = signed_approve(binscli, url, esc_id, approver_keys, operator_secret)
             if ad.get("signed_tx"):
                 txh = w3.eth.send_raw_transaction(ad["signed_tx"])
                 w3.eth.wait_for_transaction_receipt(txh, timeout=30)

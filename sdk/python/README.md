@@ -6,13 +6,15 @@ it first. This SDK is the in-process client agent builders use to send actions t
 Stopbar and act on the decision.
 
 The core client is **stdlib-only** — `pip install stopbar` pulls no third-party
-dependencies. The AgentKit wallet provider is an optional extra.
+dependencies. The AgentKit wallet provider and signed approvals are optional
+extras.
 
 ## Install
 
 ```bash
-pip install stopbar            # core client
-pip install "stopbar[wallet]"  # + the Coinbase AgentKit gatekeeper wallet provider
+pip install stopbar              # core client
+pip install "stopbar[wallet]"    # + the Coinbase AgentKit gatekeeper wallet provider
+pip install "stopbar[approver]"  # + signing escalation approvals/rejects (CS-151)
 ```
 
 ## Use
@@ -38,7 +40,7 @@ except StopbarDenied as d:
     print("forbidden:", d.reasons)         # for any caller, whoever asks (403)
 except StopbarEscalated as e:
     print("needs approval:", e.request_id) # (202) hold it for a human
-    approved = sb.approve(e.request_id)    # re-evaluates against current state
+    approved = sb.approve(e.request_id, "/path/to/approver.key")  # signs locally, re-evaluates on quorum
     broadcast(approved.signed_tx)
 ```
 
@@ -57,21 +59,30 @@ sb.commit(d.request_id, tx_hash)       # broadcast: the spend counts (retry-safe
 sb.release(d.request_id, "cancelled")  # abandoned: the cap is freed (retry-safe)
 ```
 
-An escalation waits for a human (default 15 minutes, then it expires as a deny):
+An escalation waits for a human (default 15 minutes, then it expires as a deny).
+Approving and rejecting are Ed25519-signed, never an API call alone (CS-151,
+spec/approval-signature-v1.md): the SDK fetches what to sign from Stopbar,
+signs it locally with an approver key — the private key never leaves this
+process — and submits the signature. A quorum of **distinct** approver keys
+(M-of-N, at least 2 in production) is required; one signature alone leaves it
+pending (still a 202 `StopbarEscalated`):
 
 ```python
 st = sb.poll(request_id)               # .state: pending / allowed / denied / expired
 if st.allowed:
     use(st.decision.token)             # or st.decision.signed_tx in gatekeeper mode
 
-ops = Client(url, api_key=approver_key, tenant="demo")  # 'approve' scope
-ops.approve(request_id)                # re-evaluates against current state
-ops.reject(request_id)                 # deny; the requester may do neither
+# approver_key is a path to a key file from `stopbar approver keygen`
+# (or stopbar.approval.write_key_file), or raw 32-byte Ed25519 seed bytes.
+sb.approve(request_id, approver_key_1)  # 1 of 2: still escalated (StopbarEscalated)
+sb.approve(request_id, approver_key_2)  # 2 of 2: quorum met, re-evaluates against current state
+sb.reject(request_id, approver_key_1)   # one valid reject denies outright, regardless of quorum
 ```
 
 Refusals raise `StopbarRequestError` with `.code` (`NOT_FOUND`, `CONFLICT`,
-`ALREADY_RESOLVED`, `RESERVATION_EXPIRED`, …). The CLI equivalents are
-`stopbar approve <id>` and `stopbar reject <id>`.
+`ALREADY_RESOLVED`, `RESERVATION_EXPIRED`, `DUPLICATE_VOTE`, …). The CLI
+equivalents are `stopbar approve <id> --approver-key FILE` and
+`stopbar reject <id> --approver-key FILE`.
 
 ### Provenance labels (taint)
 

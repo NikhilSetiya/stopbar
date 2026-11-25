@@ -1,26 +1,38 @@
 """Reservation and escalation lifecycle through a live stopbard over HTTP
-(CS-105, CS-151 reject, CS-152; scripts/e2e.sh).
+(CS-105, CS-151 signed approve/reject, CS-152; scripts/e2e.sh).
 
 Usage: e2e_lifecycle.py PATH/TO/stopbard PATH/TO/stopbar
 
-stopbard runs in advisory mode with authentication and an agent-scope count
-cap of 1 per hour, so a held reservation visibly blocks the next allow:
+stopbard runs in advisory mode with authentication, an agent-scope count cap
+of 1 per hour (so a held reservation visibly blocks the next allow), and
+-approval-quorum 1 (allowed only with -dev-world, CS-151 — -breaker-quorum
+has no such exception and stays at its default 2, unused by this script): a
+single signed vote reaches quorum for escalation approvals, so this script's
+focus stays on the lifecycle itself (reservations, poll, expiry,
+self-approval, commit after approval) rather than M-of-N mechanics, which
+scripts/e2e_breaker.py and the SDK examples already cover with a real 2-of-N
+quorum.
 
   reservations  evaluate (reserve) → a second allow is CAP_EXCEEDED → release
                 frees it → evaluate → commit consumes it for good (release now
                 409, the next allow CAP_EXCEEDED); retries are idempotent; other
                 agents, approver keys and unknown ids cannot settle it.
-  escalations   escalate → poll 202 pending → the REAL `stopbar reject <id>`
-                (id before flags) → poll 403 denied, approve now 409; the
-                requester cannot reject its own, even with an approve scope;
-                `stopbar approve <id>` → 200 allow with a token → poll 200
-                allowed → commit; an escalation left past -pending-ttl polls
-                403 expired.
+  escalations   escalate → poll 202 pending → the REAL `stopbar reject <id>
+                --approver-key FILE` (id before flags) signs and submits a
+                reject → poll 403 denied, approve now 409; a bare POST with no
+                signed envelope is refused (CS-151: no API-call approval left);
+                the requester cannot *approve* its own escalation even with an
+                approver key bound to its own identity (self-approval; a
+                self-reject is allowed by design, spec/approval-signature-v1.md
+                §7); `stopbar approve <id> --approver-key FILE` → 200 allow
+                with a token → poll 200 allowed → commit; an escalation left
+                past -pending-ttl polls 403 expired.
 
   gatekeeper    a second stopbard holding the wallet (-dev-wallet): escalate →
-                `stopbar approve <id>` → 200 with a signed tx that `stopbar
-                decode-tx` recovers to `from` with the decision's payload hash;
-                the poll returns the same signed tx; the tx is committed.
+                `stopbar approve <id> --approver-key FILE` → 200 with a signed
+                tx that `stopbar decode-tx` recovers to `from` with the
+                decision's payload hash; the poll returns the same signed tx;
+                the tx is committed.
 
 After each shutdown `stopbar audit verify --require-covered` must pass, and the
 log must hold each lifecycle record with the identity that caused it.
@@ -29,7 +41,7 @@ Needs: pyyaml.
 import base64, datetime, hashlib, json, os, subprocess, sys, tempfile, time, urllib.error, urllib.request
 import yaml
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "sdk", "python"))  # the stdlib-only SDK core
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "sdk", "python"))
 import stopbar  # noqa: E402
 
 stopbard, stopbar_cli = sys.argv[1], sys.argv[2]
@@ -70,27 +82,54 @@ def codes(d):
     return [r.get("code") for r in d.get("reasons", [])]
 
 
+def approver_keygen(path):
+    """`stopbar approver keygen <path>`; returns the base64url public key."""
+    r = subprocess.run([stopbar_cli, "approver", "keygen", path], capture_output=True, text=True, check=True)
+    return next(l.rsplit(": ", 1)[1].strip() for l in r.stdout.splitlines() if l.startswith("public_key"))
+
+
+def cli_approve(rid, addr, approver_key, api_key, verb="approve"):
+    return subprocess.run([stopbar_cli, verb, rid, "--url", f"http://{addr}", "--approver-key", approver_key, "--key", api_key],
+                          capture_output=True, text=True)
+
+
 ALLOW = "corpus/attacks/CS-2026-0005-replayed-request.yaml"   # 1% of balance to a known address: allowed
 ESCALATE = "corpus/attacks/CS-2026-0002-agent-over-transfer.yaml"  # 100% of balance: escalates
 _, setup = template(ALLOW, "x", "x")
 setup = dict(setup, limits=[{"scope": "agent", "window": "1h", "max_count": 1}])
 
-keys = {  # name: (secret, tenant, agent, scopes)
+keys = {  # name: (secret, tenant, agent, scopes) — scopes are now cosmetic for
+    # approve/reject/breaker (CS-151 moved authorization to the signature);
+    # they still gate /v1/evaluate and /v1/actions.
     "defi": ("stopbar_sk_e2e_defi", "test", "defi-agent", ["evaluate"]),
     "esc": ("stopbar_sk_e2e_esc", "test", "esc-agent", ["evaluate"]),
     "other": ("stopbar_sk_e2e_other", "test", "other-agent", ["evaluate"]),
     "ops": ("stopbar_sk_e2e_ops", "test", "", ["approve"]),
-    "dual": ("stopbar_sk_e2e_dual", "test", "dual-agent", ["evaluate", "approve"]),  # to try self-rejection
+    "dual": ("stopbar_sk_e2e_dual", "test", "dual-agent", ["evaluate", "approve"]),  # to try self-approval
     "sdk": ("stopbar_sk_e2e_sdk", "test", "sdk-agent", ["evaluate"]),
 }
 K = {n: v[0] for n, v in keys.items()}
 
+
+def write_auth_keys(path):
+    json.dump([{"id": "ak_" + n, "tenant": t, "agent_id": a, "scopes": s, "sha256": hashlib.sha256(sec.encode()).hexdigest()}
+               for n, (sec, t, a, s) in keys.items()], open(path, "w"))
+
+
 with tempfile.TemporaryDirectory() as tmp:
     world, keyfile, jwks, state = (os.path.join(tmp, f) for f in ("world.json", "auth.json", "jwks.json", "state"))
+    ops_key, dual_key, approvers_file = (os.path.join(tmp, f) for f in ("ops.key", "dual.key", "approvers.json"))
     json.dump(setup, open(world, "w"))
-    json.dump([{"id": "ak_" + n, "tenant": t, "agent_id": a, "scopes": s, "sha256": hashlib.sha256(sec.encode()).hexdigest()}
-               for n, (sec, t, a, s) in keys.items()], open(keyfile, "w"))
+    write_auth_keys(keyfile)
+    # ops_key is a neutral approver (bound to no requester); dual_key is bound
+    # to the "dual" API key's identity, for the self-approval test below.
+    ops_pub, dual_pub = approver_keygen(ops_key), approver_keygen(dual_key)
+    json.dump({"approvers": [
+        {"id": "ops", "tenant": "test", "owner": {"key_id": "ak_ops_signer"}, "public_key": ops_pub},
+        {"id": "dual_approver", "tenant": "test", "owner": {"key_id": "ak_dual"}, "public_key": dual_pub},
+    ]}, open(approvers_file, "w"))
     proc = subprocess.Popen([stopbard, "-listen", "127.0.0.1:0", "-dev-world", world, "-auth-keys", keyfile,
+                             "-approvers", approvers_file, "-approval-quorum", "1",
                              "-state-dir", state, "-pending-ttl", f"{PENDING_TTL}s"],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
@@ -133,7 +172,7 @@ with tempfile.TemporaryDirectory() as tmp:
         s, d = http(addr, "POST", "/v1/actions/req_nope/commit", K["defi"], {"tx_ref": tx})
         check(s == 404, f"unknown id: HTTP {s}")
 
-        print("-- escalations (CS-151 reject, CS-152)")
+        print("-- escalations (CS-151 signed approve/reject, CS-152)")
         e1, _ = template(ESCALATE, "esc-agent", "req_life_e1")
         s, d = http(addr, "POST", "/v1/evaluate", K["esc"], e1)
         check(s == 202, f"escalates: HTTP {s} {d.get('reasons')}")
@@ -142,19 +181,22 @@ with tempfile.TemporaryDirectory() as tmp:
         s, d = http(addr, "GET", "/v1/decisions/req_life_e1", K["other"])
         check(s == 404, f"another agent cannot poll it: HTTP {s}")
         s, d = http(addr, "POST", "/v1/approvals/req_life_e1/reject", K["esc"])
-        check(s == 403 and d.get("code") == "FORBIDDEN_SCOPE", f"the requester's key cannot reject: HTTP {s} {d.get('code')}")
-        r = subprocess.run([stopbar_cli, "reject", "req_life_e1", "--url", f"http://{addr}", "--key", K["ops"]], capture_output=True, text=True)
-        check(r.returncode == 0 and "APPROVAL_REJECTED" in r.stdout, f"`stopbar reject <id> --url --key` exits 0: {r.returncode} {r.stderr.strip()}")
+        check(s == 415 and d.get("code") == "UNSUPPORTED_MEDIA_TYPE",
+              f"a bare POST with no signed envelope is refused (CS-151: no API-call approval left): HTTP {s} {d.get('code')}")
+        r = cli_approve("req_life_e1", addr, ops_key, K["ops"], "reject")
+        check(r.returncode == 0 and "APPROVAL_REJECTED" in r.stdout, f"`stopbar reject <id> --approver-key --url --key` exits 0: {r.returncode} {r.stderr.strip()}")
         s, d = http(addr, "GET", "/v1/decisions/req_life_e1", K["esc"])
-        check(s == 403 and d.get("state") == "denied" and d.get("resolved_by") == "ak_ops"
-              and "APPROVAL_REJECTED" in codes(d["decision"]), f"poll denied by ak_ops: HTTP {s} {d.get('state')} {d.get('resolved_by')}")
-        r = subprocess.run([stopbar_cli, "approve", "req_life_e1", "--url", f"http://{addr}", "--key", K["ops"]], capture_output=True, text=True)
-        check(r.returncode != 0 and "HTTP 409" in r.stdout, f"approve after reject is refused (409): {r.stdout.splitlines()[:1]}")
+        check(s == 403 and d.get("state") == "denied" and "APPROVAL_REJECTED" in codes(d["decision"]),
+              f"poll denied: HTTP {s} {d.get('state')}")
+        r = cli_approve("req_life_e1", addr, ops_key, K["ops"], "approve")
+        # Resolved: GET /v1/approvals/<id> (what-to-sign) now 404s, same as an
+        # unknown id — the CLI fails at that step, before any POST/409.
+        check(r.returncode != 0 and "404" in r.stderr, f"approve after reject is refused: {r.stderr.strip()}")
 
         e2, _ = template(ESCALATE, "esc-agent", "req_life_e2")
         s, d = http(addr, "POST", "/v1/evaluate", K["esc"], e2)
         check(s == 202, f"second escalation: HTTP {s}")
-        r = subprocess.run([stopbar_cli, "approve", "req_life_e2", "--url", f"http://{addr}", "--key", K["ops"]], capture_output=True, text=True)
+        r = cli_approve("req_life_e2", addr, ops_key, K["ops"], "approve")
         check(r.returncode == 0 and '"outcome": "allow"' in r.stdout and '"token"' in r.stdout, f"`stopbar approve <id>` allows with a token: {r.returncode} {r.stderr.strip()}")
         s, d = http(addr, "GET", "/v1/decisions/req_life_e2", K["esc"])
         check(s == 200 and d.get("state") == "allowed" and d["decision"].get("token"), f"poll allowed, with the token: HTTP {s} {d.get('state')}")
@@ -163,14 +205,17 @@ with tempfile.TemporaryDirectory() as tmp:
 
         e4, _ = template(ESCALATE, "dual-agent", "req_life_e4")
         s, d = http(addr, "POST", "/v1/evaluate", K["dual"], e4)
-        r = subprocess.run([stopbar_cli, "reject", "req_life_e4", "--url", f"http://{addr}", "--key", K["dual"]], capture_output=True, text=True)
+        # dual_key's owner (ak_dual) is bound to dual-agent's own requester
+        # identity: approving its own escalation is refused (self-approval).
+        # A self-REJECT, by contrast, is allowed by design (spec §7) — not
+        # re-tested here; it is covered directly in internal/engine's tests.
+        r = cli_approve("req_life_e4", addr, dual_key, K["dual"], "approve")
         s2, d2 = http(addr, "GET", "/v1/decisions/req_life_e4", K["dual"])
         check(s == 202 and r.returncode != 0 and "APPROVAL_SELF_APPROVAL" in r.stdout and d2.get("state") == "pending",
-              f"the requester cannot reject its own escalation (still {d2.get('state')})")
+              f"the requester cannot approve its own escalation, even with an approver key bound to its identity (still {d2.get('state')})")
 
         print("-- the Python SDK against the same stopbard")
         sb = stopbar.Client(f"http://{addr}", api_key=K["sdk"], tenant="test", agent_id="sdk-agent")
-        ops = stopbar.Client(f"http://{addr}", api_key=K["ops"], tenant="test")
         req = template(ALLOW, "sdk-agent", "x")[0]
         d = sb.evaluate(req["action"], labels=["trusted_user"], request_id="req_life_s1")
         check(sb.release(d.request_id, "sdk cancel")["state"] == "released", "sdk: evaluate → release")
@@ -187,7 +232,8 @@ with tempfile.TemporaryDirectory() as tmp:
             check(False, "sdk: the escalation must raise StopbarEscalated")
         except stopbar.StopbarEscalated as e:
             check(sb.poll(e.request_id).state == "pending", "sdk: escalate → poll pending")
-            check(ops.reject(e.request_id).reasons == ["APPROVAL_REJECTED"], "sdk: approver rejects")
+            # The SDK signs locally with the same ops.key file the CLI used above.
+            check(sb.reject(e.request_id, ops_key).reasons == ["APPROVAL_REJECTED"], "sdk: signs and submits a reject")
             st = sb.poll(e.request_id)
             check(st.state == "denied" and not st.allowed and st.decision.outcome == "deny", "sdk: poll denied")
 
@@ -197,8 +243,8 @@ with tempfile.TemporaryDirectory() as tmp:
         time.sleep(PENDING_TTL + 1)
         s, d = http(addr, "GET", "/v1/decisions/req_life_e3", K["ops"])
         check(s == 403 and d.get("state") == "expired" and "APPROVAL_EXPIRED" in codes(d["decision"]), f"timeout → deny: HTTP {s} {d.get('state')}")
-        r = subprocess.run([stopbar_cli, "reject", "req_life_e3", "--url", f"http://{addr}", "--key", K["ops"]], capture_output=True, text=True)
-        check(r.returncode != 0 and "HTTP 409" in r.stdout, "reject after expiry is refused (409)")
+        r = cli_approve("req_life_e3", addr, ops_key, K["ops"], "reject")
+        check(r.returncode != 0 and "404" in r.stderr, "reject after expiry is refused (resolved as expired; GET 404s)")
 
         with urllib.request.urlopen(f"http://{addr}/v1/keys", timeout=5) as resp:
             open(jwks, "wb").write(resp.read())
@@ -221,7 +267,8 @@ with tempfile.TemporaryDirectory() as tmp:
     check(any(who(b) == "ak_defi" for b in find("release", lambda b: b["request_id"] == "req_life_a1")), "release audited with the requester identity")
     check(len(find("release", lambda b: b["request_id"] == "req_life_a1")) == 1, "the idempotent second release wrote nothing")
     check(any(who(b) == "ak_defi" and b["tx_ref"] == tx for b in find("commit", lambda b: b["request_id"] == "req_life_a3")), "commit audited with tx_ref and identity")
-    check(any(who(b) == "ak_ops" and b.get("approver") == "ak_ops" for b in find("decision", lambda b: last_code(b) == "APPROVAL_REJECTED")), "reject audited with the approver identity")
+    check(any(who(b) == "ak_ops" and (b.get("veto") or {}).get("kid") for b in find("decision", lambda b: last_code(b) == "APPROVAL_REJECTED")),
+          "reject audited with the rejecting owner's kid (not an API-key label)")
     check(any(who(b) == "ak_ops" and b["state"] == "allowed" for b in find("approval", lambda b: b["request_id"] == "req_life_e2")), "approval resolution audited")
     check(any(b["request"]["id"] == "req_life_e3" for b in find("decision", lambda b: last_code(b) == "APPROVAL_EXPIRED")), "expiry audited as a deny")
     check(any(who(b) == "ak_other" for b in find("auth_reject", lambda b: "not the requester" in b.get("reason", ""))), "a foreign settle attempt is audited")
@@ -230,13 +277,15 @@ print("-- gatekeeper: escalate → approve → signed tx (CS-152 acceptance)")
 ANVIL_KEY = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"  # public test key, never funded
 with tempfile.TemporaryDirectory() as tmp:
     world, keyfile, wallet, jwks, state = (os.path.join(tmp, f) for f in ("world.json", "auth.json", "wallet", "jwks.json", "state"))
+    ops_key, approvers_file = os.path.join(tmp, "ops.key"), os.path.join(tmp, "approvers.json")
     json.dump(setup, open(world, "w"))
-    json.dump([{"id": "ak_" + n, "tenant": t, "agent_id": a, "scopes": sc, "sha256": hashlib.sha256(sec.encode()).hexdigest()}
-               for n, (sec, t, a, sc) in keys.items()], open(keyfile, "w"))
+    write_auth_keys(keyfile)
+    ops_pub = approver_keygen(ops_key)
+    json.dump({"approvers": [{"id": "ops", "tenant": "test", "owner": {"key_id": "ak_ops_signer"}, "public_key": ops_pub}]}, open(approvers_file, "w"))
     with open(os.open(wallet, os.O_CREAT | os.O_WRONLY, 0o600), "w") as f:
         f.write("stopbar-dev-wallet-secp256k1-v1\n" + ANVIL_KEY + "\n")
     proc = subprocess.Popen([stopbard, "-listen", "127.0.0.1:0", "-dev-world", world, "-dev-wallet", wallet,
-                             "-auth-keys", keyfile, "-state-dir", state],
+                             "-auth-keys", keyfile, "-approvers", approvers_file, "-approval-quorum", "1", "-state-dir", state],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         line = proc.stdout.readline()
@@ -246,7 +295,7 @@ with tempfile.TemporaryDirectory() as tmp:
         g1, _ = template(ESCALATE, "esc-agent", "req_life_g1")
         s, d = http(addr, "POST", "/v1/evaluate", K["esc"], g1)
         check(s == 202, f"gatekeeper: escalates: HTTP {s}")
-        r = subprocess.run([stopbar_cli, "approve", "req_life_g1", "--url", f"http://{addr}", "--key", K["ops"]], capture_output=True, text=True)
+        r = cli_approve("req_life_g1", addr, ops_key, K["ops"], "approve")
         out = r.stdout.split("\n", 1)[1] if "\n" in r.stdout else "{}"
         d = json.loads(out or "{}")
         check(r.returncode == 0 and d.get("outcome") == "allow" and d.get("signed_tx"), f"gatekeeper: `stopbar approve` returns a signed tx ({r.returncode})")

@@ -109,6 +109,38 @@ def gen_api_key(cli, store_path, tenant, agent, scopes):
     return secret
 
 
+def gen_approvers(cli, out, tenant, names=("alice", "bob")):
+    """CS-151: one Ed25519 approver key per human (`stopbar approver keygen`),
+    and the -approvers config holding only their public halves. Each owner is
+    an identity that never requests, so self-approval never fires. Returns
+    (config path, [key paths])."""
+    entries, keys = [], []
+    for n in names:
+        kf = out / f"approver-{n}.key"
+        r = subprocess.run([str(cli), "approver", "keygen", str(kf)], capture_output=True, text=True, check=True)
+        pub = next(l.rsplit(": ", 1)[1].strip() for l in r.stdout.splitlines() if l.startswith("public_key"))
+        entries.append({"id": n, "tenant": tenant, "owner": {"agent_id": n}, "public_key": pub})
+        keys.append(kf)
+    cfg = out / "approvers.json"
+    cfg.write_text(json.dumps({"approvers": entries}, indent=2))
+    return cfg, keys
+
+
+def signed_approve(cli, url, esc_id, approver_keys, api_key):
+    """Each approver signs `stopbar approve` locally; returns the last
+    response body (the quorum-reaching one) as a dict."""
+    ad = {}
+    for kf in approver_keys:
+        r = subprocess.run([str(cli), "approve", esc_id, "--url", url, "--approver-key", str(kf), "--key", api_key],
+                           capture_output=True, text=True)
+        body = r.stdout.split("\n", 1)[1] if "\n" in r.stdout else "{}"
+        try:
+            ad = json.loads(body)
+        except ValueError:
+            ad = {}
+    return ad
+
+
 def reasons(d):
     return [r.get("policy_id") or r.get("code") for r in d.get("reasons", [])] or ([d.get("code")] if d.get("code") else [])
 

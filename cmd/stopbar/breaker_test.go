@@ -2,19 +2,16 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
+	"crypto/ed25519"
 	"errors"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/audit"
-	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/gateway"
 	"github.com/NikhilSetiya/stopbar/internal/limiter"
@@ -22,9 +19,25 @@ import (
 	"github.com/NikhilSetiya/stopbar/internal/store"
 )
 
+// genApproverKeyFile generates a fresh approver key (via the real `stopbar
+// approver keygen`), and returns its file path and public key.
+func genApproverKeyFile(t *testing.T, name string) (path string, pub ed25519.PublicKey) {
+	t.Helper()
+	path = filepath.Join(t.TempDir(), name+".key")
+	if err := approverCmd([]string{"keygen", path}); err != nil {
+		t.Fatal(err)
+	}
+	priv, err := approval.LoadKeyFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path, priv.Public().(ed25519.PublicKey)
+}
+
 // TestBreakerCmd drives `stopbar breaker` against the real gateway and
 // limiter: a tripped breaker refuses a reset with one approver's signature
-// (the command fails, the breaker stays open) and closes with two.
+// (the command fails, the breaker stays open) and closes with two distinct
+// owners (CS-151, replacing #128's API-key vote mechanism).
 func TestBreakerCmd(t *testing.T) {
 	db, err := store.OpenTemp()
 	if err != nil {
@@ -39,7 +52,18 @@ func TestBreakerCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lim, err := limiter.New(limiter.Config{Store: st, BreakerQuorum: 2,
+
+	aliceFile, alicePub := genApproverKeyFile(t, "alice")
+	bobFile, bobPub := genApproverKeyFile(t, "bob")
+	approvers, err := approval.NewKeySet([]approval.Key{
+		{ID: "alice", Tenant: "acme", Owner: approval.Owner{KeyID: "ak_alice"}, Public: alicePub},
+		{ID: "bob", Tenant: "acme", Owner: approval.Owner{KeyID: "ak_bob"}, Public: bobPub},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lim, err := limiter.New(limiter.Config{Store: st, BreakerQuorum: 2, Approvers: approvers,
 		Rules: []limiter.Rule{{Scope: limiter.ScopeTenant, Window: "1h", MaxUSD: "10", CircuitBreaker: true}}})
 	if err != nil {
 		t.Fatal(err)
@@ -51,45 +75,31 @@ func TestBreakerCmd(t *testing.T) {
 		t.Fatalf("trip: %v", err)
 	}
 
-	var recs []any
-	for _, k := range []string{"alice", "bob"} {
-		sum := sha256.Sum256([]byte("sk_" + k))
-		recs = append(recs, map[string]any{"id": "ak_" + k, "tenant": "acme", "scopes": []string{gateway.ApproveScope}, "sha256": hex.EncodeToString(sum[:])})
-	}
-	b, _ := json.Marshal(recs)
-	p := filepath.Join(t.TempDir(), "keys.json")
-	if err := os.WriteFile(p, b, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ks, err := auth.LoadKeyStore(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(gateway.New(gateway.Config{Breaker: lim, Authenticator: gateway.BearerAuthenticator{Store: ks}, Audit: lg}))
+	srv := httptest.NewServer(gateway.New(gateway.Config{Breaker: lim}))
 	defer srv.Close()
 
-	if err := breakerCmd([]string{"status", "--tenant", "acme", "--url", srv.URL, "--key", "sk_alice"}); err != nil {
+	if err := breakerCmd([]string{"status", "--tenant", "acme", "--url", srv.URL}); err != nil {
 		t.Fatal(err)
 	}
-	// Insufficient signatures: refused; the same identity again is refused too.
-	err = breakerCmd([]string{"reset", "--tenant", "acme", "--url", srv.URL, "--key", "sk_alice"})
+	// Insufficient signatures: refused; the same owner again is refused too.
+	err = breakerCmd([]string{"reset", "--tenant", "acme", "--url", srv.URL, "--approver-key", aliceFile})
 	if err == nil || !strings.Contains(err.Error(), "reset refused: 1 of 2") {
 		t.Fatalf("one approver: %v", err)
 	}
-	err = breakerCmd([]string{"reset", "--tenant", "acme", "--url", srv.URL, "--key", "sk_alice"})
+	err = breakerCmd([]string{"reset", "--tenant", "acme", "--url", srv.URL, "--approver-key", aliceFile})
 	if err == nil || !strings.Contains(err.Error(), "409") || !strings.Contains(err.Error(), "DUPLICATE_VOTE") {
 		t.Fatalf("same approver twice: %v", err)
 	}
 	if !lim.BreakerStatus("acme").Open {
 		t.Fatal("breaker closed on one signature")
 	}
-	if err := breakerCmd([]string{"reset", "--tenant", "acme", "--url", srv.URL, "--key", "sk_bob"}); err != nil {
+	if err := breakerCmd([]string{"reset", "--tenant", "acme", "--url", srv.URL, "--approver-key", bobFile}); err != nil {
 		t.Fatalf("second approver: %v", err)
 	}
 	if lim.BreakerStatus("acme").Open {
 		t.Fatal("breaker still open after quorum")
 	}
-	if err := breakerCmd([]string{"reset", "--tenant", "acme", "--url", srv.URL, "--key", "sk_bob"}); err == nil || !strings.Contains(err.Error(), "404") {
+	if err := breakerCmd([]string{"reset", "--tenant", "acme", "--url", srv.URL, "--approver-key", bobFile}); err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("reset of a closed breaker: %v", err)
 	}
 	for _, args := range [][]string{{}, {"status"}, {"reset", "--tenant", "acme"}, {"open", "--tenant", "acme"}} {

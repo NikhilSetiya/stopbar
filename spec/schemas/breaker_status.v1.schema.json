@@ -48,6 +48,14 @@
             "type": "string",
             "minLength": 1
           },
+          "owner_agent_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "owner_key_id": {
+            "type": "string",
+            "minLength": 1
+          },
           "at": {
             "type": "string",
             "format": "date-time"
@@ -78,6 +86,14 @@
         ],
         "properties": {
           "approver": {
+            "type": "string",
+            "minLength": 1
+          },
+          "owner_agent_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "owner_key_id": {
             "type": "string",
             "minLength": 1
           },

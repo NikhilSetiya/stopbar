@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/model"
@@ -156,6 +157,23 @@ type Config struct {
 	// PendingTTL is how long an escalation may wait for approval before it is
 	// refused. Default DefaultPendingTTL (15m).
 	PendingTTL time.Duration
+	// Approvers is the configured Ed25519 approver public keys (CS-151,
+	// spec/approval-signature-v1.md) an escalation approval or reject
+	// signature is checked against. nil disables approvals entirely: Approve
+	// and Reject refuse every signature.
+	Approvers *approval.KeySet
+	// ApprovalQuorum is M in the M-of-N escalation approval: distinct
+	// approver OWNERS needed (CS-151, internal/approval.Tally; two keys
+	// configured with the same owner count once). 0 means
+	// model.MinBreakerQuorum (2). stopbard enforces the production floor
+	// (approval.ValidateQuorum) before it ever builds this Config; tests may
+	// set 1 directly for a single-signer flow.
+	ApprovalQuorum int
+	// Alerts records every reject veto (CS-151): a high-severity log line
+	// and the stopbar_approval_rejects_total counter. nil: one is created
+	// internally, but then its counts are not reachable by the caller for
+	// rendering at /metrics — supply one to read Alerts.Counters().
+	Alerts *approval.Alerts
 }
 
 // PendingEscalation is an escalated request and its lifecycle (CS-151/152).
@@ -175,6 +193,13 @@ type PendingEscalation struct {
 	Decision   *model.Decision `json:"decision,omitempty"`
 	ResolvedBy string          `json:"resolved_by,omitempty"`
 	ResolvedAt *time.Time      `json:"resolved_at,omitempty"`
+	// Votes are the signed approve/reject votes verified so far (CS-151),
+	// replayed into a fresh approval.Tally on every Approve/Reject call —
+	// Tally itself persists nothing, this is the durable record (LLD §11).
+	// A vote that resolves the Tally (quorum met, or a reject) is appended
+	// only once that outcome's side effects (re-run, signing) have also
+	// succeeded; one that leaves it Pending is appended on its own.
+	Votes []approval.Vote `json:"votes,omitempty"`
 }
 
 // PendingStore records escalations by request ID. Put writes the record and,
@@ -250,6 +275,9 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.PendingTTL <= 0 {
 		cfg.PendingTTL = DefaultPendingTTL
 	}
+	if cfg.ApprovalQuorum <= 0 {
+		cfg.ApprovalQuorum = model.MinBreakerQuorum
+	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
@@ -258,6 +286,9 @@ func New(cfg Config) (*Engine, error) {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
+	}
+	if cfg.Alerts == nil {
+		cfg.Alerts = approval.NewAlerts(cfg.Logger)
 	}
 	return &Engine{cfg: cfg}, nil
 }
@@ -320,82 +351,185 @@ func (e *Engine) Evaluate(ctx context.Context, req model.ActionRequest) (d model
 		}
 	}()
 	requester, _ := auth.FromContext(ctx)
-	return e.evaluate(ctx, req, now, nil, "", requester), nil
+	return e.evaluate(ctx, req, now, nil, nil, requester), nil
 }
 
-// Approve re-evaluates a pending escalation (CS-151/152) and returns the
-// result; it implements gateway.Approver for advisory mode, where an approved
-// allow returns the decision token. See ApproveWith.
-func (e *Engine) Approve(ctx context.Context, id, approver string) (model.Decision, error) {
-	return e.ApproveWith(ctx, id, approver, nil)
+// Approve verifies sig — an Ed25519-signed escalation-approval envelope
+// (spec/approval-signature-v1.md §2, decision "approve") — and adds its vote
+// toward the escalation's quorum (CS-151). It implements gateway.Approver
+// for advisory mode, where an approved allow returns the decision token. See
+// ApproveWith.
+func (e *Engine) Approve(ctx context.Context, id string, sig approval.SignedEscalation) (model.Decision, error) {
+	return e.ApproveWith(ctx, id, sig, nil)
 }
 
-// ApproveWith re-evaluates a pending escalation against current state
-// (CS-151/152): enrich, policy and the limiter all run again, and the
-// escalation reasons the approver covers are waived. If nothing else now
-// denies and the caps still hold, the outcome becomes allow (signed and
-// reserved like any allow), exec (if any) executes it, and the escalation is
-// resolved, audited in the same transaction. If a new rule denies, a new
-// escalation appears, or a cap has since filled, the decision is returned and
-// the escalation stays pending, so the caller can see why and retry.
+// ApproveWith verifies sig and adds its vote toward the escalation's quorum
+// (CS-151, internal/approval.Tally: M distinct approver OWNERS, two keys
+// with the same owner count once). Three outcomes:
 //
-// It returns ErrNoPending for an id the caller cannot see (unknown, or another
-// tenant's) and model.ErrResolved once the escalation is allowed, denied or
-// expired. Approving after the window has passed resolves it as expired and
-// returns that deny.
-func (e *Engine) ApproveWith(ctx context.Context, id, approver string, exec Execute) (model.Decision, error) {
-	e.escMu.Lock()
-	defer e.escMu.Unlock()
-	now := e.cfg.Clock()
-	pe, d, err := e.openPending(ctx, id, approver, now)
-	if err != nil || d != nil {
-		return deref(d), err
-	}
-	approved := make(map[string]bool, len(pe.Reasons))
-	for _, r := range pe.Reasons {
-		approved[r] = true
-	}
-	out := e.evaluate(ctx, pe.Request, now, approved, approver, pe.Requester)
-	if out.Outcome != model.Allow {
-		return out, nil // still pending: the approver can see why, and retry
-	}
-	if exec != nil {
-		out = exec(ctx, out, pe.Request, pe.Requester)
-	}
-	state := model.EscalationAllowed
-	if out.Outcome != model.Allow {
-		state = model.EscalationDenied
-	}
-	body := map[string]any{"request_id": id, "state": state, "approver": approver, "decision": out}
-	if err := e.resolve(ctx, &pe, state, out, approver, now, model.AuditApproval, body); err != nil {
-		// The allow happened (reserved, perhaps signed and committed) but its
-		// resolution is not recorded: fail closed. The signed bytes never
-		// leave; a reservation lapses with its TTL and a commit stays counted.
-		e.unaudited(id, err)
-		return e.denyWith(out, failed(CodeAudit, err)), nil
-	}
-	return out, nil
+//   - Pending (quorum not yet met): the vote is recorded, audited, and the
+//     escalation's current (still-escalate) decision is returned unchanged.
+//     Nothing is re-run yet — there is no point until quorum is reached.
+//   - Rejected (this or any earlier vote was a `reject`): the escalation is
+//     denied outright (LLD §9 step 4), audited, and alerted
+//     (internal/approval.Alerts.Veto, stopbar_approval_rejects_total).
+//   - Approved (quorum just met): enrich, policy and the limiter all run
+//     again, and the escalation reasons every counted vote's owner covers
+//     are waived. If nothing else now denies and the caps still hold, the
+//     outcome becomes allow (signed and reserved like any allow), exec (if
+//     any) executes it, and the escalation is resolved, audited in the same
+//     transaction. If the re-run does **not** allow, nothing is persisted —
+//     the quorum's votes are not spent on a failed attempt, so approvers
+//     must resubmit (LLD §9 step 5: a re-run can still deny or escalate
+//     against current state).
+//
+// A signature that fails verification (wrong escalation/payload, expired,
+// unknown key, self-approval, posted to the wrong decision, …) resolves
+// nothing: it is audited as a refused attempt and returns a deny decision,
+// while the escalation stays pending for a valid vote. It returns
+// ErrNoPending for an id the caller cannot see (unknown, or another
+// tenant's), approval.ErrDuplicateVote for a second vote from an owner who
+// already holds a live one, and model.ErrResolved once the escalation is
+// allowed, denied or expired. Approving after the window has passed
+// resolves it as expired and returns that deny.
+func (e *Engine) ApproveWith(ctx context.Context, id string, sig approval.SignedEscalation, exec Execute) (model.Decision, error) {
+	return e.submitVote(ctx, id, sig, approval.Approve, exec)
 }
 
-// Reject resolves a pending escalation as denied (CS-151/152, LLD §9 step 4:
-// any reject → deny). The approver identity is in the audit record, written in
-// the same transaction as the state change. The requester may not reject
-// their own escalation; errors are as for ApproveWith.
-func (e *Engine) Reject(ctx context.Context, id, approver string) (model.Decision, error) {
+// Reject verifies sig — a signed escalation envelope with decision "reject"
+// — and, being a valid vote, denies the escalation outright regardless of
+// quorum (CS-151, LLD §9 step 4). Errors and the self-approval/expiry/
+// already-resolved cases are as for ApproveWith.
+func (e *Engine) Reject(ctx context.Context, id string, sig approval.SignedEscalation) (model.Decision, error) {
+	return e.submitVote(ctx, id, sig, approval.Reject, nil)
+}
+
+// submitVote is the shared core of Approve and Reject: it verifies sig
+// against the escalation's current state and the configured approver keys,
+// replays the escalation's stored votes into a fresh approval.Tally, adds
+// sig's vote, and acts on the result. wantDecision pins which decision this
+// call's route expects; a signed envelope carrying the other decision is
+// refused (posting to the wrong endpoint fails loudly, not silently doing
+// the other thing).
+func (e *Engine) submitVote(ctx context.Context, id string, sig approval.SignedEscalation, wantDecision string, exec Execute) (model.Decision, error) {
 	e.escMu.Lock()
 	defer e.escMu.Unlock()
 	now := e.cfg.Clock()
-	pe, d, err := e.openPending(ctx, id, approver, now)
-	if err != nil || d != nil {
-		return deref(d), err
+	pe, d, err := e.openPending(ctx, id, now)
+	if err != nil {
+		return model.Decision{}, err
 	}
-	out := e.deny(id, now, pe.payloadHash(), failed(CodeApprovalReject, fmt.Errorf("rejected by %q", approver)))
-	body := map[string]any{"request": pe.Request, "decision": out, "approver": approver}
-	if err := e.resolve(ctx, &pe, model.EscalationDenied, out, approver, now, model.AuditDecision, body); err != nil {
-		e.unaudited(id, err)
-		return model.Decision{}, err // nothing changed: still pending
+	if d != nil {
+		return *d, nil // the pending window passed just now: resolved as expired
 	}
-	return out, nil
+
+	refuse := func(code string, cause error) model.Decision {
+		rd := e.deny(id, now, pe.payloadHash(), failed(approvalFailureCode(code), cause))
+		e.auditRefusal(ctx, pe.Request, rd)
+		return rd
+	}
+	if sig.Decision != wantDecision {
+		return refuse(approval.CodeBadDecision, fmt.Errorf("this envelope carries decision %q, not %q", sig.Decision, wantDecision)), nil
+	}
+	if e.cfg.Approvers == nil {
+		return model.Decision{}, errors.New("engine: no approver keys configured; approvals are disabled")
+	}
+	want := approval.EscalationWant{EscalationID: id, PayloadHash: pe.payloadHash(),
+		RequesterKeyID: pe.Requester.KeyID, RequesterAgentID: pe.Requester.AgentID}
+	k, verifyErr := approval.VerifyEscalation(e.cfg.Approvers, pe.Request.Tenant, sig, want, now)
+	if verifyErr != nil {
+		var ve *approval.VerifyError
+		if errors.As(verifyErr, &ve) {
+			return refuse(ve.Code, verifyErr), nil
+		}
+		return model.Decision{}, verifyErr
+	}
+
+	tally := approval.NewTally(e.cfg.ApprovalQuorum, pe.Requester.KeyID, pe.Requester.AgentID)
+	for _, v := range pe.Votes {
+		_, _ = tally.Add(v, now) // already verified when first stored; replay is deterministic
+	}
+	v := approval.VoteFromEscalation(k, sig)
+	res, addErr := tally.Add(v, now)
+	switch {
+	case errors.Is(addErr, approval.ErrDuplicateVote):
+		return model.Decision{}, approval.ErrDuplicateVote
+	case addErr != nil:
+		var ve *approval.VerifyError
+		if errors.As(addErr, &ve) {
+			return refuse(ve.Code, addErr), nil
+		}
+		return model.Decision{}, addErr // e.g. ErrAlreadyResolved: a genuine race
+	}
+
+	switch res.Outcome {
+	case approval.Pending:
+		pe.Votes = append(pe.Votes, v)
+		rec := &model.AuditEntry{Type: model.AuditApproval, Body: addIdentity(ctx, map[string]any{
+			"request_id": id, "event": "vote", "kid": v.Kid, "owner": v.Owner, "decision": v.Decision})}
+		if err := e.record(ctx, func(ctx context.Context) error { return e.cfg.Pending.Put(ctx, pe, rec) }); err != nil {
+			e.unaudited(id, err)
+			return model.Decision{}, err
+		}
+		return deref(pe.Decision), nil
+
+	case approval.Rejected:
+		e.cfg.Alerts.Veto(pe.Request.Tenant, approval.VetoKindEscalation, *res.Veto)
+		out := e.deny(id, now, pe.payloadHash(), failed(CodeApprovalReject, fmt.Errorf("rejected by %s", res.Veto.Kid)))
+		pe.Votes = append(pe.Votes, v)
+		body := map[string]any{"request": pe.Request, "decision": out, "veto": res.Veto}
+		if err := e.resolve(ctx, &pe, model.EscalationDenied, out, res.Veto.Kid, now, model.AuditDecision, body); err != nil {
+			e.unaudited(id, err)
+			return model.Decision{}, err // nothing changed: still pending
+		}
+		return out, nil
+
+	default: // approval.Approved
+		approved := make(map[string]bool, len(pe.Reasons))
+		for _, r := range pe.Reasons {
+			approved[r] = true
+		}
+		approvals := make([]model.Approval, 0, len(res.Approvers))
+		for _, counted := range tally.Live(now) {
+			approvals = append(approvals, model.Approval{Approver: counted.Kid, At: now, Signature: counted.Sig})
+		}
+		out := e.evaluate(ctx, pe.Request, now, approved, approvals, pe.Requester)
+		if out.Outcome != model.Allow {
+			// Ephemeral: nothing is persisted, so this quorum's votes are not
+			// spent on a failed attempt (LLD §9 step 5).
+			return out, nil
+		}
+		if exec != nil {
+			out = exec(ctx, out, pe.Request, pe.Requester)
+		}
+		state := model.EscalationAllowed
+		if out.Outcome != model.Allow {
+			state = model.EscalationDenied
+		}
+		pe.Votes = append(pe.Votes, v)
+		body := map[string]any{"request_id": id, "state": state, "approvals": approvals, "decision": out}
+		if err := e.resolve(ctx, &pe, state, out, v.Kid, now, model.AuditApproval, body); err != nil {
+			// The allow happened (reserved, perhaps signed and committed) but its
+			// resolution is not recorded: fail closed. The signed bytes never
+			// leave; a reservation lapses with its TTL and a commit stays counted.
+			e.unaudited(id, err)
+			return e.denyWith(out, failed(CodeAudit, err)), nil
+		}
+		return out, nil
+	}
+}
+
+// approvalFailureCode maps a spec §6 VerifyError code to an engine reason
+// code. SELF_APPROVAL keeps the pre-CS-151 CodeApprovalSelf string exactly
+// (the same concept, now enforced cryptographically); every other code is
+// prefixed APPROVAL_SIG_ so it can never collide with an unrelated engine
+// code that happens to share a bare name (e.g. CodeApprovalExpired, which
+// means the pending window passed, not that a signature's own expiry did).
+func approvalFailureCode(code string) string {
+	if code == approval.CodeSelfApproval {
+		return CodeApprovalSelf
+	}
+	return "APPROVAL_SIG_" + code
 }
 
 // Status reports an escalation's lifecycle for GET /v1/decisions/{id}
@@ -420,10 +554,10 @@ func (e *Engine) Status(ctx context.Context, id string) (model.EscalationStatus,
 func (e *Engine) Owner(id string) (tenant, agent string, ok bool) { return e.cfg.Limiter.Owner(id) }
 
 // openPending loads a still-pending escalation for approve or reject. It
-// returns a decision instead when the attempt itself is refused: the window
-// passed just now (resolved as expired) or the requester is trying to act on
-// their own escalation (audited; the record stays pending for someone else).
-func (e *Engine) openPending(ctx context.Context, id, approver string, now time.Time) (PendingEscalation, *model.Decision, error) {
+// returns a decision instead when the window passed just now (resolved as
+// expired). Self-approval is checked later, cryptographically, against the
+// verified signature's owner (approval.VerifyEscalation / Tally), not here.
+func (e *Engine) openPending(ctx context.Context, id string, now time.Time) (PendingEscalation, *model.Decision, error) {
 	pe, expired, err := e.loadPending(ctx, id, now)
 	switch {
 	case err != nil:
@@ -432,10 +566,6 @@ func (e *Engine) openPending(ctx context.Context, id, approver string, now time.
 		return pe, pe.Decision, nil
 	case pe.State != model.EscalationPending:
 		return pe, nil, model.ErrResolved
-	case approver != "" && approver == pe.Requester.KeyID:
-		d := e.deny(id, now, pe.payloadHash(), failed(CodeApprovalSelf, fmt.Errorf("the requester may not resolve their own escalation")))
-		e.auditRefusal(ctx, pe.Request, d)
-		return pe, &d, nil
 	}
 	return pe, nil, nil
 }
@@ -549,8 +679,10 @@ func allApproved(reasons []model.Reason, approved map[string]bool) bool {
 // evaluate runs the pipeline. requester is the authenticated identity that
 // submitted req (from the gateway, or from the pending record on approval);
 // the audit records carry the identity in ctx, which on approval is the
-// approver's.
-func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time.Time, approved map[string]bool, approver string, requester auth.Identity) model.Decision {
+// approver's. approvals (CS-151: one per distinct owner that counted toward
+// quorum, nil on a first evaluation) becomes the allow decision's Approvals
+// verbatim if this re-run allows.
+func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time.Time, approved map[string]bool, approvals []model.Approval, requester auth.Identity) model.Decision {
 	audit := func(d model.Decision, extra map[string]any) model.Decision {
 		body := addIdentity(ctx, map[string]any{"request": req, "decision": d})
 		for k, v := range extra {
@@ -621,7 +753,7 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 			// produced → allow. The allow path below re-reserves the caps, so a
 			// cap that has filled since the escalation still blocks it.
 			d.Outcome, d.Reasons = model.Allow, []model.Reason{}
-			d.Approvals = []model.Approval{{Approver: approver, At: now}}
+			d.Approvals = approvals
 		case approved == nil && e.cfg.Pending != nil:
 			// CS-152: record the escalation so `stopbar approve <id>` can re-run it,
 			// with the requester's identity so it cannot also approve itself. The

@@ -3,6 +3,8 @@ package engine
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/gateway"
@@ -583,6 +586,91 @@ func (r *rig) withPending(p *fakePending) *fakePending {
 	return p
 }
 
+// withApprovers configures a quorum-of-1 approver set (CS-151) covering
+// every named test approver below, so a single signed vote still decides
+// the outcome the way a single approver string used to. The approve-
+// lifecycle subtests (TestApprove, TestEscalationLifecycle) all use it.
+func (r *rig) withApprovers() *rig {
+	r.cfg.Approvers, r.cfg.ApprovalQuorum = approverKeySet, 1
+	return r
+}
+
+// approver test keys (CS-151): one Ed25519 key per name used across the
+// approval-lifecycle tests, tenant "acme" (the fixture's tenant),
+// Owner.KeyID equal to the name so a self-approval test can bind an
+// approver to a matching requester KeyID. Deterministic, so a failure is
+// reproducible.
+var (
+	approverPrivs  = map[string]ed25519.PrivateKey{}
+	approverKeySet *approval.KeySet
+)
+
+func init() {
+	names := []string{"ops@example.com", "ak_ops", "ak_operator", "ak_requester", "ak_x"}
+	keys := make([]approval.Key, 0, len(names))
+	for _, name := range names {
+		seed := sha256.Sum256([]byte("engine-test-approver:" + name))
+		priv := ed25519.NewKeyFromSeed(seed[:])
+		approverPrivs[name] = priv
+		keys = append(keys, approval.Key{ID: name, Tenant: "acme", Owner: approval.Owner{KeyID: name}, Public: priv.Public().(ed25519.PublicKey)})
+	}
+	ks, err := approval.NewKeySet(keys)
+	if err != nil {
+		panic(err)
+	}
+	approverKeySet = ks
+}
+
+// approverKid is the kid a named test approver's signed envelope carries —
+// what Decision.Approvals and PendingEscalation.ResolvedBy now hold,
+// replacing the old approver-string identity.
+func approverKid(t testing.TB, name string) string {
+	t.Helper()
+	priv, ok := approverPrivs[name]
+	if !ok {
+		t.Fatalf("no test approver key named %q", name)
+	}
+	return approval.Kid(priv.Public().(ed25519.PublicKey))
+}
+
+// signApprove/signReject build a signed escalation envelope for id/
+// payloadHash from the named test approver key (rigNow + 1 minute: every
+// rig in these tests runs on the fixed rigNow clock).
+func signApprove(t testing.TB, name, id, payloadHash string) approval.SignedEscalation {
+	return signEsc(t, name, id, payloadHash, approval.Approve)
+}
+func signReject(t testing.TB, name, id, payloadHash string) approval.SignedEscalation {
+	return signEsc(t, name, id, payloadHash, approval.Reject)
+}
+func signEsc(t testing.TB, name, id, payloadHash, dec string) approval.SignedEscalation {
+	t.Helper()
+	priv, ok := approverPrivs[name]
+	if !ok {
+		t.Fatalf("no test approver key named %q", name)
+	}
+	s, err := approval.SignEscalation(priv, approval.EscalationObject{
+		EscalationID: id, PayloadHash: payloadHash, Decision: dec, Expiry: rigNow.Add(time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// escFixturePayloadHash is the payload hash a manually-seeded
+// PendingEscalation{Request: setID(fixtureRequest(...), id)} carries: with
+// no .Decision set, PendingEscalation.payloadHash() falls back to exactly
+// this (it depends only on Action fields, which setID never touches).
+func escFixturePayloadHash(t testing.TB, id string) string {
+	t.Helper()
+	req := setID(fixtureRequest(t, "action_request.evm_tx.json"), id)
+	ph, err := decision.PayloadHash(req.Action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ph
+}
+
 // TestApprove covers the escalation lifecycle (CS-151/152): an escalation is
 // recorded, approving it re-runs enrich/policy/limiter against current state,
 // and approval is refused if a new rule denies, a new escalation appears, a cap
@@ -597,6 +685,7 @@ func TestApprove(t *testing.T) {
 		signer := &recordSigner{}
 		r.cfg.Policy = outcome(model.Escalate)
 		r.withPending(pend)
+		r.withApprovers()
 		r.cfg.Signer = signer
 		e := r.engine(t)
 
@@ -618,7 +707,7 @@ func TestApprove(t *testing.T) {
 
 		// A human approves: the single escalation reason is now waived.
 		approverCtx := auth.WithIdentity(context.Background(), auth.Identity{Method: auth.MethodAPIKey, Tenant: req.Tenant, KeyID: "ops@example.com"})
-		ad, err := e.Approve(approverCtx, req.ID, "ops@example.com")
+		ad, err := e.Approve(approverCtx, req.ID, signApprove(t, "ops@example.com", req.ID, d.PayloadHash))
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -628,8 +717,8 @@ func TestApprove(t *testing.T) {
 		if ad.Token == "" {
 			t.Fatal("approved allow has no signed token")
 		}
-		if len(ad.Approvals) != 1 || ad.Approvals[0].Approver != "ops@example.com" {
-			t.Fatalf("Approvals = %+v, want one from ops@example.com", ad.Approvals)
+		if len(ad.Approvals) != 1 || ad.Approvals[0].Approver != approverKid(t, "ops@example.com") {
+			t.Fatalf("Approvals = %+v, want one from ops@example.com (kid %s)", ad.Approvals, approverKid(t, "ops@example.com"))
 		}
 		if !slices.Contains(r.limiter.reserved, req.ID) {
 			t.Fatalf("approve did not reserve the cap; reserved=%v", r.limiter.reserved)
@@ -644,7 +733,7 @@ func TestApprove(t *testing.T) {
 		if got := r.audit.records[len(r.audit.records)-1]; got != model.AuditApproval {
 			t.Fatalf("last audit record = %q, want approval (the resolution)", got)
 		}
-		if _, err := e.Approve(context.Background(), req.ID, "ops@example.com"); !errors.Is(err, model.ErrResolved) {
+		if _, err := e.Approve(context.Background(), req.ID, signApprove(t, "ops@example.com", req.ID, d.PayloadHash)); !errors.Is(err, model.ErrResolved) {
 			t.Fatalf("second Approve err = %v, want ErrResolved", err)
 		}
 	})
@@ -655,9 +744,10 @@ func TestApprove(t *testing.T) {
 		r := newRig()
 		r.cfg.Policy = outcome(model.Deny) // state changed: it now denies
 		r.withPending(pend)
+		r.withApprovers()
 		e := r.engine(t)
 
-		d, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, err := e.Approve(context.Background(), "r1", signApprove(t, "ops@example.com", "r1", escFixturePayloadHash(t, "r1")))
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -680,9 +770,10 @@ func TestApprove(t *testing.T) {
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate) // emits escReason, which is NOT approved
 		r.withPending(pend)
+		r.withApprovers()
 		e := r.engine(t)
 
-		d, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, err := e.Approve(context.Background(), "r1", signApprove(t, "ops@example.com", "r1", escFixturePayloadHash(t, "r1")))
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -700,10 +791,11 @@ func TestApprove(t *testing.T) {
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate)
 		r.withPending(pend)
+		r.withApprovers()
 		r.limiter.reserveErr = ErrCapExceeded // the cap filled while it waited
 		e := r.engine(t)
 
-		d, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, err := e.Approve(context.Background(), "r1", signApprove(t, "ops@example.com", "r1", escFixturePayloadHash(t, "r1")))
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -722,10 +814,11 @@ func TestApprove(t *testing.T) {
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate) // would otherwise promote to allow
 		r.withPending(pend)
+		r.withApprovers()
 		e := r.engine(t)
 
 		before := len(r.audit.records)
-		d, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, err := e.Approve(context.Background(), "r1", signApprove(t, "ops@example.com", "r1", escFixturePayloadHash(t, "r1")))
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -741,22 +834,24 @@ func TestApprove(t *testing.T) {
 		if got := pend.state("r1"); got != model.EscalationExpired {
 			t.Fatalf("state = %q, want expired", got)
 		}
-		if _, err := e.Approve(context.Background(), "r1", "ops@example.com"); !errors.Is(err, model.ErrResolved) {
+		if _, err := e.Approve(context.Background(), "r1", signApprove(t, "ops@example.com", "r1", escFixturePayloadHash(t, "r1"))); !errors.Is(err, model.ErrResolved) {
 			t.Fatalf("Approve after expiry err = %v, want ErrResolved", err)
 		}
 	})
 
-	t.Run("the requester may not approve their own escalation", func(t *testing.T) {
+	t.Run("the requester may not approve their own escalation (cryptographic self-approval, CS-151)", func(t *testing.T) {
 		pend := newFakePending()
 		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"),
 			Reasons: []string{escReason}, IssuedAt: rigNow, Requester: auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", KeyID: "ak_requester"}}
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate)
 		r.withPending(pend)
+		r.withApprovers()
 		e := r.engine(t)
 
-		// same identity as the requester → refused, record kept for a real approver.
-		d, err := e.Approve(context.Background(), "r1", "ak_requester")
+		// The approver key bound to "ak_requester" is also the escalation's
+		// requester → refused, record kept for a real approver.
+		d, err := e.Approve(context.Background(), "r1", signApprove(t, "ak_requester", "r1", escFixturePayloadHash(t, "r1")))
 		if err != nil {
 			t.Fatalf("Approve(self): %v", err)
 		}
@@ -766,8 +861,8 @@ func TestApprove(t *testing.T) {
 		if pend.len() != 1 {
 			t.Fatalf("pending after self-approval = %d, want 1 (kept for another approver)", pend.len())
 		}
-		// a different identity may still approve it.
-		d2, err := e.Approve(context.Background(), "r1", "ak_operator")
+		// a different approver key may still approve it.
+		d2, err := e.Approve(context.Background(), "r1", signApprove(t, "ak_operator", "r1", escFixturePayloadHash(t, "r1")))
 		if err != nil {
 			t.Fatalf("Approve(operator): %v", err)
 		}
@@ -789,9 +884,10 @@ func TestApprove(t *testing.T) {
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate)
 		r.withPending(pend)
+		r.withApprovers()
 		e := r.engine(t)
 
-		d, err := e.Approve(context.Background(), "r1", "ops@example.com")
+		d, err := e.Approve(context.Background(), "r1", signApprove(t, "ops@example.com", "r1", escFixturePayloadHash(t, "r1")))
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -803,8 +899,9 @@ func TestApprove(t *testing.T) {
 	t.Run("unknown id is ErrNoPending", func(t *testing.T) {
 		r := newRig()
 		r.withPending(newFakePending())
+		r.withApprovers()
 		e := r.engine(t)
-		if _, err := e.Approve(context.Background(), "nope", "ops@example.com"); !errors.Is(err, model.ErrNoPending) {
+		if _, err := e.Approve(context.Background(), "nope", signApprove(t, "ops@example.com", "nope", "sha256:"+strings.Repeat("a", 64))); !errors.Is(err, model.ErrNoPending) {
 			t.Fatalf("Approve(unknown) err = %v, want ErrNoPending", err)
 		}
 	})
@@ -825,30 +922,33 @@ func TestEscalationLifecycle(t *testing.T) {
 		r := newRig()
 		r.cfg.Policy = outcome(model.Escalate)
 		pend := r.withPending(newFakePending())
+		r.withApprovers()
 		pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"),
 			Reasons: []string{escReason}, IssuedAt: issued, Requester: auth.Identity{KeyID: requestedBy}, State: model.EscalationPending}
 		return r, pend, r.engine(t)
 	}
 	bg := context.Background()
 
-	t.Run("reject denies, is audited with the approver, and is final", func(t *testing.T) {
+	t.Run("reject denies, is audited with the rejecting owner, and is final", func(t *testing.T) {
 		r, pend, e := seed(t, rigNow, "ak_requester")
 		ctx := auth.WithIdentity(bg, auth.Identity{Tenant: "acme", KeyID: "ak_ops"})
-		d, err := e.Reject(ctx, "r1", "ak_ops")
+		d, err := e.Reject(ctx, "r1", signReject(t, "ak_ops", "r1", escFixturePayloadHash(t, "r1")))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if d.Outcome != model.Deny || d.Reasons[len(d.Reasons)-1].Code != CodeApprovalReject {
 			t.Fatalf("Reject = %v %+v, want deny APPROVAL_REJECTED", d.Outcome, d.Reasons)
 		}
-		if pend.state("r1") != model.EscalationDenied || pend.m["r1"].ResolvedBy != "ak_ops" {
-			t.Fatalf("record = %+v, want denied by ak_ops", pend.m["r1"])
+		wantKid := approverKid(t, "ak_ops")
+		if pend.state("r1") != model.EscalationDenied || pend.m["r1"].ResolvedBy != wantKid {
+			t.Fatalf("record = %+v, want denied by %s", pend.m["r1"], wantKid)
 		}
 		body := r.audit.bodies[len(r.audit.bodies)-1]
-		if body["approver"] != "ak_ops" || body["identity"].(auth.Identity).KeyID != "ak_ops" {
-			t.Fatalf("reject audit body lacks the approver identity: %+v", body)
+		veto, ok := body["veto"].(*approval.Vote)
+		if !ok || veto.Kid != wantKid || body["identity"].(auth.Identity).KeyID != "ak_ops" {
+			t.Fatalf("reject audit body lacks the rejecting owner: %+v", body)
 		}
-		if _, err := e.Approve(ctx, "r1", "ak_ops"); !errors.Is(err, model.ErrResolved) {
+		if _, err := e.Approve(ctx, "r1", signApprove(t, "ak_ops", "r1", escFixturePayloadHash(t, "r1"))); !errors.Is(err, model.ErrResolved) {
 			t.Fatalf("Approve after reject err = %v, want ErrResolved", err)
 		}
 		if len(r.limiter.reserved) != 0 {
@@ -860,14 +960,18 @@ func TestEscalationLifecycle(t *testing.T) {
 		}
 	})
 
-	t.Run("the requester may not reject their own escalation", func(t *testing.T) {
+	// CS-151 (spec/approval-signature-v1.md §7): self-approval is blocked,
+	// but self-REJECT is explicitly allowed — rejecting your own escalation
+	// only denies your own request, so there is nothing to gain by it. This
+	// replaces the old API-key design's symmetric self-reject block.
+	t.Run("the requester MAY reject their own escalation (self-approval only blocks approve)", func(t *testing.T) {
 		_, pend, e := seed(t, rigNow, "ak_requester")
-		d, err := e.Reject(bg, "r1", "ak_requester")
-		if err != nil || d.Reasons[len(d.Reasons)-1].Code != CodeApprovalSelf {
-			t.Fatalf("self Reject = %+v, %v; want APPROVAL_SELF_APPROVAL", d, err)
+		d, err := e.Reject(bg, "r1", signReject(t, "ak_requester", "r1", escFixturePayloadHash(t, "r1")))
+		if err != nil || d.Outcome != model.Deny || d.Reasons[len(d.Reasons)-1].Code != CodeApprovalReject {
+			t.Fatalf("self reject = %+v, %v; want deny APPROVAL_REJECTED", d, err)
 		}
-		if pend.state("r1") != model.EscalationPending {
-			t.Fatalf("state = %q, want still pending", pend.state("r1"))
+		if pend.state("r1") != model.EscalationDenied {
+			t.Fatalf("state = %q, want denied", pend.state("r1"))
 		}
 	})
 
@@ -887,7 +991,7 @@ func TestEscalationLifecycle(t *testing.T) {
 		if _, err := e.Status(bg, "r1"); err != nil || len(r.audit.records) != n {
 			t.Fatalf("a second poll wrote %d more audit records (err %v), want 0", len(r.audit.records)-n, err)
 		}
-		if _, err := e.Reject(bg, "r1", "ak_ops"); !errors.Is(err, model.ErrResolved) {
+		if _, err := e.Reject(bg, "r1", signReject(t, "ak_ops", "r1", escFixturePayloadHash(t, "r1"))); !errors.Is(err, model.ErrResolved) {
 			t.Fatalf("Reject after expiry err = %v, want ErrResolved", err)
 		}
 	})
@@ -906,10 +1010,10 @@ func TestEscalationLifecycle(t *testing.T) {
 	t.Run("another tenant's approver cannot see or resolve it", func(t *testing.T) {
 		_, _, e := seed(t, rigNow, "")
 		other := auth.WithIdentity(bg, auth.Identity{Tenant: "other", KeyID: "ak_x"})
-		if _, err := e.Approve(other, "r1", "ak_x"); !errors.Is(err, ErrNoPending) {
+		if _, err := e.Approve(other, "r1", signApprove(t, "ak_x", "r1", escFixturePayloadHash(t, "r1"))); !errors.Is(err, ErrNoPending) {
 			t.Fatalf("cross-tenant Approve err = %v", err)
 		}
-		if _, err := e.Reject(other, "r1", "ak_x"); !errors.Is(err, ErrNoPending) {
+		if _, err := e.Reject(other, "r1", signReject(t, "ak_x", "r1", escFixturePayloadHash(t, "r1"))); !errors.Is(err, ErrNoPending) {
 			t.Fatalf("cross-tenant Reject err = %v", err)
 		}
 		if _, err := e.Status(other, "r1"); !errors.Is(err, ErrNoPending) {
@@ -919,7 +1023,7 @@ func TestEscalationLifecycle(t *testing.T) {
 
 	t.Run("execute hook: a refused execution resolves as denied", func(t *testing.T) {
 		_, pend, e := seed(t, rigNow, "")
-		d, err := e.ApproveWith(bg, "r1", "ak_ops", func(_ context.Context, d model.Decision, _ model.ActionRequest, _ auth.Identity) model.Decision {
+		d, err := e.ApproveWith(bg, "r1", signApprove(t, "ak_ops", "r1", escFixturePayloadHash(t, "r1")), func(_ context.Context, d model.Decision, _ model.ActionRequest, _ auth.Identity) model.Decision {
 			return e.denyWith(d, failed("FAIL_CLOSED_ADAPTER", errors.New("refused")))
 		})
 		if err != nil || d.Outcome != model.Deny || pend.state("r1") != model.EscalationDenied {
@@ -930,7 +1034,7 @@ func TestEscalationLifecycle(t *testing.T) {
 	t.Run("an allow whose resolution cannot be recorded fails closed", func(t *testing.T) {
 		_, pend, e := seed(t, rigNow, "")
 		e.cfg.Pending = &failingPut{pend}
-		d, err := e.Approve(bg, "r1", "ak_ops")
+		d, err := e.Approve(bg, "r1", signApprove(t, "ak_ops", "r1", escFixturePayloadHash(t, "r1")))
 		if err != nil || d.Outcome != model.Deny || d.Reasons[len(d.Reasons)-1].Code != CodeAudit || d.Token != "" {
 			t.Fatalf("Approve = %+v, %v; want deny FAIL_CLOSED_AUDIT without a token", d, err)
 		}
@@ -970,5 +1074,130 @@ func TestCommitReleaseCarryIdentityAndDomainErrors(t *testing.T) {
 	}
 	if tenant, agent, ok := e.Owner("req-1"); !ok || tenant != "test" || agent != "agent" {
 		t.Fatalf("Owner = %q %q %v", tenant, agent, ok)
+	}
+}
+
+// TestApprovalSignatureFailures (CS-151): every way a signed approval can
+// fail verification resolves nothing. Each comes back as a deny decision
+// with an APPROVAL_SIG_* (or APPROVAL_SELF) reason, is audited as a refused
+// attempt, reserves nothing, stores no vote, and leaves the escalation
+// pending, so a valid vote can still approve it afterwards.
+func TestApprovalSignatureFailures(t *testing.T) {
+	const escReason = "taint-unknown-destination"
+	ph := escFixturePayloadHash(t, "r1")
+	resign := func(name string, f func(*approval.EscalationObject)) approval.SignedEscalation {
+		o := approval.EscalationObject{EscalationID: "r1", PayloadHash: ph, Decision: approval.Approve, Expiry: rigNow.Add(time.Minute).Unix()}
+		f(&o)
+		s, err := approval.SignEscalation(approverPrivs[name], o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	outsider := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	unknown, err := approval.SignEscalation(outsider, approval.EscalationObject{EscalationID: "r1", PayloadHash: ph, Decision: approval.Approve, Expiry: rigNow.Add(time.Minute).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name   string
+		sig    approval.SignedEscalation
+		reject bool // post to Reject instead of Approve
+		code   string
+	}{
+		{"payload hash of another transaction", resign("ak_ops", func(o *approval.EscalationObject) { o.PayloadHash = "sha256:" + strings.Repeat("0", 64) }), false, "APPROVAL_SIG_PAYLOAD_MISMATCH"},
+		{"signed for another escalation (replay)", resign("ak_ops", func(o *approval.EscalationObject) { o.EscalationID = "r2" }), false, "APPROVAL_SIG_WRONG_ESCALATION_ID"},
+		{"expired", resign("ak_ops", func(o *approval.EscalationObject) { o.Expiry = rigNow.Unix() }), false, "APPROVAL_SIG_EXPIRED"},
+		{"expiry over an hour ahead", resign("ak_ops", func(o *approval.EscalationObject) { o.Expiry = rigNow.Add(2 * time.Hour).Unix() }), false, "APPROVAL_SIG_EXPIRY_TOO_FAR_AHEAD"},
+		{"key not configured", unknown, false, "APPROVAL_SIG_UNKNOWN_KEY"},
+		{"field changed under a valid signature", func() approval.SignedEscalation {
+			s := signApprove(t, "ak_ops", "r1", ph)
+			s.Expiry++
+			return s
+		}(), false, "APPROVAL_SIG_BAD_SIGNATURE"},
+		{"signature not base64url", func() approval.SignedEscalation {
+			s := signApprove(t, "ak_ops", "r1", ph)
+			s.Sig = "!!"
+			return s
+		}(), false, "APPROVAL_SIG_MALFORMED"},
+		{"reject envelope posted to approve", signReject(t, "ak_ops", "r1", ph), false, "APPROVAL_SIG_BAD_DECISION"},
+		{"approve envelope posted to reject", signApprove(t, "ak_ops", "r1", ph), true, "APPROVAL_SIG_BAD_DECISION"},
+		{"key bound to the requester", signApprove(t, "ak_requester", "r1", ph), false, CodeApprovalSelf},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pend := newFakePending()
+			pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{escReason},
+				IssuedAt: rigNow, State: model.EscalationPending, Requester: auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", KeyID: "ak_requester"}}
+			r := newRig()
+			r.cfg.Policy = outcome(model.Escalate)
+			r.withPending(pend)
+			r.withApprovers()
+			e := r.engine(t)
+
+			submit := e.Approve
+			if tt.reject {
+				submit = e.Reject
+			}
+			d, err := submit(context.Background(), "r1", tt.sig)
+			if err != nil {
+				t.Fatalf("err = %v, want a deny decision", err)
+			}
+			if d.Outcome != model.Deny || len(d.Reasons) != 1 || d.Reasons[0].Code != tt.code || d.Token != "" {
+				t.Fatalf("decision %+v, want deny %s with no token", d, tt.code)
+			}
+			if got := r.audit.records; len(got) != 1 || got[0] != model.AuditDecision {
+				t.Fatalf("audit records %v, want one refused-attempt decision", got)
+			}
+			if pend.state("r1") != model.EscalationPending || len(pend.m["r1"].Votes) != 0 || len(r.limiter.reserved) != 0 {
+				t.Fatalf("refused signature changed state: %+v reserved=%v", pend.m["r1"], r.limiter.reserved)
+			}
+			if ad, err := e.Approve(context.Background(), "r1", signApprove(t, "ak_ops", "r1", ph)); err != nil || ad.Outcome != model.Allow {
+				t.Fatalf("a valid vote afterwards: %+v, %v", ad, err)
+			}
+		})
+	}
+}
+
+// TestApprovalQuorum (CS-151): with a 2-of-N quorum one vote changes
+// nothing but the recorded votes, the same owner cannot vote twice, a vote
+// that cannot be recorded is not counted, and the second distinct owner's
+// vote re-runs the pipeline and allows. With no approver keys nothing can be
+// approved.
+func TestApprovalQuorum(t *testing.T) {
+	const escReason = "taint-unknown-destination"
+	ph := escFixturePayloadHash(t, "r1")
+	pend := newFakePending()
+	pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{escReason}, IssuedAt: rigNow, State: model.EscalationPending}
+	r := newRig()
+	r.cfg.Policy = outcome(model.Escalate)
+	r.withPending(pend)
+	r.cfg.Approvers, r.cfg.ApprovalQuorum = approverKeySet, 2
+	e := r.engine(t)
+
+	pend.err = errors.New("disk full")
+	if _, err := e.Approve(context.Background(), "r1", signApprove(t, "ak_ops", "r1", ph)); err == nil {
+		t.Fatal("a vote that could not be recorded was accepted")
+	}
+	pend.err = nil
+	if len(pend.m["r1"].Votes) != 0 {
+		t.Fatalf("unrecorded vote counted: %+v", pend.m["r1"].Votes)
+	}
+
+	d, err := e.Approve(context.Background(), "r1", signApprove(t, "ak_ops", "r1", ph))
+	if err != nil || d.Outcome == model.Allow || len(pend.m["r1"].Votes) != 1 || pend.state("r1") != model.EscalationPending || len(r.limiter.reserved) != 0 {
+		t.Fatalf("first of two votes: %+v, %v; votes %d reserved %v", d, err, len(pend.m["r1"].Votes), r.limiter.reserved)
+	}
+	if _, err := e.Approve(context.Background(), "r1", signApprove(t, "ak_ops", "r1", ph)); !errors.Is(err, approval.ErrDuplicateVote) {
+		t.Fatalf("same owner again: err = %v, want ErrDuplicateVote", err)
+	}
+	d, err = e.Approve(context.Background(), "r1", signApprove(t, "ops@example.com", "r1", ph))
+	if err != nil || d.Outcome != model.Allow || d.Token == "" || len(d.Approvals) != 2 || pend.state("r1") != model.EscalationAllowed {
+		t.Fatalf("second distinct owner: %+v, %v", d, err)
+	}
+
+	r.cfg.Approvers = nil
+	pend.m["r2"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r2"), Reasons: []string{escReason}, IssuedAt: rigNow}
+	if _, err := r.engine(t).Approve(context.Background(), "r2", signApprove(t, "ak_ops", "r2", escFixturePayloadHash(t, "r2"))); err == nil {
+		t.Fatal("approval with no approver keys configured succeeded")
 	}
 }

@@ -37,6 +37,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
@@ -125,8 +126,12 @@ type Config struct {
 	Store Store // nil: in-memory only (tests, dev)
 	Clock func() time.Time
 	// BreakerQuorum is M in the M-of-N breaker reset: distinct approver
-	// identities needed. 0 means DefaultBreakerQuorum.
+	// OWNERS needed (CS-151). 0 means DefaultBreakerQuorum.
 	BreakerQuorum int
+	// Approvers is the configured approver public keys (CS-151) a breaker
+	// reset's signature is checked against. nil disables breaker reset
+	// (ResetBreaker always errors).
+	Approvers *approval.KeySet
 	// Logger receives the high-severity alert when a breaker trips.
 	Logger *slog.Logger
 }
@@ -145,6 +150,7 @@ type Limiter struct {
 	// a trip whose write fails, which still opens in memory: failing closed.
 	breakers      map[string]*model.BreakerStatus
 	quorum        int
+	approvers     *approval.KeySet
 	log           *slog.Logger
 	trips, resets uint64
 	// Sweeping is proportional to what lapsed, not to what is retained:
@@ -184,7 +190,7 @@ type bucket struct {
 // New validates the rules and rebuilds state from the store.
 func New(cfg Config) (*Limiter, error) {
 	l := &Limiter{store: cfg.Store, clock: cfg.Clock, recs: map[string]*entry{}, usage: map[string]*keyUsage{},
-		breakers: map[string]*model.BreakerStatus{}, quorum: cfg.BreakerQuorum, log: cfg.Logger}
+		breakers: map[string]*model.BreakerStatus{}, quorum: cfg.BreakerQuorum, approvers: cfg.Approvers, log: cfg.Logger}
 	if l.store == nil {
 		l.store = MemStore{}
 	}

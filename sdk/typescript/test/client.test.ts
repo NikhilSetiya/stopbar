@@ -7,8 +7,12 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { Client, StopbarAuthError, StopbarDenied, StopbarEscalated, StopbarRequestError, StopbarUnavailable } from "stopbar";
-import { client, evm, serve, servers } from "./mock.js";
+import { Client, StopbarAuthError, StopbarDenied, StopbarEscalated, StopbarRequestError, StopbarUnavailable, generateKey } from "stopbar";
+import { client, evm, serve, servers, type Responder } from "./mock.js";
+
+// A fresh approver key for the approve/reject tests below; its own
+// signature shape and canonicalisation are covered in approval.test.ts.
+const approver = generateKey();
 
 test("allow returns the decision with signed tx", async () => {
   const m = await serve((_, b) => [200, { request_id: b.id, outcome: "allow", signed_tx: "0xdeadbeef" }]);
@@ -43,19 +47,27 @@ test("deny rejects with StopbarDenied", async () => {
 });
 
 test("escalate rejects with request id, then approve", async () => {
-  const m = await serve((p, b) => p.startsWith("/v1/approvals/")
-    ? [200, { request_id: p.split("/").pop(), outcome: "allow", signed_tx: "0xabc" }]
-    : [202, { request_id: b.id, outcome: "escalate", reasons: [{ policy_id: "large-share-of-balance", message: "" }] }]);
+  const m = await serve((p, b, method) => {
+    if (p.startsWith("/v1/approvals/") && method === "GET") {
+      return [200, { escalation_id: p.split("/").pop(), payload_hash: "sha256:" + "a".repeat(64), tenant: "demo" }];
+    }
+    if (p.startsWith("/v1/approvals/")) {
+      assert.equal(b.decision, "approve");
+      assert.ok(b.kid && b.sig); // genuinely signed
+      return [200, { request_id: p.split("/").pop(), outcome: "allow", signed_tx: "0xabc" }];
+    }
+    return [202, { request_id: b.id, outcome: "escalate", reasons: [{ policy_id: "large-share-of-balance", message: "" }] }];
+  });
   const sb = client(m, { apiKey: "k" });
   const e = await sb.evaluate(evm()).catch((x: unknown) => x);
   assert.ok(e instanceof StopbarEscalated);
   assert.ok(e.requestId);
   assert.deepEqual(e.reasons, ["large-share-of-balance"]);
-  const ok = await sb.approve(e.requestId);
+  const ok = await sb.approve(e.requestId, approver.seed);
   assert.equal(ok.outcome, "allow");
   assert.equal(ok.signedTx, "0xabc");
   assert.equal(m.last.path, `/v1/approvals/${e.requestId}`);
-  assert.equal(m.last.body, null);
+  assert.equal(m.last.method, "POST");
 });
 
 test("session labels are monotonic", async () => {
@@ -128,10 +140,21 @@ test("poll reports the escalation state", async () => {
   }
 });
 
+// escalationToSign answers the GET /v1/approvals/{id} half of a mock, for
+// any approve/reject test below.
+function escalationToSign(method: string): [number, unknown] | undefined {
+  if (method === "GET") return [200, { escalation_id: "req_1", payload_hash: "sha256:" + "a".repeat(64), tenant: "demo" }];
+  return undefined;
+}
+
 test("reject resolves with the APPROVAL_REJECTED deny", async () => {
   const deny = { request_id: "req_1", outcome: "deny", reasons: [{ policy_id: "large-share-of-balance", message: "" }, { code: "APPROVAL_REJECTED", policy_id: "", message: "" }] };
-  const m = await serve(() => [403, deny]);
-  const d = await client(m, { apiKey: "ops" }).reject("req_1");
+  const m = await serve((_p, b, method) => escalationToSign(method) ?? (() => {
+    assert.equal(b.decision, "reject");
+    assert.ok(b.kid && b.sig);
+    return [403, deny] as [number, unknown];
+  })());
+  const d = await client(m, { apiKey: "ops" }).reject("req_1", approver.seed);
   assert.deepEqual([m.last.method, m.last.path], ["POST", "/v1/approvals/req_1/reject"]);
   assert.equal(d.outcome, "deny");
   assert.deepEqual(d.reasons, ["large-share-of-balance", "APPROVAL_REJECTED"]);
@@ -139,8 +162,9 @@ test("reject resolves with the APPROVAL_REJECTED deny", async () => {
 
 test("reject refusals are typed", async () => {
   const self = { request_id: "req_1", outcome: "deny", reasons: [{ code: "APPROVAL_SELF_APPROVAL", policy_id: "", message: "" }] };
-  await assert.rejects(client(await serve(() => [403, self])).reject("req_1"), StopbarDenied);
-  await assert.rejects(client(await serve(() => [409, { code: "ALREADY_RESOLVED" }])).reject("req_1"), StopbarRequestError);
-  await assert.rejects(client(await serve(() => [403, { code: "FORBIDDEN_SCOPE" }])).reject("req_1"), StopbarAuthError);
-  await assert.rejects(client(await serve(() => [200, { outcome: "allow" }])).reject("req_1"), StopbarUnavailable);
+  const withGet = (postResult: [number, unknown]): Responder => (_p, _b, method) => escalationToSign(method) ?? postResult;
+  await assert.rejects(client(await serve(withGet([403, self]))).reject("req_1", approver.seed), StopbarDenied);
+  await assert.rejects(client(await serve(withGet([409, { code: "ALREADY_RESOLVED" }]))).reject("req_1", approver.seed), StopbarRequestError);
+  await assert.rejects(client(await serve(withGet([403, { code: "FORBIDDEN_SCOPE" }]))).reject("req_1", approver.seed), StopbarAuthError);
+  await assert.rejects(client(await serve(withGet([200, { outcome: "allow" }]))).reject("req_1", approver.seed), StopbarUnavailable);
 });

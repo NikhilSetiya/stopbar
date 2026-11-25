@@ -2,12 +2,15 @@ package enrich
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"errors"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/audit"
 	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/model"
@@ -24,7 +27,58 @@ var (
 	t0        = time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
 	requester = auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", AgentID: "ops-bot", KeyID: "ak_req"}
 	approver  = auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", AgentID: "alice", KeyID: "ak_alice"}
+
+	// Approver keys (CS-151): alice and bob are distinct owners; alice2 is a
+	// second key of alice's; reqKey is bound to the requester's API key.
+	alicePriv, alice2Priv, bobPriv, reqPriv = testKey("alice"), testKey("alice2"), testKey("bob"), testKey("requester")
 )
+
+func testKey(label string) ed25519.PrivateKey {
+	seed := sha256.Sum256([]byte("registry test approver " + label))
+	return ed25519.NewKeyFromSeed(seed[:])
+}
+
+func approverKeys(t *testing.T) *approval.KeySet {
+	t.Helper()
+	k := func(id string, priv ed25519.PrivateKey, o approval.Owner) approval.Key {
+		return approval.Key{ID: id, Tenant: "acme", Owner: o, Public: priv.Public().(ed25519.PublicKey)}
+	}
+	ks, err := approval.NewKeySet([]approval.Key{
+		k("alice", alicePriv, approval.Owner{AgentID: "alice"}), k("alice2", alice2Priv, approval.Owner{AgentID: "alice"}),
+		k("bob", bobPriv, approval.Owner{AgentID: "bob"}), k("req", reqPriv, approval.Owner{KeyID: "ak_req"})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ks
+}
+
+// sign signs an approval of c with priv, valid for 30 minutes from now; f
+// may alter the object first.
+func sign(t *testing.T, priv ed25519.PrivateKey, c model.Contact, now time.Time, f func(*approval.ContactObject)) approval.SignedContact {
+	t.Helper()
+	o := approval.ContactObject{Tenant: c.Tenant, ContactID: c.ID, Address: c.Address, Decision: approval.Approve, Expiry: now.Add(30 * time.Minute).Unix()}
+	if f != nil {
+		f(&o)
+	}
+	s, err := approval.SignContact(priv, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// approve2 reaches the 2-of-N quorum on c with alice's and bob's keys.
+func approve2(t *testing.T, r *Registry, c model.Contact, now time.Time) model.Contact {
+	t.Helper()
+	if _, err := r.Approve(c.Tenant, c.ID, sign(t, alicePriv, c, now, nil), approver, now); err != nil {
+		t.Fatal(err)
+	}
+	a, err := r.Approve(c.Tenant, c.ID, sign(t, bobPriv, c, now, nil), approver, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
 
 // newRegistry returns a registry with a 24h cooling-off whose clock the test
 // moves through *now.
@@ -45,6 +99,7 @@ func newRegistry(t *testing.T) (*Registry, *store.DB, *time.Time) {
 	}
 	now := t0
 	r.Clock = func() time.Time { return now }
+	r.Approvers, r.Quorum = approverKeys(t), 2
 	return r, db, &now
 }
 
@@ -109,28 +164,39 @@ func TestRegistryLifecycle(t *testing.T) {
 		{"pending, not approved: unknown", 0, nil, model.ContactPendingApproval, false},
 		{"pending for 48h without approval: still unknown", 48 * time.Hour, nil, model.ContactPendingApproval, false},
 		{"self-approval refused, still pending", 0, func() error {
-			if _, err := r.Approve("acme", c.ID, requester, *now); !errors.Is(err, model.ErrSelfApproval) {
+			if _, err := r.Approve("acme", c.ID, sign(t, reqPriv, c, *now, nil), requester, *now); !errors.Is(err, model.ErrSelfApproval) {
 				t.Fatalf("self-approval: got %v, want ErrSelfApproval", err)
 			}
 			return nil
 		}, model.ContactPendingApproval, false},
-		{"another tenant's approver cannot see it", 0, func() error {
-			other := approver
-			other.Tenant = "other"
-			if _, err := r.Approve("other", c.ID, other, *now); !errors.Is(err, model.ErrNoContact) {
+		{"another tenant cannot see it", 0, func() error {
+			if _, err := r.Approve("other", c.ID, sign(t, alicePriv, c, *now, nil), approver, *now); !errors.Is(err, model.ErrNoContact) {
 				t.Fatalf("cross-tenant approve: got %v, want ErrNoContact", err)
 			}
 			return nil
 		}, model.ContactPendingApproval, false},
-		{"approved: cooling off, still unknown", 0, func() error {
-			a, err := r.Approve("acme", c.ID, approver, *now)
-			if err == nil && (a.ApprovedBy != "ak_alice" || !a.ActiveFrom.Equal(now.Add(DefaultCoolingOff)) || a.Status != model.ContactCoolingOff) {
+		{"one of two votes: still pending", 0, func() error {
+			a, err := r.Approve("acme", c.ID, sign(t, alicePriv, c, *now, nil), approver, *now)
+			if err == nil && (a.Status != model.ContactPendingApproval || len(a.Votes) != 1 || a.Quorum != 2 || a.ApprovedAt != nil) {
+				t.Fatalf("first vote: %+v", a)
+			}
+			return err
+		}, model.ContactPendingApproval, false},
+		{"a second key of the same owner does not count", 0, func() error {
+			if _, err := r.Approve("acme", c.ID, sign(t, alice2Priv, c, *now, nil), approver, *now); !errors.Is(err, model.ErrDuplicateVote) {
+				t.Fatalf("same owner: got %v, want ErrDuplicateVote", err)
+			}
+			return nil
+		}, model.ContactPendingApproval, false},
+		{"second distinct owner: approved, cooling off, still unknown", 0, func() error {
+			a, err := r.Approve("acme", c.ID, sign(t, bobPriv, c, *now, nil), approver, *now)
+			if err == nil && (a.ApprovedBy != "alice,bob" || !a.ActiveFrom.Equal(now.Add(DefaultCoolingOff)) || a.Status != model.ContactCoolingOff || a.Votes != nil) {
 				t.Fatalf("approve: %+v", a)
 			}
 			return err
 		}, model.ContactCoolingOff, false},
 		{"approving twice is a conflict", 0, func() error {
-			if _, err := r.Approve("acme", c.ID, approver, *now); !errors.Is(err, model.ErrContactApproved) {
+			if _, err := r.Approve("acme", c.ID, sign(t, alicePriv, c, *now, nil), approver, *now); !errors.Is(err, model.ErrContactApproved) {
 				t.Fatalf("second approve: got %v", err)
 			}
 			return nil
@@ -172,7 +238,7 @@ func TestRegistryLifecycle(t *testing.T) {
 		t.Fatalf("second remove: got %v, want ErrNoContact", err)
 	}
 
-	// Every change, and only changes, is audited: request, approval, removal.
+	// Every change, and only changes, is audited: request, each vote, removal.
 	recs, err := audit.Records(db, 1, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -181,12 +247,15 @@ func TestRegistryLifecycle(t *testing.T) {
 	for _, rec := range recs {
 		types = append(types, rec.Type)
 	}
-	want := []model.AuditRecordType{model.AuditContactRequest, model.AuditContactApproval, model.AuditContactRemoval}
+	want := []model.AuditRecordType{model.AuditContactRequest, model.AuditContactApproval, model.AuditContactApproval, model.AuditContactRemoval}
 	if !slices.Equal(types, want) {
 		t.Fatalf("audit types %v, want %v", types, want)
 	}
-	ab := recs[1].Body.(map[string]any)
-	if ab["cooling_off"] != "24h0m0s" || ab["identity"].(map[string]any)["key_id"] != "ak_alice" {
+	if vb := recs[1].Body.(map[string]any); vb["event"] != "vote" || vb["approver"] != "alice" {
+		t.Fatalf("vote record: %+v", vb)
+	}
+	ab := recs[2].Body.(map[string]any)
+	if ab["event"] != "approved" || ab["approver"] != "bob" || ab["cooling_off"] != "24h0m0s" || ab["identity"].(map[string]any)["key_id"] != "ak_alice" {
 		t.Fatalf("approval record: %+v", ab)
 	}
 	if _, err := audit.Verify(db, nil, 1, 0); err != nil {
@@ -214,9 +283,7 @@ func TestRegistryRequestChecks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := r.Approve("acme", c.ID, approver, *now); err != nil {
-			t.Fatal(err)
-		}
+		approve2(t, r, c, *now)
 	}
 	if _, err := r.Request("acme", pending, "pend", requester, *now); err != nil {
 		t.Fatal(err)
@@ -344,5 +411,86 @@ func TestRegistryEnrich(t *testing.T) {
 	}
 	if shared[:2][1] != "" {
 		t.Fatalf("enrich wrote %q into the shared backing array", shared[:2][1])
+	}
+}
+
+// Signed contact approvals fail closed (CS-151): a signature that fails any
+// check counts for nothing and leaves no record; an expired vote stops
+// counting; with no approver keys nothing can be approved.
+func TestRegistryApproveFailures(t *testing.T) {
+	r, db, now := newRegistry(t)
+	c, err := r.Request("acme", payee, "", requester, *now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := r.Request("acme", "0x9999999999999999999999999999999999999999", "", requester, *now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outsider := testKey("outsider")
+	for _, tt := range []struct {
+		name string
+		sig  approval.SignedContact
+		code string
+	}{
+		{"signed for another entry", sign(t, alicePriv, other, *now, nil), approval.CodeWrongContact},
+		{"address swapped in the object", sign(t, alicePriv, c, *now, func(o *approval.ContactObject) { o.Address = other.Address }), approval.CodeWrongContact},
+		{"another tenant's object", sign(t, alicePriv, c, *now, func(o *approval.ContactObject) { o.Tenant = "other" }), approval.CodeWrongTenant},
+		{"reject is not a contact decision", sign(t, alicePriv, c, *now, func(o *approval.ContactObject) { o.Decision = approval.Reject }), approval.CodeBadDecision},
+		{"expired", sign(t, alicePriv, c, *now, func(o *approval.ContactObject) { o.Expiry = now.Add(-time.Second).Unix() }), approval.CodeExpired},
+		{"expiry over an hour ahead", sign(t, alicePriv, c, *now, func(o *approval.ContactObject) { o.Expiry = now.Add(2 * time.Hour).Unix() }), approval.CodeExpiryTooFarAhead},
+		{"unconfigured key", sign(t, outsider, c, *now, nil), approval.CodeUnknownKey},
+		{"tampered under a valid signature", func() approval.SignedContact {
+			s := sign(t, alicePriv, c, *now, nil)
+			s.Expiry++
+			return s
+		}(), approval.CodeBadSignature},
+	} {
+		_, err := r.Approve("acme", c.ID, tt.sig, approver, *now)
+		var ve *approval.VerifyError
+		if !errors.As(err, &ve) || ve.Code != tt.code {
+			t.Errorf("%s: got %v, want %s", tt.name, err, tt.code)
+		}
+	}
+	// A key bound to the requester's agent id is refused too, not just its key id.
+	byAgent, err := r.Request("acme", "0x8888888888888888888888888888888888888888", "",
+		auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", AgentID: "bob", KeyID: "ak_bobs_bot"}, *now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Approve("acme", byAgent.ID, sign(t, bobPriv, byAgent, *now, nil), approver, *now); !errors.Is(err, model.ErrSelfApproval) {
+		t.Fatalf("agent-bound self-approval: got %v", err)
+	}
+	cs, _ := r.List("acme", *now)
+	for _, x := range cs {
+		if len(x.Votes) != 0 {
+			t.Fatalf("a refused signature left a vote: %+v", x)
+		}
+	}
+
+	// alice's vote expires before bob signs: still pending; alice again: approved.
+	if _, err := r.Approve("acme", c.ID, sign(t, alicePriv, c, *now, nil), approver, *now); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(31 * time.Minute)
+	if a, err := r.Approve("acme", c.ID, sign(t, bobPriv, c, *now, nil), approver, *now); err != nil || a.ApprovedAt != nil || len(a.Votes) != 1 {
+		t.Fatalf("after alice's vote expired: %+v, %v", a, err)
+	}
+	if a, err := r.Approve("acme", c.ID, sign(t, alicePriv, c, *now, nil), approver, *now); err != nil || a.ApprovedBy != "bob,alice" {
+		t.Fatalf("alice re-signs: %+v, %v", a, err)
+	}
+
+	// Only the three accepted votes were audited (plus the three requests).
+	recs, err := audit.Records(db, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 6 {
+		t.Fatalf("%d audit records, want 6", len(recs))
+	}
+
+	r.Approvers = nil
+	if _, err := r.Approve("acme", other.ID, sign(t, alicePriv, other, *now, nil), approver, *now); err == nil {
+		t.Fatal("approval with no approver keys configured succeeded")
 	}
 }

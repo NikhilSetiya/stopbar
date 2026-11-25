@@ -1,6 +1,6 @@
 # ADR 0004: Live destination-registry edits, with approval and cooling-off
 
-- Status: **Accepted**
+- Status: **Accepted**; the approval mechanism (decision 1) is superseded by [ADR 0005](0005-signed-approvals.md)
 - Date: 2026-11-24
 - Task: CS-134 (builds on CS-133; FR-IR-2, FR-POL-5)
 - Design: LLD §4.1 (`/v1/contacts`), §6.4

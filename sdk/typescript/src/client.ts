@@ -7,9 +7,18 @@
 // dependencies: global fetch (Node >= 20).
 
 import { randomBytes, randomUUID } from "node:crypto";
+import { APPROVE, REJECT, loadKeyFile, signEscalation } from "./approval.js";
 import { detectEncodings } from "./encoding.js";
 import { StopbarAuthError, StopbarDenied, StopbarEscalated, StopbarRequestError, StopbarUnavailable, reasonIds } from "./errors.js";
 import type { Action, ActionRequest, DecisionBody, ErrorBody, Label, Source } from "./types.js";
+
+/** An approver key: a raw 32-byte Ed25519 seed, or a path to a key file
+ * written by `stopbar approver keygen` / approval.writeKeyFile. */
+export type ApproverKey = Buffer | string;
+
+function approverSeed(key: ApproverKey): Buffer {
+  return Buffer.isBuffer(key) ? key : loadKeyFile(key);
+}
 
 /** A Stopbar decision. `outcome` is "allow", "escalate" or "deny"; in
  * gatekeeper mode an allow carries `signedTx` and `txHash`. */
@@ -126,25 +135,44 @@ export class Client {
     return this.decision(...(await this.request("POST", "/v1/evaluate", body)));
   }
 
-  /** Approve a pending escalation. Stopbar re-evaluates it against current
-   * state; on an allow the Decision carries the signed transaction. Needs a
-   * key with the 'approve' scope. */
-  async approve(requestId: string): Promise<Decision> {
-    return this.decision(...(await this.request("POST", `/v1/approvals/${seg(requestId)}`)));
+  /** Approve a pending escalation (CS-151): fetches what to sign from Stopbar
+   * (GET /v1/approvals/{id}), signs it locally with approverKey — a raw
+   * 32-byte Ed25519 seed, or a path to a key file written by
+   * `stopbar approver keygen` / approval.writeKeyFile — and submits the
+   * signature. The private key never leaves this process. On quorum,
+   * Stopbar re-evaluates against current state; on an allow the Decision
+   * carries the signed transaction. */
+  async approve(requestId: string, approverKey: ApproverKey): Promise<Decision> {
+    const sig = await this.signEscalation(requestId, approverKey, APPROVE);
+    return this.decision(...(await this.request("POST", `/v1/approvals/${seg(requestId)}`, sig)));
   }
 
-  /** Reject a pending escalation: it is denied and nothing is signed. Needs a
-   * key with the 'approve' scope that did not request it. Resolves with the
-   * deny (reason APPROVAL_REJECTED); rejects with StopbarDenied if Stopbar
-   * refused the rejection itself (e.g. self-rejection), StopbarRequestError
-   * for an unknown or already-resolved escalation. */
-  async reject(requestId: string): Promise<Decision> {
-    const [status, body] = await this.request("POST", `/v1/approvals/${seg(requestId)}/reject`);
+  /** Signs and submits a reject (CS-151): one valid reject denies the
+   * escalation outright, audited with the rejecting owner. approverKey is
+   * as for approve(). Resolves with the deny (reason APPROVAL_REJECTED);
+   * rejects with StopbarDenied if Stopbar refused the signature itself,
+   * StopbarRequestError for an unknown or already-resolved escalation. */
+  async reject(requestId: string, approverKey: ApproverKey): Promise<Decision> {
+    const sig = await this.signEscalation(requestId, approverKey, REJECT);
+    const [status, body] = await this.request("POST", `/v1/approvals/${seg(requestId)}/reject`, sig);
     const d = body as unknown as DecisionBody;
     if (status === 403 && d.outcome === "deny" && d.reasons?.at(-1)?.code === "APPROVAL_REJECTED") return new Decision(status, d);
     refusal(status, body);
     if (status !== 200) this.decision(status, body); // throws: escalate / deny / unavailable
     throw new StopbarUnavailable(`Stopbar answered a reject with HTTP ${status}: not a rejection`);
+  }
+
+  private async signEscalation(requestId: string, approverKey: ApproverKey, decision: string) {
+    const seed = approverSeed(approverKey);
+    const [status, body] = await this.request("GET", `/v1/approvals/${seg(requestId)}`);
+    if (status !== 200) {
+      refusal(status, body);
+      throw new StopbarUnavailable(`could not fetch what to sign (HTTP ${status}): ${(body as ErrorBody).code ?? JSON.stringify(body)}`);
+    }
+    return signEscalation(seed, {
+      escalationId: String(body.escalation_id), payloadHash: String(body.payload_hash), decision,
+      expiry: Math.floor(Date.now() / 1000) + 50 * 60, // comfortably under the 1h bound
+    });
   }
 
   /** The escalation's current state (GET /v1/decisions/{id}). Visible to the
@@ -266,8 +294,12 @@ export class Session {
     });
   }
 
-  approve(requestId: string): Promise<Decision> {
-    return this.client.approve(requestId);
+  approve(requestId: string, approverKey: ApproverKey): Promise<Decision> {
+    return this.client.approve(requestId, approverKey);
+  }
+
+  reject(requestId: string, approverKey: ApproverKey): Promise<Decision> {
+    return this.client.reject(requestId, approverKey);
   }
 
   poll(requestId: string): Promise<EscalationStatus> {

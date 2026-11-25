@@ -22,7 +22,19 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        self.do_POST()
+        getr = getattr(self.server, "get_responder", None)
+        if getr is None:
+            self.do_POST()
+            return
+        self.server.last_method, self.server.last_path = self.command, self.path
+        self.server.last_auth = self.headers.get("Authorization")
+        status, body = getr(self.path)
+        payload = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
@@ -39,9 +51,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
 
-def serve(responder):
+def serve(responder, get_responder=None):
     srv = HTTPServer(("127.0.0.1", 0), _Handler)
     srv.responder = responder
+    srv.get_responder = get_responder
     srv.last_body = srv.last_auth = srv.last_method = srv.last_path = None
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
@@ -84,19 +97,31 @@ def test_deny_raises_stopbar_denied():
 
 
 def test_escalate_raises_with_request_id_then_approve():
-    def responder(path, body):
-        if path.startswith("/v1/approvals/"):
-            return (200, {"request_id": path.rsplit("/", 1)[1], "outcome": "allow", "signed_tx": "0xabc"})
-        return (202, {"request_id": body["id"], "outcome": "escalate",
-                      "reasons": [{"policy_id": "large-share-of-balance"}]})
+    from stopbar import approval
 
-    srv = serve(responder)
+    seed, _ = approval.generate_key()
+
+    def responder(path, body):
+        assert path == "/v1/approvals/req_1"
+        assert body["decision"] == approval.APPROVE and body["escalation_id"] == "req_1"
+        assert body["kid"] and body["sig"]  # genuinely signed
+        return (200, {"request_id": "req_1", "outcome": "allow", "signed_tx": "0xabc"})
+
+    def get_responder(path):
+        assert path == "/v1/approvals/req_1"
+        return (200, {"escalation_id": "req_1", "payload_hash": "sha256:" + "a" * 64, "tenant": "demo"})
+
+    srv = serve(lambda path, body: (202, {"request_id": body["id"], "outcome": "escalate",
+                                          "reasons": [{"policy_id": "large-share-of-balance"}]}), get_responder)
     sb = client(srv, api_key="k")
     with pytest.raises(StopbarEscalated) as ei:
-        sb.evaluate(evm(sb))
+        sb.evaluate(evm(sb), request_id="req_1")
     rid = ei.value.request_id
-    assert rid and ei.value.reasons == ["large-share-of-balance"]
-    approved = sb.approve(rid)
+    assert rid == "req_1" and ei.value.reasons == ["large-share-of-balance"]
+
+    # Swap in the POST responder (the mock serves one path differently per phase).
+    srv.responder = responder
+    approved = sb.approve(rid, seed)
     assert approved.outcome == "allow" and approved.signed_tx == "0xabc"
 
 
@@ -169,23 +194,50 @@ def test_poll_unknown_raises():
         client(srv).poll("nope")
 
 
+def _approval_get_responder(escalation_id="req_1"):
+    def get_responder(path):
+        assert path == f"/v1/approvals/{escalation_id}"
+        return (200, {"escalation_id": escalation_id, "payload_hash": "sha256:" + "a" * 64, "tenant": "demo"})
+
+    return get_responder
+
+
 def test_reject_returns_the_deny():
+    from stopbar import approval
+
+    seed, _ = approval.generate_key()
     srv = serve(lambda path, body: (403, {"request_id": "req_1", "outcome": "deny",
-                                          "reasons": [{"code": "APPROVAL_REJECTED", "policy_id": ""}]}))
-    d = client(srv, api_key="ops").reject("req_1")
+                                          "reasons": [{"code": "APPROVAL_REJECTED", "policy_id": ""}]}),
+                _approval_get_responder())
+    d = client(srv, api_key="ops").reject("req_1", seed)
     assert (srv.last_method, srv.last_path) == ("POST", "/v1/approvals/req_1/reject")
+    assert srv.last_body["decision"] == approval.REJECT and srv.last_body["kid"] and srv.last_body["sig"]
     assert d.outcome == "deny" and d.reasons == ["APPROVAL_REJECTED"]
 
 
 def test_reject_refusals_raise():
+    from stopbar import approval
+
+    seed, _ = approval.generate_key()
     srv = serve(lambda path, body: (403, {"request_id": "req_1", "outcome": "deny",
-                                          "reasons": [{"code": "APPROVAL_SELF_APPROVAL"}]}))
+                                          "reasons": [{"code": "APPROVAL_SELF_APPROVAL"}]}),
+                _approval_get_responder())
     with pytest.raises(StopbarDenied):
-        client(srv).reject("req_1")
-    srv = serve(lambda path, body: (409, {"code": "ALREADY_RESOLVED"}))
+        client(srv).reject("req_1", seed)
+    srv = serve(lambda path, body: (409, {"code": "ALREADY_RESOLVED"}), _approval_get_responder())
     with pytest.raises(StopbarRequestError) as ei:
-        client(srv).reject("req_1")
+        client(srv).reject("req_1", seed)
     assert ei.value.code == "ALREADY_RESOLVED"
-    srv = serve(lambda path, body: (200, {"request_id": "req_1", "outcome": "allow"}))
+    srv = serve(lambda path, body: (200, {"request_id": "req_1", "outcome": "allow"}), _approval_get_responder())
     with pytest.raises(StopbarUnavailable):  # an allow is never a rejection: fail closed
-        client(srv).reject("req_1")
+        client(srv).reject("req_1", seed)
+
+
+def test_approve_reject_accept_a_key_file(tmp_path):
+    from stopbar import approval
+
+    path = str(tmp_path / "approver.key")
+    approval.write_key_file(path, approval.generate_key()[0])
+    srv = serve(lambda path_, body: (200, {"request_id": "req_1", "outcome": "allow"}), _approval_get_responder())
+    d = client(srv).approve("req_1", path)  # a file path, not raw seed bytes
+    assert d.outcome == "allow"

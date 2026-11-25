@@ -5,7 +5,12 @@
   "label": "vendor (new invoice address)",
   "status": "pending_approval",
   "requested_by": "ak_ops",
+  "requested_by_agent": "ops",
   "requested_at": "2026-11-23T12:00:00Z",
+  "votes": [
+    {"approver": "alice", "owner_agent_id": "alice", "at": "2026-11-23T12:05:00Z", "expires_at": "2026-11-23T12:55:00Z"}
+  ],
+  "quorum": 2,
   "similar_to": [
     {"address": "0x7a25a1c4e3b2d1f09876543210fedcba98760c21", "label": "vendor"}
   ]

@@ -1,12 +1,14 @@
 package limiter
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/audit"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/model"
@@ -20,8 +22,42 @@ var breakerRules = []Rule{
 	{Scope: ScopeWallet, Window: "1h", MaxUSD: "1000"},
 }
 
+// breakerKeySet configures three approver keys for tenant "acme", each with
+// its own distinct owner, for the CS-151 signed breaker reset.
+func breakerKeySet(t *testing.T) (*approval.KeySet, map[string]ed25519.PrivateKey) {
+	t.Helper()
+	privs := map[string]ed25519.PrivateKey{}
+	var keys []approval.Key
+	for _, id := range []string{"alice", "bob", "carol"} {
+		pub, priv, err := approval.GenerateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		privs[id] = priv
+		keys = append(keys, approval.Key{ID: id, Tenant: "acme", Owner: approval.Owner{KeyID: "ak_" + id}, Public: pub})
+	}
+	ks, err := approval.NewKeySet(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ks, privs
+}
+
+// signReset signs a breaker-reset envelope for tenant/tripID, valid for ttl
+// from now.
+func signReset(t *testing.T, priv ed25519.PrivateKey, tenant, tripID string, now time.Time, ttl time.Duration) approval.SignedBreakerReset {
+	t.Helper()
+	s, err := approval.SignBreakerReset(priv, approval.BreakerResetObject{
+		Tenant: tenant, TripRequestID: tripID, Decision: approval.ResetDecision, Expiry: now.Add(ttl).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 // openBolt opens (or reopens) a limiter on a state file at path.
-func openBolt(t *testing.T, path string, c *fakeClock, quorum int) (*Limiter, *store.DB) {
+func openBolt(t *testing.T, path string, c *fakeClock, quorum int, ks *approval.KeySet) (*Limiter, *store.DB) {
 	t.Helper()
 	db, err := store.Open(path)
 	if err != nil {
@@ -35,7 +71,7 @@ func openBolt(t *testing.T, path string, c *fakeClock, quorum int) (*Limiter, *s
 	if err != nil {
 		t.Fatal(err)
 	}
-	l, err := New(Config{Rules: breakerRules, Store: s, Clock: c.Now, BreakerQuorum: quorum})
+	l, err := New(Config{Rules: breakerRules, Store: s, Clock: c.Now, BreakerQuorum: quorum, Approvers: ks})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,13 +87,15 @@ func open(t *testing.T, l *Limiter, tenant string) bool {
 	return o
 }
 
-// CS-124 acceptance at the limiter: a breach trips the breaker, which then
-// refuses every request for that tenant (and no other) until a quorum of
-// distinct approvers resets it, across a restart; every change is audited.
+// CS-124/CS-151 acceptance at the limiter: a breach trips the breaker, which
+// then refuses every request for that tenant (and no other) until a quorum
+// of distinct approver OWNERS signs a reset, across a restart; every change
+// is audited.
 func TestCircuitBreakerTripAndQuorumReset(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	c := newClock()
-	l, db := openBolt(t, path, c, 2)
+	ks, privs := breakerKeySet(t)
+	l, db := openBolt(t, path, c, 2, ks)
 
 	mustReserve(t, l, "r1", req(walletA, dest, "60", "1", true))
 	// 60 + 41 > 100: the request trips the breaker, not a plain cap.
@@ -79,7 +117,7 @@ func TestCircuitBreakerTripAndQuorumReset(t *testing.T) {
 
 	// Restart: the open breaker is durable.
 	_ = db.Close()
-	l, db = openBolt(t, path, c, 2)
+	l, db = openBolt(t, path, c, 2, ks)
 	if !open(t, l, "acme") {
 		t.Fatal("restart closed the breaker")
 	}
@@ -88,25 +126,25 @@ func TestCircuitBreakerTripAndQuorumReset(t *testing.T) {
 		t.Fatalf("status %+v %v", st, err)
 	}
 
-	// Insufficient signatures: one vote leaves it open; the same identity
-	// voting again is refused and writes nothing.
-	st, err := l.ResetBreaker(bg, "acme", "ak_alice")
+	// Insufficient signatures: one vote leaves it open; the same owner
+	// signing again is refused and writes nothing.
+	st, err := l.ResetBreaker(bg, "acme", signReset(t, privs["alice"], "acme", "r2", c.Now(), time.Hour))
 	if err != nil || !st.Open || len(st.Votes) != 1 {
 		t.Fatalf("one vote: %+v %v", st, err)
 	}
-	if st, err := l.ResetBreaker(bg, "acme", "ak_alice"); !errors.Is(err, model.ErrDuplicateVote) || len(st.Votes) != 1 {
+	if st, err := l.ResetBreaker(bg, "acme", signReset(t, privs["alice"], "acme", "r2", c.Now(), time.Hour)); !errors.Is(err, model.ErrDuplicateVote) || len(st.Votes) != 1 {
 		t.Fatalf("repeat vote: %+v %v", st, err)
 	}
 	wantErr(t, l.Reserve(bg, "r6", req(walletA, dest, "1", "1", true), time.Minute, nil), engine.ErrCircuitOpen)
-	if _, err := l.ResetBreaker(bg, "acme", ""); err == nil {
-		t.Fatal("an anonymous vote was accepted")
+	if _, err := l.ResetBreaker(bg, "acme", approval.SignedBreakerReset{}); err == nil {
+		t.Fatal("a garbage envelope was accepted")
 	}
 
-	// Votes survive a restart too, and the second distinct approver closes it.
+	// Votes survive a restart too, and the second distinct owner closes it.
 	_ = db.Close()
-	l, db = openBolt(t, path, c, 2)
+	l, db = openBolt(t, path, c, 2, ks)
 	defer func() { _ = db.Close() }()
-	st, err = l.ResetBreaker(bg, "acme", "ak_bob")
+	st, err = l.ResetBreaker(bg, "acme", signReset(t, privs["bob"], "acme", "r2", c.Now(), time.Hour))
 	if err != nil || st.Open || len(st.Votes) != 0 {
 		t.Fatalf("quorum vote: %+v %v", st, err)
 	}
@@ -114,7 +152,7 @@ func TestCircuitBreakerTripAndQuorumReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustReserve(t, l, "r7", req(walletA, dest, "1", "1", true))
-	if _, err := l.ResetBreaker(bg, "acme", "ak_carol"); !errors.Is(err, model.ErrBreakerNotOpen) {
+	if _, err := l.ResetBreaker(bg, "acme", signReset(t, privs["carol"], "acme", "r2", c.Now(), time.Hour)); !errors.Is(err, model.ErrBreakerNotOpen) {
 		t.Fatalf("reset of a closed breaker: %v", err)
 	}
 
@@ -135,17 +173,19 @@ func TestCircuitBreakerTripAndQuorumReset(t *testing.T) {
 	}
 }
 
-// Votes expire after model.BreakerVoteTTL: an expired vote no longer counts
-// (and shows as expired in the status), so a vote, a wait of more than an hour
-// and a second vote leave the breaker open. The next vote discards the expired
-// one, audited in the same transaction. Two fresh distinct votes close it.
+// Votes expire after their own signed expiry (bounded to at most
+// model.BreakerVoteTTL ahead): an expired vote no longer counts (and shows
+// as expired in the status), so a vote, a wait of more than its TTL and a
+// second vote leave the breaker open. The next vote discards the expired
+// one, audited in the same transaction. Two fresh distinct owners close it.
 func TestBreakerVotesExpire(t *testing.T) {
 	c := newClock()
-	l, db := openBolt(t, filepath.Join(t.TempDir(), "state.db"), c, 2)
+	ks, privs := breakerKeySet(t)
+	l, db := openBolt(t, filepath.Join(t.TempDir(), "state.db"), c, 2, ks)
 	defer func() { _ = db.Close() }()
 	wantErr(t, l.Reserve(bg, "trip", req(walletA, dest, "101", "1", true), time.Minute, nil), engine.ErrCircuitOpen)
 
-	if _, err := l.ResetBreaker(bg, "acme", "ak_alice"); err != nil {
+	if _, err := l.ResetBreaker(bg, "acme", signReset(t, privs["alice"], "acme", "trip", c.Now(), model.BreakerVoteTTL)); err != nil {
 		t.Fatal(err)
 	}
 	c.Advance(model.BreakerVoteTTL - time.Second)
@@ -154,16 +194,16 @@ func TestBreakerVotesExpire(t *testing.T) {
 	}
 	c.Advance(2 * time.Second) // > 1h after alice voted
 	st := l.BreakerStatus("acme")
-	if len(st.Votes) != 0 || len(st.ExpiredVotes) != 1 || st.ExpiredVotes[0].Approver != "ak_alice" || st.Validate() != nil {
+	if len(st.Votes) != 0 || len(st.ExpiredVotes) != 1 || st.ExpiredVotes[0].Approver != "alice" || st.Validate() != nil {
 		t.Fatalf("expiry not visible in status: %+v %v", st, st.Validate())
 	}
-	st, err := l.ResetBreaker(bg, "acme", "ak_bob")
+	st, err := l.ResetBreaker(bg, "acme", signReset(t, privs["bob"], "acme", "trip", c.Now(), model.BreakerVoteTTL))
 	if err != nil || !st.Open || len(st.Votes) != 1 || len(st.ExpiredVotes) != 0 {
 		t.Fatalf("second vote after the first expired must leave it open: %+v %v", st, err)
 	}
 	wantErr(t, l.Reserve(bg, "r1", req(walletA, dest, "1", "1", true), time.Minute, nil), engine.ErrCircuitOpen)
-	// Alice's vote expired, so she may vote afresh: two live distinct votes close it.
-	st, err = l.ResetBreaker(bg, "acme", "ak_alice")
+	// Alice's vote expired, so she may vote afresh: two live distinct owners close it.
+	st, err = l.ResetBreaker(bg, "acme", signReset(t, privs["alice"], "acme", "trip", c.Now(), model.BreakerVoteTTL))
 	if err != nil || st.Open {
 		t.Fatalf("two fresh distinct votes: %+v %v", st, err)
 	}
@@ -188,7 +228,7 @@ func TestBreakerVotesExpire(t *testing.T) {
 	for i, r := range recs {
 		if r.Type == model.AuditBreaker && r.Body.(map[string]any)["event"] == BreakerVoteExpired {
 			next := recs[i+1].Body.(map[string]any)
-			if next["event"] != BreakerResetVote || next["approver"] != "ak_bob" {
+			if next["event"] != BreakerResetVote || next["approver"] != "bob" {
 				t.Fatalf("discard not written with bob's vote: %+v", next)
 			}
 		}
@@ -198,13 +238,18 @@ func TestBreakerVotesExpire(t *testing.T) {
 // A trip that cannot be recorded still opens the breaker (failing closed) and
 // reports the audit failure; a reset that cannot be recorded changes nothing.
 func TestCircuitBreakerFailsClosedWithoutAudit(t *testing.T) {
-	l := newLimiter(t, newClock(), breakerRules...) // MemStore: cannot audit
-	err := l.Reserve(bg, "r1", req(walletA, dest, "101", "1", true), time.Minute, nil)
-	wantErr(t, err, engine.ErrAuditUnavailable)
+	c := newClock()
+	ks, privs := breakerKeySet(t)
+	l, err := New(Config{Rules: breakerRules, Clock: c.Now, Approvers: ks}) // MemStore: cannot audit
+	if err != nil {
+		t.Fatal(err)
+	}
+	rerr := l.Reserve(bg, "r1", req(walletA, dest, "101", "1", true), time.Minute, nil)
+	wantErr(t, rerr, engine.ErrAuditUnavailable)
 	if !open(t, l, "acme") {
 		t.Fatal("unrecorded trip left the breaker closed")
 	}
-	if _, err := l.ResetBreaker(bg, "acme", "ak_alice"); !errors.Is(err, engine.ErrAuditUnavailable) {
+	if _, err := l.ResetBreaker(bg, "acme", signReset(t, privs["alice"], "acme", "r1", c.Now(), model.BreakerVoteTTL)); !errors.Is(err, engine.ErrAuditUnavailable) {
 		t.Fatalf("unrecorded reset vote: %v", err)
 	}
 	if st := l.BreakerStatus("acme"); !st.Open || len(st.Votes) != 0 {
@@ -227,5 +272,36 @@ func TestCircuitBreakerConfig(t *testing.T) {
 	l, err := New(Config{})
 	if err != nil || l.BreakerStatus("t").Quorum != DefaultBreakerQuorum {
 		t.Fatalf("default quorum: %v", err)
+	}
+}
+
+// TestResetBreakerRequiresApprovers: without configured approver keys, a
+// reset is refused even though the breaker is open (CS-151 replaces #128's
+// API-key vote mechanism entirely; there is no fallback path).
+func TestResetBreakerRequiresApprovers(t *testing.T) {
+	c := newClock()
+	l := newLimiter(t, c, breakerRules...)
+	// newLimiter has no bolt store (MemStore), so the trip itself cannot be
+	// recorded; it still opens in memory, failing closed (as
+	// TestCircuitBreakerFailsClosedWithoutAudit covers in full).
+	wantErr(t, l.Reserve(bg, "r1", req(walletA, dest, "101", "1", true), time.Minute, nil), engine.ErrAuditUnavailable)
+	_, privs := breakerKeySet(t)
+	if _, err := l.ResetBreaker(bg, "acme", signReset(t, privs["alice"], "acme", "r1", c.Now(), time.Hour)); err == nil {
+		t.Fatal("reset succeeded with no approver keys configured")
+	}
+}
+
+// TestResetBreakerWrongTripIsRefused: a validly-signed reset for a previous
+// trip does not count toward the current one (spec §8 WRONG_TRIP).
+func TestResetBreakerWrongTripIsRefused(t *testing.T) {
+	c := newClock()
+	ks, privs := breakerKeySet(t)
+	l, db := openBolt(t, filepath.Join(t.TempDir(), "state.db"), c, 2, ks)
+	defer func() { _ = db.Close() }()
+	wantErr(t, l.Reserve(bg, "trip1", req(walletA, dest, "101", "1", true), time.Minute, nil), engine.ErrCircuitOpen)
+	var ve *approval.VerifyError
+	_, err := l.ResetBreaker(bg, "acme", signReset(t, privs["alice"], "acme", "wrong-trip", c.Now(), time.Hour))
+	if !errors.As(err, &ve) || ve.Code != approval.CodeWrongTrip {
+		t.Fatalf("err = %v, want WRONG_TRIP", err)
 	}
 }

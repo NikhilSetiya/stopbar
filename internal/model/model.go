@@ -302,11 +302,19 @@ type BreakerStatus struct {
 
 // BreakerVote is one approver's vote to reset a tripped breaker. A vote
 // expires (BreakerVoteTTL after it was cast), so a quorum must be assembled
-// within that window.
+// within that window. Approver is a display label (the configured approver
+// key's kid, CS-151); OwnerAgentID/OwnerKeyID are optional and, when either
+// is set, identify the requester identity the voting key is bound to
+// (internal/approval.Owner) — the real dedup Quorum counts on is by owner,
+// not by this struct's Approver string (internal/limiter.ResetBreaker
+// reconstructs an internal/approval.Tally from these to decide that; this
+// struct is the wire/display shape, not the authority).
 type BreakerVote struct {
-	Approver  string    `json:"approver"`
-	At        time.Time `json:"at"`
-	ExpiresAt time.Time `json:"expires_at"`
+	Approver     string    `json:"approver"`
+	OwnerAgentID string    `json:"owner_agent_id,omitempty"`
+	OwnerKeyID   string    `json:"owner_key_id,omitempty"`
+	At           time.Time `json:"at"`
+	ExpiresAt    time.Time `json:"expires_at"`
 }
 
 // BreakerVoteTTL is how long a breaker reset vote counts.

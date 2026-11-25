@@ -35,7 +35,7 @@ try {
   if (e instanceof StopbarDenied) console.log("forbidden:", e.reasons);        // 403, for any caller
   else if (e instanceof StopbarEscalated) {
     console.log("needs approval:", e.requestId);                               // 202, hold it for a human
-    const approved = await operator.approve(e.requestId);                      // re-evaluates against current state
+    const approved = await sb.approve(e.requestId, "/path/to/approver.key");   // signs locally, re-evaluates on quorum
     await broadcast(approved.signedTx);
   } else throw e;                       // StopbarUnavailable / StopbarAuthError: fail closed
 }
@@ -53,12 +53,28 @@ with `StopbarUnavailable`: treat it as a deny.
 await sb.commit(d.requestId, txHash);      // broadcast: the spend counts (retry-safe)
 await sb.release(d.requestId, "cancelled"); // abandoned: frees the reservation
 const st = await sb.poll(requestId);       // .state: pending / allowed / denied / expired; only .allowed is actionable
-await ops.approve(requestId);              // an approver key ('approve' scope) that did not request it
-await ops.reject(requestId);               // deny (reason APPROVAL_REJECTED)
 ```
 
-Refusals (unknown id, CONFLICT, RESERVATION_EXPIRED, ALREADY_RESOLVED…) reject
-with `StopbarRequestError` (`.status`, `.code`).
+Approving and rejecting are Ed25519-signed, never an API call alone (CS-151,
+spec/approval-signature-v1.md): `approve`/`reject` fetch what to sign from
+Stopbar, sign it locally with an approver key — the private key never leaves
+this process — and submit the signature. A quorum of **distinct** approver
+keys (M-of-N, at least 2 in production) is required; one signature alone
+leaves it pending (still a `StopbarEscalated`):
+
+```ts
+import { generateKey, writeKeyFile } from "stopbar"; // `stopbar approver keygen <file>` does the same
+
+// approverKey is a path to a key file, or raw 32-byte Ed25519 seed bytes (Buffer).
+await sb.approve(requestId, approverKey1);  // 1 of 2: still escalated (throws StopbarEscalated)
+await sb.approve(requestId, approverKey2);  // 2 of 2: quorum met, re-evaluates against current state
+await sb.reject(requestId, approverKey1);   // one valid reject denies outright, regardless of quorum
+```
+
+Refusals (unknown id, CONFLICT, RESERVATION_EXPIRED, ALREADY_RESOLVED,
+DUPLICATE_VOTE…) reject with `StopbarRequestError` (`.status`, `.code`). The
+CLI equivalents are `stopbar approve <id> --approver-key FILE` and
+`stopbar reject <id> --approver-key FILE`.
 
 ### Provenance labels (taint)
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
@@ -22,8 +23,8 @@ const CodeAdapter = "FAIL_CLOSED_ADAPTER"
 // Engine is the part of engine.Engine the gatekeeper drives.
 type Engine interface {
 	Evaluate(ctx context.Context, req model.ActionRequest) (model.Decision, error)
-	ApproveWith(ctx context.Context, id, approver string, exec engine.Execute) (model.Decision, error)
-	Reject(ctx context.Context, id, approver string) (model.Decision, error)
+	ApproveWith(ctx context.Context, id string, sig approval.SignedEscalation, exec engine.Execute) (model.Decision, error)
+	Reject(ctx context.Context, id string, sig approval.SignedEscalation) (model.Decision, error)
 	Status(ctx context.Context, id string) (model.EscalationStatus, error)
 	Commit(ctx context.Context, requestID, txRef string) error
 	Release(ctx context.Context, requestID, reason string) error
@@ -77,8 +78,8 @@ func (g *Gatekeeper) Evaluate(ctx context.Context, req model.ActionRequest) (mod
 // in ctx, so that is the identity the adapter checks it against. The engine
 // records the final decision (signed tx, or the refusal) as the
 // escalation's resolution, so a poll returns it.
-func (g *Gatekeeper) Approve(ctx context.Context, id, approver string) (model.Decision, error) {
-	return g.Engine.ApproveWith(ctx, id, approver, func(ctx context.Context, d model.Decision, req model.ActionRequest, requester auth.Identity) model.Decision {
+func (g *Gatekeeper) Approve(ctx context.Context, id string, sig approval.SignedEscalation) (model.Decision, error) {
+	return g.Engine.ApproveWith(ctx, id, sig, func(ctx context.Context, d model.Decision, req model.ActionRequest, requester auth.Identity) model.Decision {
 		raw, hash, err := g.Adapter.SignTx(ctx, d.Token, req.Action, requester)
 		if err != nil {
 			g.log().Warn("gatekeeper: adapter refused an approved allow", "request_id", req.ID, "err", err)
@@ -96,8 +97,8 @@ func (g *Gatekeeper) Approve(ctx context.Context, id, approver string) (model.De
 }
 
 // Reject denies a pending escalation (CS-151/152); nothing is signed.
-func (g *Gatekeeper) Reject(ctx context.Context, id, approver string) (model.Decision, error) {
-	return g.Engine.Reject(ctx, id, approver)
+func (g *Gatekeeper) Reject(ctx context.Context, id string, sig approval.SignedEscalation) (model.Decision, error) {
+	return g.Engine.Reject(ctx, id, sig)
 }
 
 // Status reports an escalation's lifecycle (GET /v1/decisions/{id}).

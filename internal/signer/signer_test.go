@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/canon"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
@@ -383,7 +384,7 @@ func (f *fakeEngine) Evaluate(ctx context.Context, req model.ActionRequest) (mod
 // ApproveWith re-runs the held escalation (if any) as the engine does: the
 // token binds the pending record's requester, whoever the approver in ctx is.
 // It hands the allow to exec; final records what exec returned.
-func (f *fakeEngine) ApproveWith(_ context.Context, id, _ string, exec engine.Execute) (model.Decision, error) {
+func (f *fakeEngine) ApproveWith(_ context.Context, id string, _ approval.SignedEscalation, exec engine.Execute) (model.Decision, error) {
 	if f.pending == nil || f.pending.ID != id {
 		return model.Decision{}, model.ErrNoPending
 	}
@@ -395,7 +396,7 @@ func (f *fakeEngine) ApproveWith(_ context.Context, id, _ string, exec engine.Ex
 	f.final = exec(ctx, d, *f.pending, f.pendingBy)
 	return f.final, nil
 }
-func (f *fakeEngine) Reject(context.Context, string, string) (model.Decision, error) {
+func (f *fakeEngine) Reject(context.Context, string, approval.SignedEscalation) (model.Decision, error) {
 	return model.Decision{}, model.ErrNoPending
 }
 func (f *fakeEngine) Status(context.Context, string) (model.EscalationStatus, error) {
@@ -470,13 +471,13 @@ func TestGatekeeperApproveBindsRequester(t *testing.T) {
 	e := &fakeEngine{r: r, outcome: model.Allow, pending: &pending, pendingBy: who}
 	g := &Gatekeeper{Engine: e, Adapter: r.adapter}
 	approverCtx := auth.WithIdentity(context.Background(), auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", KeyID: "ak_approver"})
-	if d, err := g.Approve(approverCtx, "req-1", "ak_approver"); err != nil || d.Outcome != model.Allow || d.SignedTx == "" {
+	if d, err := g.Approve(approverCtx, "req-1", approval.SignedEscalation{Kid: "ak_approver"}); err != nil || d.Outcome != model.Allow || d.SignedTx == "" {
 		t.Fatalf("approve: %+v %v", d, err)
 	}
 	// The engine reports one requester but the token binds another.
 	e.pending.Nonce, e.pending.Action.TxNonce = "nonce-000000000002", "8"
 	e.signAs = &auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", KeyID: "ak_approver"}
-	if d, _ := g.Approve(approverCtx, "req-1", "ak_approver"); d.Outcome != model.Deny || d.SignedTx != "" ||
+	if d, _ := g.Approve(approverCtx, "req-1", approval.SignedEscalation{Kid: "ak_approver"}); d.Outcome != model.Deny || d.SignedTx != "" ||
 		!strings.Contains(e.releases[len(e.releases)-1], "WRONG_IDENTITY") {
 		t.Fatalf("approve with a token for the approver: %+v releases=%v", d, e.releases)
 	}
@@ -491,7 +492,7 @@ func TestGatekeeperApprove(t *testing.T) {
 	e := &fakeEngine{r: r, outcome: model.Allow, pending: &req}
 	g := &Gatekeeper{Engine: e, Adapter: r.adapter}
 
-	d, err := g.Approve(context.Background(), req.ID, "ak_ops")
+	d, err := g.Approve(context.Background(), req.ID, approval.SignedEscalation{Kid: "ak_ops"})
 	if err != nil || d.Outcome != model.Allow || d.SignedTx == "" || len(e.commits) != 1 || e.final.SignedTx != d.SignedTx {
 		t.Fatalf("approve: %+v err=%v commits=%v final=%+v", d, err, e.commits, e.final)
 	}
@@ -501,11 +502,11 @@ func TestGatekeeperApprove(t *testing.T) {
 	req2 := request(unheld)
 	req2.ID, req2.Nonce = "req-unheld", "nonce-000000000009"
 	e.pending = &req2
-	d, err = g.Approve(context.Background(), req2.ID, "ak_ops")
+	d, err = g.Approve(context.Background(), req2.ID, approval.SignedEscalation{Kid: "ak_ops"})
 	if err != nil || d.Outcome != model.Deny || d.SignedTx != "" || e.final.Outcome != model.Deny || len(e.releases) != 1 {
 		t.Fatalf("refused approve: %+v err=%v final=%+v releases=%v", d, err, e.final, e.releases)
 	}
-	if _, err := g.Approve(context.Background(), "nope", "ak_ops"); !errors.Is(err, model.ErrNoPending) {
+	if _, err := g.Approve(context.Background(), "nope", approval.SignedEscalation{Kid: "ak_ops"}); !errors.Is(err, model.ErrNoPending) {
 		t.Fatalf("unknown id: %v", err)
 	}
 }
