@@ -13,18 +13,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
 
 const contactsUsage = `usage: stopbar contacts add <address> [--label L] --url URL --key KEY
-       stopbar contacts approve <id> --url URL --key APPROVER_KEY
+       stopbar contacts approve <id> --approver-key FILE --url URL --key KEY
        stopbar contacts remove <address> --url URL --key KEY
        stopbar contacts list --url URL --key KEY`
 
 // contactsCmd edits or lists the tenant's destination registry (CS-134) on a
 // running stopbard over its authenticated API. The tenant and the acting
-// identity come from the API key. An addition is pending until a different
-// key approves it and active only after the server's cooling-off period; a
+// identity come from the API key. An addition is pending until a quorum of
+// approver keys not bound to the requester sign it (CS-151; the approver key
+// signs locally and never leaves this process) and active only after the server's cooling-off period; a
 // removal applies at once.
 func contactsCmd(args []string) error {
 	return runContacts(args, os.Stdout)
@@ -50,12 +52,13 @@ func runContacts(args []string, out io.Writer) error {
 	}
 	fs := flag.NewFlagSet("contacts "+op, flag.ContinueOnError)
 	base := fs.String("url", "http://127.0.0.1:7777", "stopbard base URL")
-	key := fs.String("key", "", "API key ('contacts' scope; 'approve' to approve)")
+	key := fs.String("key", "", "API key ('contacts' scope; to approve, any key that can list contacts: it never authorizes the approval)")
 	label := fs.String("label", "", "add: a name for the address")
+	approverKey := fs.String("approver-key", "", "approve: local approver private key file (signs the approval)")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
-	if fs.NArg() != 0 || (*label != "" && op != "add") {
+	if fs.NArg() != 0 || (*label != "" && op != "add") || ((*approverKey != "") != (op == "approve")) {
 		return errors.New(contactsUsage)
 	}
 	root := strings.TrimRight(*base, "/") + "/v1/contacts"
@@ -66,7 +69,11 @@ func runContacts(args []string, out io.Writer) error {
 	case "add":
 		status, body, err = callAPI(http.MethodPost, root, *key, model.ContactRequest{Address: arg, Label: *label})
 	case "approve":
-		status, body, err = callAPI(http.MethodPost, root+"/"+url.PathEscape(arg)+"/approve", *key, nil)
+		var sig approval.SignedContact
+		if sig, err = signContact(root, arg, *key, *approverKey); err != nil {
+			return err
+		}
+		status, body, err = callAPI(http.MethodPost, root+"/"+url.PathEscape(arg)+"/approve", *key, sig)
 	case "remove":
 		status, body, err = callAPI(http.MethodDelete, root+"/"+url.PathEscape(arg), *key, nil)
 	default:
@@ -101,13 +108,47 @@ func runContacts(args []string, out io.Writer) error {
 	case "add":
 		_, _ = fmt.Fprintf(out, "requested %s (id %s): pending until another key approves it with `stopbar contacts approve %s`\n", cs[0].Address, cs[0].ID, cs[0].ID)
 	case "approve":
-		_, _ = fmt.Fprintf(out, "approved %s: known from %s\n", cs[0].Address, cs[0].ActiveFrom.Format(time.RFC3339))
+		if cs[0].ActiveFrom == nil {
+			_, _ = fmt.Fprintf(out, "vote recorded on %s: %d of %d approvers; another distinct approver must sign\n", cs[0].Address, len(cs[0].Votes), cs[0].Quorum)
+		} else {
+			_, _ = fmt.Fprintf(out, "approved %s: known from %s\n", cs[0].Address, cs[0].ActiveFrom.Format(time.RFC3339))
+		}
 	case "remove":
 		_, _ = fmt.Fprintf(out, "removed %s (effective now)\n", cs[0].Address)
 	default:
 		_, _ = fmt.Fprintf(out, "%d entries\n", len(cs))
 	}
 	return nil
+}
+
+// signContact looks pending addition id up in the tenant's listing and signs
+// an approval of exactly that entry with the approver key in keyFile
+// (spec/approval-signature-v1.md §3a).
+func signContact(root, id, key, keyFile string) (approval.SignedContact, error) {
+	priv, err := approval.LoadKeyFile(keyFile)
+	if err != nil {
+		return approval.SignedContact{}, err
+	}
+	status, body, err := callAPI(http.MethodGet, root, key, nil)
+	if err != nil {
+		return approval.SignedContact{}, err
+	}
+	if status != http.StatusOK {
+		return approval.SignedContact{}, fmt.Errorf("could not fetch the addition to sign (HTTP %d): %s", status, strings.TrimSpace(string(body)))
+	}
+	var doc struct {
+		Contacts []model.Contact `json:"contacts"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return approval.SignedContact{}, fmt.Errorf("unexpected response: %w", err)
+	}
+	for _, c := range doc.Contacts {
+		if c.ID == id {
+			return approval.SignContact(priv, approval.ContactObject{Tenant: c.Tenant, ContactID: c.ID, Address: c.Address,
+				Decision: approval.Approve, Expiry: time.Now().Add(50 * time.Minute).Unix()}) // under the 1h bound, clock skew included
+		}
+	}
+	return approval.SignedContact{}, fmt.Errorf("HTTP 404: no contact %q for this tenant", id)
 }
 
 // printContact prints one entry, and every existing entry it looks like, so

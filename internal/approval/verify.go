@@ -30,6 +30,7 @@ const (
 	CodeExpiryTooFarAhead = "EXPIRY_TOO_FAR_AHEAD"
 	CodeSelfApproval      = "SELF_APPROVAL"
 	CodeWrongTrip         = "WRONG_TRIP"
+	CodeWrongContact      = "WRONG_CONTACT"
 )
 
 // EscalationWant is the escalation's current state, recomputed by the
@@ -147,6 +148,58 @@ func VerifyBreakerReset(keys *KeySet, s SignedBreakerReset, want BreakerResetWan
 	}
 	if s.Expiry-now.Unix() > int64(MaxExpiryAhead/time.Second) {
 		return Key{}, verr(CodeExpiryTooFarAhead)
+	}
+	return k, nil
+}
+
+// ContactWant is the pending addition's stored state: the tenant, the entry
+// being approved and who requested it (for the self-approval check, spec §7).
+type ContactWant struct {
+	Tenant           string
+	ContactID        string
+	Address          string
+	RequesterKeyID   string
+	RequesterAgentID string
+}
+
+// VerifyContact checks s against keys, want and now, in the exact order of
+// spec §8a.
+func VerifyContact(keys *KeySet, s SignedContact, want ContactWant, now time.Time) (Key, error) {
+	k, ok := keys.Lookup(s.Kid)
+	if !ok {
+		return Key{}, verr(CodeUnknownKey)
+	}
+	if k.Tenant != want.Tenant {
+		return Key{}, verr(CodeWrongTenant)
+	}
+	sig, err := b64.DecodeString(s.Sig)
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return Key{}, verr(CodeMalformed)
+	}
+	msg, err := canonicalContact(s.ContactObject)
+	if err != nil {
+		return Key{}, verr(CodeMalformed)
+	}
+	if !ed25519.Verify(k.Public, msg, sig) {
+		return Key{}, verr(CodeBadSignature)
+	}
+	if s.Decision != Approve {
+		return Key{}, verr(CodeBadDecision)
+	}
+	if s.Tenant != want.Tenant {
+		return Key{}, verr(CodeWrongTenant)
+	}
+	if s.ContactID != want.ContactID || s.Address != want.Address {
+		return Key{}, verr(CodeWrongContact)
+	}
+	if !now.Before(time.Unix(s.Expiry, 0)) {
+		return Key{}, verr(CodeExpired)
+	}
+	if s.Expiry-now.Unix() > int64(MaxExpiryAhead/time.Second) {
+		return Key{}, verr(CodeExpiryTooFarAhead)
+	}
+	if selfApproval(k.Owner, EscalationWant{RequesterKeyID: want.RequesterKeyID, RequesterAgentID: want.RequesterAgentID}) {
+		return Key{}, verr(CodeSelfApproval)
 	}
 	return k, nil
 }

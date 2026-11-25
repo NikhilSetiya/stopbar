@@ -77,10 +77,17 @@ type Contact struct {
 	Label       string        `json:"label,omitempty"`
 	Status      ContactStatus `json:"status"` // derived from the fields below at read time
 	RequestedBy string        `json:"requested_by"`
-	RequestedAt time.Time     `json:"requested_at"`
-	ApprovedBy  string        `json:"approved_by,omitempty"`
-	ApprovedAt  *time.Time    `json:"approved_at,omitempty"`
-	ActiveFrom  *time.Time    `json:"active_from,omitempty"`
+	// RequestedByAgent is the requester's agent id, so an approver key bound
+	// to that agent cannot approve it (spec/approval-signature-v1.md §7).
+	RequestedByAgent string    `json:"requested_by_agent,omitempty"`
+	RequestedAt      time.Time `json:"requested_at"`
+	// Votes are the live signed approvals toward the quorum (CS-151), until
+	// it is met; ApprovedBy is then the approver ids that met it.
+	Votes      []BreakerVote `json:"votes,omitempty"`
+	Quorum     int           `json:"quorum,omitempty"`
+	ApprovedBy string        `json:"approved_by,omitempty"`
+	ApprovedAt *time.Time    `json:"approved_at,omitempty"`
+	ActiveFrom *time.Time    `json:"active_from,omitempty"`
 	// SimilarTo lists every one of the tenant's entries (active or pending)
 	// this address looks like (address poisoning), computed when it was
 	// requested, so the approver sees it before approving.

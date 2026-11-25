@@ -62,8 +62,8 @@ func main() {
 	pendingTTL := flag.Duration("pending-ttl", engine.DefaultPendingTTL, "how long an escalation waits for approve/reject before it expires (deny)")
 	coolingOff := flag.Duration("contact-cooling-off", enrich.DefaultCoolingOff, "how long an approved destination-registry addition waits before it counts as known (CS-134)")
 	breakerQuorum := flag.Int("breaker-quorum", limiter.DefaultBreakerQuorum, "distinct approver OWNERS needed (M of N, CS-124/151) to reset a tripped circuit breaker; always at least 2, with no -dev-world exception (internal/limiter.New enforces this unconditionally)")
-	approvalQuorum := flag.Int("approval-quorum", limiter.DefaultBreakerQuorum, "distinct approver OWNERS needed (M of N, CS-151) to approve an escalation; at least 2 unless -dev-world")
-	approversFile := flag.String("approvers", "", "CS-151: approver public-key config (JSON, internal/approval.LoadConfigFile), shared by escalation approve/reject and breaker reset — required for either; without it both are disabled")
+	approvalQuorum := flag.Int("approval-quorum", limiter.DefaultBreakerQuorum, "distinct approver OWNERS needed (M of N, CS-151) to approve an escalation or a destination-registry addition; at least 2 unless -dev-world")
+	approversFile := flag.String("approvers", "", "CS-151: approver public-key config (JSON, internal/approval.LoadConfigFile), shared by escalation approve/reject, breaker reset and contact approval — required for each; without it all three are disabled")
 	configPath := flag.String("config", "", "config file (JSON); its fields set any flag not also given on the command line")
 	flag.Parse()
 	if *showVersion {
@@ -302,7 +302,7 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		log.Info("approver keys loaded (CS-151)", "approvers", o.approversFile, "keys", approvers.Len(),
 			"breaker_quorum", o.breakerQuorum, "approval_quorum", o.approvalQuorum)
 	} else {
-		log.Warn("no -approvers: escalation approve/reject and breaker reset are disabled")
+		log.Warn("no -approvers: escalation approve/reject, breaker reset and contact approval are disabled")
 	}
 	alerts := approval.NewAlerts(log)
 	lim, err := limiter.New(limiter.Config{Rules: w.Limits, Store: limStore, BreakerQuorum: o.breakerQuorum, Approvers: approvers, Logger: log})
@@ -344,7 +344,7 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 	if err != nil {
 		return runtime{}, err
 	}
-	reg.CoolingOff = o.coolingOff
+	reg.CoolingOff, reg.Approvers, reg.Quorum = o.coolingOff, approvers, o.approvalQuorum
 	if o.coolingOff == 0 {
 		log.Warn("-contact-cooling-off 0: an approved destination is known at once, with no window to notice and remove it")
 	}

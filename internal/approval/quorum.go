@@ -81,6 +81,12 @@ func VoteFromBreakerReset(k Key, s SignedBreakerReset) Vote {
 	return Vote{Kid: k.Kid, Owner: k.Owner, Decision: s.Decision, Expiry: time.Unix(s.Expiry, 0), Sig: s.Sig}
 }
 
+// VoteFromContact builds the Vote to add to a Tally from a key VerifyContact
+// matched and the envelope it verified.
+func VoteFromContact(k Key, s SignedContact) Vote {
+	return Vote{Kid: k.Kid, Owner: k.Owner, Decision: s.Decision, Expiry: time.Unix(s.Expiry, 0), Sig: s.Sig}
+}
+
 // Tally accumulates verified votes toward an M-of-N quorum of distinct
 // OWNERS — not distinct keys — and resolves exactly once (spec §9). Two
 // configured keys with the same Owner count as one: a single person

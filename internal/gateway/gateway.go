@@ -69,7 +69,7 @@ const (
 // enrich.Registry). Tenant and identity always come from the credential.
 type Contacts interface {
 	Request(tenant, addr, label string, by auth.Identity, now time.Time) (model.Contact, error)
-	Approve(tenant, id string, by auth.Identity, now time.Time) (model.Contact, error)
+	Approve(tenant, id string, sig approval.SignedContact, by auth.Identity, now time.Time) (model.Contact, error)
 	Remove(tenant, addr string, by auth.Identity, now time.Time) (model.Contact, error)
 	List(tenant string, now time.Time) ([]model.Contact, error)
 }
@@ -835,24 +835,40 @@ func (g *Gateway) requestContact(w http.ResponseWriter, r *http.Request) error {
 	return g.writeJSON(w, "/v1/contacts", http.StatusAccepted, c)
 }
 
-// approveContact approves a pending addition. The approver must hold the
-// approve scope and must not be the requester; a self-approval is audited.
-// The approval itself is the registry's (a thin call site, so CS-151 signed
-// approvals can replace the identity check without touching the route).
+// approveContact records a signed approval vote on a pending addition
+// (CS-151, spec/approval-signature-v1.md §3a): the Ed25519 signature
+// authorizes it, never an API key scope, so any authenticated key may carry
+// it. 200 means the vote met the quorum (the entry is cooling off); 202 means
+// it is recorded and more distinct owners must sign. A self-approval is
+// audited.
 func (g *Gateway) approveContact(w http.ResponseWriter, r *http.Request) error {
 	id := r.PathValue("id")
-	identity, err := g.contactsAuth(r, id, ApproveScope)
+	identity, err := g.contactsAuth(r, id, EvalScope, ContactsScope, ApproveScope)
 	if err != nil {
 		return err
 	}
-	c, err := g.contacts.Approve(identity.Tenant, id, identity, g.clock())
-	if errors.Is(err, model.ErrSelfApproval) {
+	var sig approval.SignedContact
+	if aerr := decodeSigned(w, r, &sig, maxApprovalBytes); aerr != nil {
+		return withID(aerr, id)
+	}
+	c, err := g.contacts.Approve(identity.Tenant, id, sig, identity, g.clock())
+	var ve *approval.VerifyError
+	switch {
+	case errors.Is(err, model.ErrSelfApproval):
 		g.auditReject(r.Context(), identity, model.ActionRequest{ID: id, Tenant: identity.Tenant}, "contact self-approval")
+	case errors.Is(err, model.ErrDuplicateVote):
+		return withID(fail(CodeDuplicateVote, "this owner already holds a live vote on this addition; a second distinct owner must sign"), id)
+	case errors.As(err, &ve):
+		return withID(fail(CodeInvalidSignature, "signature rejected: %s", ve.Code), id)
 	}
 	if err != nil {
 		return contactError(err, id)
 	}
-	return g.writeJSON(w, "/v1/contacts/approve", http.StatusOK, c)
+	status := http.StatusOK
+	if c.ApprovedAt == nil {
+		status = http.StatusAccepted
+	}
+	return g.writeJSON(w, "/v1/contacts/approve", status, c)
 }
 
 // removeContact removes an entry at once, whatever its status.

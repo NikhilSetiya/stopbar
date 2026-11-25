@@ -23,6 +23,7 @@ const ResetDecision = "reset"
 const (
 	escalationDomain   = "stopbar-approval-escalation-v1\n"
 	breakerResetDomain = "stopbar-approval-breaker-reset-v1\n"
+	contactDomain      = "stopbar-approval-contact-v1\n"
 )
 
 // EscalationObject is the exact JCS-canonical object an escalation
@@ -43,6 +44,17 @@ type BreakerResetObject struct {
 	Expiry        int64  `json:"expiry"`
 }
 
+// ContactObject is the exact JCS-canonical object a destination-registry
+// addition approval covers (spec §3a). Decision is always Approve: a
+// pending addition is turned down by removing it, which needs no quorum.
+type ContactObject struct {
+	Tenant    string `json:"tenant"`
+	ContactID string `json:"contact_id"`
+	Address   string `json:"address"` // lowercase, as stored
+	Decision  string `json:"decision"`
+	Expiry    int64  `json:"expiry"`
+}
+
 // SignedEscalation is the wire envelope: the object plus who signed it and
 // the signature (spec §4.1).
 type SignedEscalation struct {
@@ -54,6 +66,13 @@ type SignedEscalation struct {
 // SignedBreakerReset is the wire envelope for a breaker reset (spec §4.1).
 type SignedBreakerReset struct {
 	BreakerResetObject
+	Kid string `json:"kid"`
+	Sig string `json:"sig"`
+}
+
+// SignedContact is the wire envelope for a contact approval (spec §4.1).
+type SignedContact struct {
+	ContactObject
 	Kid string `json:"kid"`
 	Sig string `json:"sig"`
 }
@@ -105,4 +124,23 @@ func SignBreakerReset(priv ed25519.PrivateKey, o BreakerResetObject) (SignedBrea
 		Kid:                Kid(pub),
 		Sig:                b64.EncodeToString(ed25519.Sign(priv, msg)),
 	}, nil
+}
+
+// canonicalContact returns domain || JCS(object) (spec §4).
+func canonicalContact(o ContactObject) ([]byte, error) {
+	c, err := canon.Marshal(o)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(contactDomain), c...), nil
+}
+
+// SignContact signs o with priv and returns the full wire envelope (spec §4).
+func SignContact(priv ed25519.PrivateKey, o ContactObject) (SignedContact, error) {
+	msg, err := canonicalContact(o)
+	if err != nil {
+		return SignedContact{}, err
+	}
+	return SignedContact{ContactObject: o, Kid: Kid(priv.Public().(ed25519.PublicKey)),
+		Sig: b64.EncodeToString(ed25519.Sign(priv, msg))}, nil
 }

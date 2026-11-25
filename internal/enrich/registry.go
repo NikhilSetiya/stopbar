@@ -16,6 +16,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
+	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/audit"
 	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/model"
@@ -55,8 +56,8 @@ var (
 // addresses a tenant has vetted. It lives in the shared state file, and every
 // change is audited in the same transaction as the change.
 //
-// An addition is requested (pending), approved by an identity other than the
-// requester, and counts as known only from active_from = approval +
+// An addition is requested (pending), approved by a quorum of signed approver
+// votes none of whose keys is bound to the requester, and counts as known only from active_from = approval +
 // CoolingOff. A removal applies at once.
 //
 // It is also an engine Enricher: it sets Destination.Known and SimilarToKnown
@@ -68,6 +69,11 @@ type Registry struct {
 	log *audit.Log
 	// CoolingOff is the wait from approval to activation.
 	CoolingOff time.Duration
+	// Approvers and Quorum authorize additions (CS-151): Quorum distinct
+	// approver owners must sign (spec/approval-signature-v1.md §3a). With no
+	// Approvers, nothing can be approved.
+	Approvers *approval.KeySet
+	Quorum    int
 	// Clock is for tests. stopbard never sets it: activation is judged
 	// against the server clock.
 	Clock func() time.Time
@@ -114,7 +120,7 @@ func (r *Registry) Request(tenant, addr, label string, by auth.Identity, now tim
 		return model.Contact{}, err
 	}
 	c := model.Contact{ID: id, Tenant: tenant, Address: a, Label: label, Status: model.ContactPendingApproval,
-		RequestedBy: by.KeyID, RequestedAt: now.UTC(), SimilarTo: []model.SimilarContact{}}
+		RequestedBy: by.KeyID, RequestedByAgent: by.AgentID, RequestedAt: now.UTC(), Quorum: r.Quorum, SimilarTo: []model.SimilarContact{}}
 	err = r.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(registryBucket)
 		if b.Get(contactKey(tenant, a)) != nil {
@@ -132,11 +138,16 @@ func (r *Registry) Request(tenant, addr, label string, by auth.Identity, now tim
 	return c, err
 }
 
-// Approve approves tenant's pending addition id. The approver must not be the
-// requester (ErrSelfApproval). It becomes active CoolingOff after now.
-func (r *Registry) Approve(tenant, id string, by auth.Identity, now time.Time) (model.Contact, error) {
-	if by.KeyID == "" {
-		return model.Contact{}, errors.New("registry: an authenticated approver key is required")
+// Approve verifies sig, a signed approval of tenant's pending addition id
+// (spec/approval-signature-v1.md §3a, §8a), and records its vote. Once Quorum
+// distinct owners hold a live vote the addition is approved and becomes
+// active CoolingOff after now. A key bound to the requester is refused
+// (ErrSelfApproval); any other failed check returns its *approval.VerifyError;
+// a second live vote from the same owner returns ErrDuplicateVote. Each vote
+// is audited in the same transaction as the change.
+func (r *Registry) Approve(tenant, id string, sig approval.SignedContact, by auth.Identity, now time.Time) (model.Contact, error) {
+	if r.Approvers == nil {
+		return model.Contact{}, errors.New("registry: no approver keys configured; contact approval is disabled")
 	}
 	var c model.Contact
 	err := r.db.Update(func(tx *bolt.Tx) error {
@@ -153,15 +164,46 @@ func (r *Registry) Approve(tenant, id string, by auth.Identity, now time.Time) (
 			return model.ErrNoContact
 		case c.ApprovedAt != nil:
 			return model.ErrContactApproved
-		case by.KeyID == c.RequestedBy:
-			return model.ErrSelfApproval
 		}
-		at := now.UTC()
-		from := at.Add(r.CoolingOff)
-		c.ApprovedBy, c.ApprovedAt, c.ActiveFrom = by.KeyID, &at, &from
+		k, err := approval.VerifyContact(r.Approvers, sig, approval.ContactWant{Tenant: tenant, ContactID: c.ID, Address: c.Address,
+			RequesterKeyID: c.RequestedBy, RequesterAgentID: c.RequestedByAgent}, now)
+		var ve *approval.VerifyError
+		if errors.As(err, &ve) && ve.Code == approval.CodeSelfApproval {
+			return model.ErrSelfApproval
+		} else if err != nil {
+			return err
+		}
+		tally := approval.NewTally(r.Quorum, c.RequestedBy, c.RequestedByAgent)
+		live := []model.BreakerVote{}
+		for _, v := range c.Votes {
+			if now.Before(v.ExpiresAt) {
+				live = append(live, v)
+				_, _ = tally.Add(approval.Vote{Kid: v.Approver, Owner: approval.Owner{AgentID: v.OwnerAgentID, KeyID: v.OwnerKeyID},
+					Decision: approval.Approve, Expiry: v.ExpiresAt}, now)
+			}
+		}
+		res, err := tally.Add(approval.VoteFromContact(k, sig), now)
+		if errors.Is(err, approval.ErrDuplicateVote) {
+			return model.ErrDuplicateVote
+		} else if err != nil {
+			return err
+		}
+		c.Votes = append(live, model.BreakerVote{Approver: k.ID, OwnerAgentID: k.Owner.AgentID, OwnerKeyID: k.Owner.KeyID,
+			At: now.UTC(), ExpiresAt: time.Unix(sig.Expiry, 0).UTC()})
+		c.Quorum = r.Quorum
+		body := map[string]any{"event": "vote", "contact": c, "identity": by, "approver": k.ID, "kid": k.Kid, "owner": k.Owner}
+		if res.Outcome == approval.Approved {
+			ids := make([]string, len(c.Votes))
+			for i, v := range c.Votes {
+				ids[i] = v.Approver
+			}
+			at := now.UTC()
+			from := at.Add(r.CoolingOff)
+			c.ApprovedBy, c.ApprovedAt, c.ActiveFrom, c.Votes = strings.Join(ids, ","), &at, &from, nil
+			body["event"], body["contact"], body["cooling_off"] = "approved", c, r.CoolingOff.String()
+		}
 		c.Status = c.StatusAt(now)
-		return r.put(tx, c, model.AuditContactApproval,
-			map[string]any{"contact": c, "identity": by, "cooling_off": r.CoolingOff.String()})
+		return r.put(tx, c, model.AuditContactApproval, body)
 	})
 	return c, err
 }
