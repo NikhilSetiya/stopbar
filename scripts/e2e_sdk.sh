@@ -5,7 +5,8 @@
 # gatekeeper one (holds the wallet) and, for the TypeScript example's own
 # commit/release, an advisory one. Allow + signed tx; a Grok-pattern encoded
 # injection labelled decoded and denied; escalations polled, approved and
-# rejected by a separate operator key over the real CS-105/152 routes; commit,
+# rejected with two Ed25519 approver keys (CS-151, 2-of-2: one signature is
+# not enough) over the real CS-105/152 routes; commit,
 # release and CONFLICT. Then each run's audit log must verify offline.
 # Usage: scripts/e2e_sdk.sh PATH/TO/stopbard PATH/TO/stopbar   (needs node >= 20, npm)
 set -euo pipefail
@@ -36,12 +37,17 @@ key() { # agent scopes -> secret on stdout, record in $T/rec.<agent>
   grep -o 'stopbar_sk_[A-Za-z0-9_-]*' "$T/sec"
 }
 AGENT_KEY="$(key wallet-agent evaluate)"
-APPROVE_KEY="$(key operator approve)"
 python3 -c 'import json,sys; print(json.dumps([json.load(open(f)) for f in sys.argv[1:]]))' "$T"/rec.* >"$T/keys.json"
+# Two approvers (CS-151): private keys stay in $T, stopbard gets the public halves.
+for who in alice bob; do
+  "$CLI" approver keygen "$T/approver-$who.key" | sed -n 's/^public_key[^:]*: *//p' >"$T/approver-$who.pub"
+done
+python3 -c 'import json,sys; print(json.dumps({"approvers": [{"id": w, "tenant": "demo", "owner": {"agent_id": w},
+  "public_key": open(sys.argv[1] + "/approver-" + w + ".pub").read().strip()} for w in ("alice", "bob")]}))' "$T" >"$T/approvers.json"
 start() { # name extra-flags... -> address in $T/addr-<name> (not a subshell: PIDS must stick)
   local n=$1; shift
   "$STOPBARD" -listen 127.0.0.1:0 -dev-world "$T/world.json" -tenant demo -auth-keys "$T/keys.json" \
-    -state-dir "$T/state-$n" "$@" >"$T/out-$n" 2>"$T/log-$n" &
+    -approvers "$T/approvers.json" -approval-quorum 2 -state-dir "$T/state-$n" "$@" >"$T/out-$n" 2>"$T/log-$n" &
   PIDS+=($!)
   for _ in $(seq 50); do grep -q 'listening on' "$T/out-$n" 2>/dev/null && break; sleep 0.1; done
   sed -n 's/.*listening on //p' "$T/out-$n" | grep . >"$T/addr-$n" || { echo "stopbard ($n) did not start"; cat "$T/log-$n"; exit 1; }
@@ -49,12 +55,13 @@ start() { # name extra-flags... -> address in $T/addr-<name> (not a subshell: PI
 start gatekeeper -dev-wallet "$T/wallet"
 start advisory
 GK="$(cat "$T/addr-gatekeeper")" ADV="$(cat "$T/addr-advisory")"
-export STOPBAR_URL="http://$GK" STOPBAR_ADVISORY_URL="http://$ADV" STOPBAR_KEY="$AGENT_KEY" STOPBAR_APPROVE_KEY="$APPROVE_KEY" STOPBAR_TENANT=demo
+export STOPBAR_URL="http://$GK" STOPBAR_ADVISORY_URL="http://$ADV" STOPBAR_KEY="$AGENT_KEY" STOPBAR_TENANT=demo \
+  STOPBAR_APPROVER_KEY_1="$T/approver-alice.key" STOPBAR_APPROVER_KEY_2="$T/approver-bob.key"
 
 echo "--- typescript example vs live stopbard"
 node sdk/typescript/dist/examples/protect-agent.js
 echo "--- python example vs live stopbard"
-PYTHONPATH="$P" python3 "$P/examples/protect_agent.py"
+PYTHONPATH="$P" "$P/.venv/bin/python" "$P/examples/protect_agent.py"  # the venv has the 'approver' extra
 
 for n in gatekeeper advisory; do
   url="$STOPBAR_URL"; [[ $n == advisory ]] && url="$STOPBAR_ADVISORY_URL"
