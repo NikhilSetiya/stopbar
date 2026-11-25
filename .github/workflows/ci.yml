@@ -59,7 +59,10 @@ jobs:
         with: {distribution: goreleaser, version: v2.20.3, args: check}
       - name: goreleaser snapshot (no publish, no sign)
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
-        with: {distribution: goreleaser, version: v2.20.3, args: release --snapshot --clean --skip=publish,sign}
+        with:
+          distribution: goreleaser
+          version: v2.20.3
+          args: release --snapshot --clean --skip=publish,sign  # block style: a comma would end a {flow} value
       - name: release binaries report the snapshot version
         run: |
           dist/stopbard_linux_amd64_v1/stopbard -version | grep -q SNAPSHOT
