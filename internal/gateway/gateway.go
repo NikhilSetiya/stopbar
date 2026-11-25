@@ -21,6 +21,8 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -112,7 +114,7 @@ type Breaker interface {
 }
 
 // Authenticator derives the caller's identity from the request (an API key
-// header now; mTLS/SPIFFE later). It returns auth.ErrUnauthenticated for a
+// header, or an mTLS client certificate's SPIFFE ID). It returns auth.ErrUnauthenticated for a
 // missing or unknown credential. nil means auth is off (dev loopback only).
 type Authenticator interface {
 	Authenticate(r *http.Request) (auth.Identity, error)
@@ -135,6 +137,29 @@ func (b BearerAuthenticator) Authenticate(r *http.Request) (auth.Identity, error
 		return auth.Identity{}, auth.ErrUnauthenticated
 	}
 	return b.Store.Verify(strings.TrimSpace(secret))
+}
+
+// MTLSAuthenticator authenticates the TLS client certificate (CS-103
+// increment 3, ADR 0006): its single SPIFFE ID URI SAN, mapped to an identity
+// by operator configuration. No certificate, or one that does not verify or
+// is unmapped, is unauthenticated (401).
+type MTLSAuthenticator struct{ Map *auth.CertMap }
+
+// Authenticate returns the identity the peer certificate authenticates as.
+func (m MTLSAuthenticator) Authenticate(r *http.Request) (auth.Identity, error) {
+	if r.TLS == nil {
+		return auth.Identity{}, auth.ErrUnauthenticated
+	}
+	return m.Map.Identify(r.TLS.PeerCertificates, time.Now())
+}
+
+// ServerTLSConfig is the listener side of mTLS: TLS 1.3 only, and any client
+// certificate presented must chain to clientCAs (else the handshake fails).
+// A client with no certificate still completes the handshake so /healthz and
+// /metrics stay reachable; every authenticated route then answers it 401.
+func ServerTLSConfig(cert tls.Certificate, clientCAs *x509.CertPool) *tls.Config {
+	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert},
+		ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: clientCAs}
 }
 
 // Evaluator is the engine as the gateway sees it (LLD §2 Engine.Evaluate).
@@ -391,10 +416,13 @@ func (g *Gateway) evaluate(w http.ResponseWriter, r *http.Request) error {
 			return withID(fail(CodeUnauthenticated, "missing or invalid credential"), req.ID)
 		}
 		if !id.HasScope(EvalScope) {
-			g.auditReject(ctx, id, req, "key lacks the "+EvalScope+" scope")
-			return withID(fail(CodeForbiddenScope, "the API key lacks the %q scope", EvalScope), req.ID)
+			g.auditReject(ctx, id, req, "credential lacks the "+EvalScope+" scope")
+			return withID(fail(CodeForbiddenScope, "the credential lacks the %q scope", EvalScope), req.ID)
 		}
-		if req.Tenant != id.Tenant || (req.Actor.AgentID != "" && req.Actor.AgentID != id.AgentID) {
+		// Under mTLS the certificate's SPIFFE ID is the workload identity, so a
+		// body claiming another one is a mismatch too.
+		if req.Tenant != id.Tenant || (req.Actor.AgentID != "" && req.Actor.AgentID != id.AgentID) ||
+			(id.Method == auth.MethodMTLS && req.Actor.WorkloadIdentity != "" && req.Actor.WorkloadIdentity != id.KeyID) {
 			g.auditReject(ctx, id, req, "body tenant/agent does not match the authenticated identity")
 			return withID(fail(CodeIdentityMismatch, "request tenant/agent does not match the authenticated identity"), req.ID)
 		}
@@ -431,8 +459,8 @@ func (g *Gateway) authorize(r *http.Request, id string, scopes ...string) (auth.
 		return identity, withID(fail(CodeUnauthenticated, "missing or invalid credential"), id)
 	}
 	if !slices.ContainsFunc(scopes, identity.HasScope) {
-		g.auditReject(r.Context(), identity, model.ActionRequest{ID: id}, "key lacks the "+strings.Join(scopes, " or ")+" scope")
-		return identity, withID(fail(CodeForbiddenScope, "the API key lacks the %s scope", strings.Join(scopes, " or ")), id)
+		g.auditReject(r.Context(), identity, model.ActionRequest{ID: id}, "credential lacks the "+strings.Join(scopes, " or ")+" scope")
+		return identity, withID(fail(CodeForbiddenScope, "the credential lacks the %s scope", strings.Join(scopes, " or ")), id)
 	}
 	return identity, nil
 }

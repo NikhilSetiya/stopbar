@@ -1,11 +1,13 @@
 // Package auth authenticates a request and carries the authenticated identity
-// (CS-103). Identity comes from auth alone — an API key now, mTLS/SPIFFE later —
+// (CS-103). Identity comes from auth alone — an API key or an mTLS client
+// certificate's SPIFFE ID (mtls.go) —
 // never from the request body: the body's claimed tenant and agent must match
 // the authenticated identity, or the gateway rejects the request. The identity
 // is then recorded in every audit record and (decision-token v2) bound into the
 // decision token.
 //
-// stdlib only: API keys are verified by their SHA-256, never stored in the clear.
+// stdlib only: API keys are verified by their SHA-256, never stored in the
+// clear; certificates with crypto/x509.
 package auth
 
 import (
@@ -42,7 +44,7 @@ type Identity struct {
 	Tenant  string   `json:"tenant"`
 	AgentID string   `json:"agent_id,omitempty"`
 	Scopes  []string `json:"scopes,omitempty"`
-	KeyID   string   `json:"key_id,omitempty"` // api-key record id (later: SPIFFE id)
+	KeyID   string   `json:"key_id,omitempty"` // api-key record id, or the client cert's SPIFFE ID (mtls)
 }
 
 // HasScope reports whether the identity carries scope s.
@@ -86,7 +88,7 @@ func LoadKeyStore(path string) (*KeyStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	recs, err := parseRecords(b)
+	recs, err := parseRecords[KeyRecord](b)
 	if err != nil {
 		return nil, fmt.Errorf("auth: %s: %w", path, err)
 	}
@@ -106,19 +108,20 @@ func LoadKeyStore(path string) (*KeyStore, error) {
 	return ks, nil
 }
 
-func parseRecords(b []byte) ([]KeyRecord, error) {
+// parseRecords reads a JSON array of records, or JSONL (one per line, # comments).
+func parseRecords[T any](b []byte) ([]T, error) {
 	trimmed := strings.TrimSpace(string(b))
 	if strings.HasPrefix(trimmed, "[") {
-		var recs []KeyRecord
+		var recs []T
 		return recs, json.Unmarshal([]byte(trimmed), &recs)
 	}
-	var recs []KeyRecord // JSONL
+	var recs []T // JSONL
 	for _, line := range strings.Split(trimmed, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		var r KeyRecord
+		var r T
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
 			return nil, err
 		}
