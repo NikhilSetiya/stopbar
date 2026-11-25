@@ -1076,3 +1076,128 @@ func TestCommitReleaseCarryIdentityAndDomainErrors(t *testing.T) {
 		t.Fatalf("Owner = %q %q %v", tenant, agent, ok)
 	}
 }
+
+// TestApprovalSignatureFailures (CS-151): every way a signed approval can
+// fail verification resolves nothing. Each comes back as a deny decision
+// with an APPROVAL_SIG_* (or APPROVAL_SELF) reason, is audited as a refused
+// attempt, reserves nothing, stores no vote, and leaves the escalation
+// pending, so a valid vote can still approve it afterwards.
+func TestApprovalSignatureFailures(t *testing.T) {
+	const escReason = "taint-unknown-destination"
+	ph := escFixturePayloadHash(t, "r1")
+	resign := func(name string, f func(*approval.EscalationObject)) approval.SignedEscalation {
+		o := approval.EscalationObject{EscalationID: "r1", PayloadHash: ph, Decision: approval.Approve, Expiry: rigNow.Add(time.Minute).Unix()}
+		f(&o)
+		s, err := approval.SignEscalation(approverPrivs[name], o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	outsider := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	unknown, err := approval.SignEscalation(outsider, approval.EscalationObject{EscalationID: "r1", PayloadHash: ph, Decision: approval.Approve, Expiry: rigNow.Add(time.Minute).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name   string
+		sig    approval.SignedEscalation
+		reject bool // post to Reject instead of Approve
+		code   string
+	}{
+		{"payload hash of another transaction", resign("ak_ops", func(o *approval.EscalationObject) { o.PayloadHash = "sha256:" + strings.Repeat("0", 64) }), false, "APPROVAL_SIG_PAYLOAD_MISMATCH"},
+		{"signed for another escalation (replay)", resign("ak_ops", func(o *approval.EscalationObject) { o.EscalationID = "r2" }), false, "APPROVAL_SIG_WRONG_ESCALATION_ID"},
+		{"expired", resign("ak_ops", func(o *approval.EscalationObject) { o.Expiry = rigNow.Unix() }), false, "APPROVAL_SIG_EXPIRED"},
+		{"expiry over an hour ahead", resign("ak_ops", func(o *approval.EscalationObject) { o.Expiry = rigNow.Add(2 * time.Hour).Unix() }), false, "APPROVAL_SIG_EXPIRY_TOO_FAR_AHEAD"},
+		{"key not configured", unknown, false, "APPROVAL_SIG_UNKNOWN_KEY"},
+		{"field changed under a valid signature", func() approval.SignedEscalation {
+			s := signApprove(t, "ak_ops", "r1", ph)
+			s.Expiry++
+			return s
+		}(), false, "APPROVAL_SIG_BAD_SIGNATURE"},
+		{"signature not base64url", func() approval.SignedEscalation {
+			s := signApprove(t, "ak_ops", "r1", ph)
+			s.Sig = "!!"
+			return s
+		}(), false, "APPROVAL_SIG_MALFORMED"},
+		{"reject envelope posted to approve", signReject(t, "ak_ops", "r1", ph), false, "APPROVAL_SIG_BAD_DECISION"},
+		{"approve envelope posted to reject", signApprove(t, "ak_ops", "r1", ph), true, "APPROVAL_SIG_BAD_DECISION"},
+		{"key bound to the requester", signApprove(t, "ak_requester", "r1", ph), false, CodeApprovalSelf},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pend := newFakePending()
+			pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{escReason},
+				IssuedAt: rigNow, State: model.EscalationPending, Requester: auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", KeyID: "ak_requester"}}
+			r := newRig()
+			r.cfg.Policy = outcome(model.Escalate)
+			r.withPending(pend)
+			r.withApprovers()
+			e := r.engine(t)
+
+			submit := e.Approve
+			if tt.reject {
+				submit = e.Reject
+			}
+			d, err := submit(context.Background(), "r1", tt.sig)
+			if err != nil {
+				t.Fatalf("err = %v, want a deny decision", err)
+			}
+			if d.Outcome != model.Deny || len(d.Reasons) != 1 || d.Reasons[0].Code != tt.code || d.Token != "" {
+				t.Fatalf("decision %+v, want deny %s with no token", d, tt.code)
+			}
+			if got := r.audit.records; len(got) != 1 || got[0] != model.AuditDecision {
+				t.Fatalf("audit records %v, want one refused-attempt decision", got)
+			}
+			if pend.state("r1") != model.EscalationPending || len(pend.m["r1"].Votes) != 0 || len(r.limiter.reserved) != 0 {
+				t.Fatalf("refused signature changed state: %+v reserved=%v", pend.m["r1"], r.limiter.reserved)
+			}
+			if ad, err := e.Approve(context.Background(), "r1", signApprove(t, "ak_ops", "r1", ph)); err != nil || ad.Outcome != model.Allow {
+				t.Fatalf("a valid vote afterwards: %+v, %v", ad, err)
+			}
+		})
+	}
+}
+
+// TestApprovalQuorum (CS-151): with a 2-of-N quorum one vote changes
+// nothing but the recorded votes, the same owner cannot vote twice, a vote
+// that cannot be recorded is not counted, and the second distinct owner's
+// vote re-runs the pipeline and allows. With no approver keys nothing can be
+// approved.
+func TestApprovalQuorum(t *testing.T) {
+	const escReason = "taint-unknown-destination"
+	ph := escFixturePayloadHash(t, "r1")
+	pend := newFakePending()
+	pend.m["r1"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r1"), Reasons: []string{escReason}, IssuedAt: rigNow, State: model.EscalationPending}
+	r := newRig()
+	r.cfg.Policy = outcome(model.Escalate)
+	r.withPending(pend)
+	r.cfg.Approvers, r.cfg.ApprovalQuorum = approverKeySet, 2
+	e := r.engine(t)
+
+	pend.err = errors.New("disk full")
+	if _, err := e.Approve(context.Background(), "r1", signApprove(t, "ak_ops", "r1", ph)); err == nil {
+		t.Fatal("a vote that could not be recorded was accepted")
+	}
+	pend.err = nil
+	if len(pend.m["r1"].Votes) != 0 {
+		t.Fatalf("unrecorded vote counted: %+v", pend.m["r1"].Votes)
+	}
+
+	d, err := e.Approve(context.Background(), "r1", signApprove(t, "ak_ops", "r1", ph))
+	if err != nil || d.Outcome == model.Allow || len(pend.m["r1"].Votes) != 1 || pend.state("r1") != model.EscalationPending || len(r.limiter.reserved) != 0 {
+		t.Fatalf("first of two votes: %+v, %v; votes %d reserved %v", d, err, len(pend.m["r1"].Votes), r.limiter.reserved)
+	}
+	if _, err := e.Approve(context.Background(), "r1", signApprove(t, "ak_ops", "r1", ph)); !errors.Is(err, approval.ErrDuplicateVote) {
+		t.Fatalf("same owner again: err = %v, want ErrDuplicateVote", err)
+	}
+	d, err = e.Approve(context.Background(), "r1", signApprove(t, "ops@example.com", "r1", ph))
+	if err != nil || d.Outcome != model.Allow || d.Token == "" || len(d.Approvals) != 2 || pend.state("r1") != model.EscalationAllowed {
+		t.Fatalf("second distinct owner: %+v, %v", d, err)
+	}
+
+	r.cfg.Approvers = nil
+	pend.m["r2"] = PendingEscalation{Request: setID(fixtureRequest(t, "action_request.evm_tx.json"), "r2"), Reasons: []string{escReason}, IssuedAt: rigNow}
+	if _, err := r.engine(t).Approve(context.Background(), "r2", signApprove(t, "ak_ops", "r2", escFixturePayloadHash(t, "r2"))); err == nil {
+		t.Fatal("approval with no approver keys configured succeeded")
+	}
+}
