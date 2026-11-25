@@ -196,7 +196,7 @@ func main() {
 	}
 	sendDone := time.Since(start)
 	wg.Wait()
-	failed := report(results[skip:], sendDone, *duration+*warmup, maxInflight.Load())
+	failed := report(results[skip:], *rate, sendDone, *duration+*warmup, maxInflight.Load())
 	_ = proc.Process.Signal(os.Interrupt)
 	if err := proc.Wait(); err != nil { // a clean SIGINT shutdown exits 0
 		fmt.Println("stopbard did not shut down cleanly:", err)
@@ -217,7 +217,7 @@ func main() {
 }
 
 // report prints the latency distribution and returns true if any request failed.
-func report(rs []result, sendDone, planned time.Duration, maxInflight int64) bool {
+func report(rs []result, rate int, sendDone, planned time.Duration, maxInflight int64) bool {
 	lats := make([]time.Duration, 0, len(rs))
 	byOutcome := map[string]int{}
 	errs := map[string]int{}
@@ -237,6 +237,19 @@ func report(rs []result, sendDone, planned time.Duration, maxInflight int64) boo
 	fmt.Printf("requests: %d measured (%v), schedule kept: sent %s of planned %s, max in flight %d\n",
 		len(rs), byOutcome, sendDone.Round(time.Millisecond), planned, maxInflight)
 	fmt.Printf("latency: p50 %s  p90 %s  p99 %s  p99.9 %s  max %s\n", ms(q(.50)), ms(q(.90)), ms(q(.99)), ms(q(.999)), ms(lats[len(lats)-1]))
+	// Where the tail comes from: seconds (since the end of warm-up) whose
+	// slowest request took over 100 ms.
+	var slow []string
+	for s := 0; s*rate < len(rs); s++ {
+		var worst time.Duration
+		for _, r := range rs[s*rate : min(len(rs), (s+1)*rate)] {
+			worst = max(worst, r.lat)
+		}
+		if worst > 100*time.Millisecond {
+			slow = append(slow, fmt.Sprintf("%ds:%s", s, ms(worst)))
+		}
+	}
+	fmt.Printf("seconds with max > 100ms: %d %v\n", len(slow), slow)
 	fmt.Printf("errors: %d (%.3f%%)\n", nerr, 100*float64(nerr)/float64(len(rs)))
 	for e, n := range errs {
 		fmt.Printf("  %d x %s\n", n, e)
