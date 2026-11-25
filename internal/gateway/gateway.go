@@ -542,6 +542,9 @@ type EscalationToSign struct {
 	// the latest expiry a signature can carry and still verify if submitted
 	// immediately.
 	MaxExpiry int64 `json:"max_expiry"`
+	// Rendered is what the approver is shown before signing (CS-143,
+	// render.Intent): the plain-language intent behind PayloadHash.
+	Rendered string `json:"rendered"`
 }
 
 // approvalToSign serves GET /v1/approvals/{id}: the object a signature must
@@ -569,7 +572,7 @@ func (g *Gateway) approvalToSign(w http.ResponseWriter, r *http.Request) error {
 	}
 	return g.writeJSON(w, "/v1/approvals", http.StatusOK, EscalationToSign{
 		EscalationID: id, PayloadHash: st.Decision.PayloadHash, Tenant: st.Request.Tenant,
-		MaxExpiry: g.clock().Add(approval.MaxExpiryAhead).Unix(),
+		MaxExpiry: g.clock().Add(approval.MaxExpiryAhead).Unix(), Rendered: st.Rendered,
 	})
 }
 

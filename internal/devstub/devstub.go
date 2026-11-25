@@ -133,6 +133,9 @@ func (w *World) Enrich(ctx context.Context, er *model.EnrichedRequest) error {
 			return fmt.Errorf("devstub: unknown token %s", er.Intent.Asset.Address)
 		}
 		symbol, decimals = t.Symbol, t.Decimals
+		a := *er.Intent.Asset                       // a copy: the decoder's intent stays as decoded
+		a.Symbol, a.Decimals = t.Symbol, t.Decimals // for the approver's rendering (CS-143)
+		er.Intent.Asset = &a
 	}
 	raw, ok := new(big.Rat).SetString(er.Intent.Amount)
 	if !ok || er.Intent.Kind == "approve" {

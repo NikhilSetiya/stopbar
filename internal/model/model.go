@@ -274,6 +274,11 @@ type EscalationStatus struct {
 	ResolvedBy string          `json:"resolved_by,omitempty"`
 	ResolvedAt *time.Time      `json:"resolved_at,omitempty"`
 	Decision   *Decision       `json:"decision,omitempty"`
+	// Rendered is the plain-language intent an approver reads before signing
+	// over decision.payload_hash (CS-143, LLD §6.3): amounts with decimals and
+	// USD ("price unavailable" when there is no price, never $0), and every
+	// address shortened with its 6-word checksum phrase.
+	Rendered string `json:"rendered,omitempty"`
 }
 
 // ErrBreakerNotOpen means a reset was asked for a tenant whose circuit breaker

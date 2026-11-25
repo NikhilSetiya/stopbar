@@ -84,6 +84,9 @@ func (e *ChainEnricher) Enrich(ctx context.Context, er *model.EnrichedRequest) e
 			return fmt.Errorf("enrich: token %s decimals: %w", tokenAddr, err)
 		}
 		decimals = d
+		a := *er.Intent.Asset // a copy: the decoder's intent stays as decoded
+		a.Decimals = d        // for the approver's rendering (CS-143)
+		er.Intent.Asset = &a
 	}
 	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
 

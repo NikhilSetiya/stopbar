@@ -24,6 +24,7 @@ import (
 	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/model"
+	"github.com/NikhilSetiya/stopbar/internal/render"
 )
 
 // Decoder renders an action into an independent intent summary.
@@ -200,6 +201,10 @@ type PendingEscalation struct {
 	// only once that outcome's side effects (re-run, signing) have also
 	// succeeded; one that leaves it Pending is appended on its own.
 	Votes []approval.Vote `json:"votes,omitempty"`
+	// Rendered is the plain-language intent the approver reads (CS-143,
+	// render.Intent), built from the decoded and enriched request when the
+	// escalation was created and audited with it.
+	Rendered string `json:"rendered,omitempty"`
 }
 
 // PendingStore records escalations by request ID. Put writes the record and,
@@ -545,7 +550,7 @@ func (e *Engine) Status(ctx context.Context, id string) (model.EscalationStatus,
 	return model.EscalationStatus{
 		RequestID: pe.Request.ID, State: pe.State, Reasons: pe.Reasons, Request: pe.Request,
 		CreatedAt: pe.IssuedAt, ExpiresAt: pe.IssuedAt.Add(e.cfg.PendingTTL),
-		ResolvedBy: pe.ResolvedBy, ResolvedAt: pe.ResolvedAt, Decision: pe.Decision,
+		ResolvedBy: pe.ResolvedBy, ResolvedAt: pe.ResolvedAt, Decision: pe.Decision, Rendered: pe.Rendered,
 	}, nil
 }
 
@@ -758,9 +763,10 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 			// CS-152: record the escalation so `stopbar approve <id>` can re-run it,
 			// with the requester's identity so it cannot also approve itself. The
 			// record and the escalate decision's audit record are one transaction.
+			rendered := render.Intent(er)
 			pe := PendingEscalation{Request: req, Reasons: policyIDs(reasons), IssuedAt: now, Requester: requester,
-				State: model.EscalationPending, Decision: &d}
-			rec := &model.AuditEntry{Type: model.AuditDecision, Body: addIdentity(ctx, map[string]any{"request": req, "decision": d, "context": er})}
+				State: model.EscalationPending, Decision: &d, Rendered: rendered}
+			rec := &model.AuditEntry{Type: model.AuditDecision, Body: addIdentity(ctx, map[string]any{"request": req, "decision": d, "context": er, "rendered": rendered})}
 			if perr := e.record(ctx, func(ctx context.Context) error { return e.cfg.Pending.Put(ctx, pe, rec) }); perr != nil {
 				e.unaudited(req.ID, perr)
 				return audit(e.deny(req.ID, now, payloadHash, failed(CodeAudit, perr)), ctxRecord)

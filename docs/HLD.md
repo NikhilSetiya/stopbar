@@ -78,7 +78,7 @@ flowchart TB
 |---|---|---|
 | **Gateway** | AuthN of requester (mTLS / workload identity / API key), schema validation, nonce + TTL checks, rate-limit on API | Core |
 | **Normalizer** | Converts raw inputs (EVM tx, tool call, withdrawal) into canonical `ActionRequest` | Core |
-| **Decoder / Intent renderer** | Decodes payload to `IntentSummary` with risk flags; renders plain language | Core (decoders fuzzed) |
+| **Decoder / Intent renderer** | Decodes payload to `IntentSummary` with risk flags; renders plain language with a 6-word checksum phrase per address, shown to approvers with the payload hash (`internal/render`, LLD §6.3) | Core (decoders fuzzed) |
 | **Enricher** | Adds USD value (price oracle), balances, velocity counters, provenance, workload deploy age | Core; external inputs treated as untrusted with staleness bounds |
 | **Policy engine** | Evaluates Cedar policies over enriched request → allow/deny/escalate + reasons | Core |
 | **Limiter** | Stateful sliding-window caps with reserve/commit; circuit breaker | Core |

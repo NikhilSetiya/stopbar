@@ -357,6 +357,10 @@ func signedApprovalCall(verb string, args []string, dec, suffix string) (httpRes
 	if err != nil {
 		return httpResult{}, err
 	}
+	// Show what is being signed (CS-143, FR-IR-3): the rendered intent and
+	// the payload hash the signature covers. Check every checksum word. It goes
+	// to stderr: stdout carries only the server's response.
+	fmt.Fprintf(os.Stderr, "You are signing %q over payload_hash %s for escalation %s:\n%s\n", dec, toSign.PayloadHash, toSign.EscalationID, toSign.Rendered)
 	sig, err := approval.SignEscalation(priv, approval.EscalationObject{
 		EscalationID: toSign.EscalationID, PayloadHash: toSign.PayloadHash, Decision: dec,
 		Expiry: time.Now().Add(50 * time.Minute).Unix(), // comfortably under the 1h bound, clock skew included

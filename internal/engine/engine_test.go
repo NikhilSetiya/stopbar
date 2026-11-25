@@ -23,6 +23,7 @@ import (
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/gateway"
 	"github.com/NikhilSetiya/stopbar/internal/model"
+	"github.com/NikhilSetiya/stopbar/internal/render"
 )
 
 const bundle = "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
@@ -703,6 +704,18 @@ func TestApprove(t *testing.T) {
 		}
 		if got := len(r.limiter.reserved); got != 0 {
 			t.Fatalf("escalation reserved %d caps, want 0", got)
+		}
+		// CS-143: the approver sees the rendered intent, bound to the payload
+		// hash, with every address shortened and carrying its checksum phrase.
+		st, err := e.Status(context.Background(), req.ID)
+		if err != nil || st.Rendered == "" || !strings.Contains(st.Rendered, "Payload hash: "+d.PayloadHash) || st.Rendered != pend.m[req.ID].Rendered {
+			t.Fatalf("Status.Rendered = %q, %v; want the rendering with the payload hash", st.Rendered, err)
+		}
+		if to := req.Action.To; to != "" && !strings.Contains(st.Rendered, render.Address(to)) {
+			t.Fatalf("rendering lacks %s with its checksum phrase:\n%s", render.Address(to), st.Rendered)
+		}
+		if body := r.audit.bodies[len(r.audit.bodies)-1]; body["rendered"] != st.Rendered {
+			t.Fatalf("escalate audit record lacks the rendering: %v", body["rendered"])
 		}
 
 		// A human approves: the single escalation reason is now waived.

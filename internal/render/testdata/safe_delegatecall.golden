@@ -1,0 +1,6 @@
+Call contract 0x9f3a…7c21 [worry work baby rebel fog filter] (safe_exec)
+Max network fee: $1.50
+From: 0x2222…2222 [until bag chicken judge canoe wolf] on base (chain 8453)
+Flags: delegatecall
+Details: Safe 0x9f3a…7c21 [worry work baby rebel fog filter] executes: DELEGATECALL (runs foreign code as the Safe): Call contract 0x9f3a…7c21 [brick any mango spray unknown wealth] with undecoded calldata
+Payload hash: sha256:115a07fa95f9351e06647d316e88a53bbdbdd1928cf495214742e519fd8fc601

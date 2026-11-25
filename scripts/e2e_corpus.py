@@ -21,7 +21,7 @@ decision token must be v2 and bind the requester identity: method "none" here
 (CS-103, spec/decision-token-v2.md).
 Needs: pyyaml.
 """
-import base64, glob, hashlib, json, os, subprocess, sys, tempfile, urllib.error, urllib.request
+import base64, glob, hashlib, json, os, re, subprocess, sys, tempfile, urllib.error, urllib.request
 import yaml
 from corpus_template import Templater
 
@@ -205,9 +205,13 @@ for entry, step, approve in cases:
             status, d = post(addr, body, bearer=secret)
             if approve and status == 202:
                 for _, kf in approvers:  # `stopbar approve` signs locally; the second vote reaches quorum
-                    out = subprocess.run([stopbar_cli, "approve", body["id"], "--url", f"http://{addr}", "--approver-key", kf, "--key", approver],
-                                         capture_output=True, text=True).stdout
+                    run = subprocess.run([stopbar_cli, "approve", body["id"], "--url", f"http://{addr}", "--approver-key", kf, "--key", approver],
+                                         capture_output=True, text=True)
+                    out = run.stdout
                     status, d = (int(out.split()[1]), json.loads(out.split("\n", 1)[1])) if out.startswith("HTTP ") else (0, {})
+                    # CS-143: the approver is shown the rendered intent (checksum phrases) and the hash it signs.
+                    if not re.search(r"Payload hash: sha256:[0-9a-f]{64}", run.stderr) or not re.search(r"0x[0-9a-f]{4}…[0-9a-f]{4} \[(\w+ ){5}\w+\]", run.stderr):
+                        status, d = 0, {"reasons": "stopbar approve did not show the rendered intent: " + run.stderr[:200]}
             problems = [f"HTTP {status} {d.get('reasons')}, want 200"] if status != 200 else check_signed(step, body, d, want_id)
         finally:
             proc.terminate()

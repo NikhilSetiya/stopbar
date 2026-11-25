@@ -15,6 +15,7 @@ import (
 
 	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/model"
+	"github.com/NikhilSetiya/stopbar/internal/render"
 )
 
 const contactsUsage = `usage: stopbar contacts add <address> [--label L] --url URL --key KEY
@@ -159,8 +160,10 @@ func printContact(out io.Writer, c model.Contact) {
 		when = "active_from=" + c.ActiveFrom.Format(time.RFC3339)
 	}
 	_, _ = fmt.Fprintf(out, "%s\t%s\t%s\trequested_by=%s\t%s\t%s\n", c.ID, c.Address, c.Status, c.RequestedBy, when, c.Label)
+	_, _ = fmt.Fprintf(out, "  checksum: %s\n", render.Address(c.Address)) // CS-143: compare every word
 	for _, s := range c.SimilarTo {
 		_, _ = fmt.Fprintf(out, "  WARNING: looks like existing entry %s %q (possible address poisoning)\n", s.Address, s.Label)
+		_, _ = fmt.Fprintf(out, "    existing checksum: %s\n", render.Address(s.Address))
 	}
 }
 
