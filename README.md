@@ -30,6 +30,8 @@ COMPROMISED REQUESTER (T3): an authenticated service submits the same unlimited 
 Together spend: $0.0104 of the $1.00 cap (DeepSeek-V4.1-Flash; 16 calls)
 ```
 
+Since CS-151, approvals require M-of-N signed approver keys.
+
 Model behaviour varies by run: sometimes the agent refuses on its own, sometimes it tries and Stopbar denies. The compromised-service (T3) step shows Stopbar's deny on every run.
 
 <sub>Excerpt; the full verbatim output is in [`docs/transcripts/demo-live-2026-11-23.txt`](docs/transcripts/demo-live-2026-11-23.txt). Reproduce with `make demo-live` (needs the Together key; hard-capped at $1).</sub>
