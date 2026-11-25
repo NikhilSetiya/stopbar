@@ -290,3 +290,13 @@ func LoadDevWallet(path string) ([]*ecdsa.PrivateKey, error) {
 func WriteDevWallet(path string, hexKeys ...string) error {
 	return os.WriteFile(path, []byte(walletFileTag+strings.Join(hexKeys, "\n")+"\n"), 0o600)
 }
+
+// GenerateDevWallet writes a fresh secp256k1 key to a tagged 0600 file and
+// returns its address (`stopbar init`, CS-195).
+func GenerateDevWallet(path string) (common.Address, error) {
+	k, err := crypto.GenerateKey()
+	if err != nil {
+		return common.Address{}, err
+	}
+	return crypto.PubkeyToAddress(k.PublicKey), WriteDevWallet(path, hexutil.Encode(crypto.FromECDSA(k)))
+}
