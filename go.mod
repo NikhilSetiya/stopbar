@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.26.11
 
 require (
-	github.com/cedar-policy/cedar-go v1.9.2
+	github.com/cedar-policy/cedar-go v1.9.3
 	github.com/ethereum/go-ethereum v1.17.10
 	go.etcd.io/bbolt v1.5.0
 )
