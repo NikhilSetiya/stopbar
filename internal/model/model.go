@@ -229,9 +229,12 @@ const (
 	AuditOverride     AuditRecordType = "override"
 	AuditAuthReject   AuditRecordType = "auth_reject" // CS-103: a request rejected at the gateway (identity mismatch, scope)
 	AuditBreaker      AuditRecordType = "breaker"     // CS-124: circuit breaker trip, reset vote or reset (body.event)
-	// AuditDestination records a change to a tenant's destination registry
-	// (CS-133), in the same transaction as the change.
-	AuditDestination AuditRecordType = "destination_change"
+	// Destination registry changes (CS-134), each written in the same
+	// transaction as the change. (CS-133 builds wrote "destination_change";
+	// verifiers still accept it in old logs.)
+	AuditContactRequest  AuditRecordType = "contact_request"  // an addition requested (pending)
+	AuditContactApproval AuditRecordType = "contact_approval" // an addition approved; active from active_from
+	AuditContactRemoval  AuditRecordType = "contact_removal"  // an entry removed (effective at once)
 )
 
 // Lifecycle errors, shared by the engine, the limiter and the gateway (which

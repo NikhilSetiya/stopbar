@@ -240,6 +240,10 @@ Canonicalisation: RFC 8785 (JCS).
 | POST | `/v1/actions/{request_id}/release` | Optional `{"reason": "…"}`: abandon → release reservation. `200 {"state":"released"}`; again `200` (no-op, nothing audited); committed `409 CONFLICT`; lapsed `410 RESERVATION_EXPIRED`; unknown `404` |
 | POST | `/v1/approvals/{escalation_id}` | Approve: re-evaluate against current state (§9); status is the decision's. Approve-scoped key, same tenant, not the requester |
 | POST | `/v1/approvals/{escalation_id}/reject` | Reject (CS-151): `403` deny with `APPROVAL_REJECTED`, audited with the approver. Same key rules as approve |
+| POST | `/v1/contacts` | Request a destination-registry addition (CS-134, §6.4): body `ContactRequest` `{address, label?}` (`spec/schemas/contact_request.v1.schema.json`), same strict body checks as evaluate. `contacts`-scoped key; tenant and requester from the key. `202` with the pending `Contact` (`spec/schemas/contact.v1.schema.json`), whose `similar_to` lists every existing entry (active or pending) it looks like; `409 CONFLICT` if the address is already registered or pending |
+| POST | `/v1/contacts/{id}/approve` | Approve a pending addition: `approve`-scoped key of the same tenant, **not the requester** (`403 SELF_APPROVAL`, audited as `auth_reject`). `200` with the contact, now `cooling_off` until `active_from` = approval + `-contact-cooling-off`; already approved `409 CONFLICT`; unknown or another tenant's `404` |
+| DELETE | `/v1/contacts/{address}` | Remove an entry, whatever its status, **at once**: `contacts`-scoped key. `200` with the removed contact; absent `404` |
+| GET | `/v1/contacts` | The key's tenant's entries with `status` (pending_approval / cooling_off / active, from the server clock) and `similar_to`: `{"contacts": [Contact]}`. `contacts` or `approve` scope |
 | GET | `/v1/breakers/{tenant}` | Circuit breaker status (CS-124, §7.3) |
 | POST | `/v1/breakers/{tenant}/reset` | One approver's reset vote: `200` closed (quorum met), `202` recorded but still open |
 | POST | `/v1/events/deploy` | Ingest deploy/change event (Phase 4) |
@@ -271,6 +275,8 @@ Error body: `{"code": "NONCE_REPLAYED", "message": "…", "request_id": "…", "
 | `ALREADY_RESOLVED` | 409 | Approve/reject of an escalation already allowed, denied or expired (CS-152) |
 | `RESERVATION_EXPIRED` | 410 | Release of a reservation that already lapsed (nothing held) |
 | `DUPLICATE_VOTE` | 409 | Breaker reset: the approver already holds a live vote on this trip (CS-124, §7.3) |
+| `CONFLICT` (contacts) | 409 | Contact addition for an address already registered or pending, or approving an already-approved one (CS-134) |
+| `SELF_APPROVAL` | 403 | The requester of a contact addition tried to approve it (CS-134) |
 | `ENGINE_UNAVAILABLE` | 503 | No engine configured (or, for lifecycle routes, no auth) |
 | `INTERNAL` | 500 | Engine error or panic, the engine returned an invalid decision or one for a different request, or the nonce store failed |
 
@@ -423,14 +429,19 @@ Implemented in `internal/decode/evm` (CS-141/142). It is stdlib-only, like the t
 
 Template per `kind`, amounts formatted with decimals and USD, addresses shortened `0x9f3…c21` **plus** a 6-word checksum phrase derived from the full address (defeats visual look-alike). The rendered text and `payload_hash` are sent together; approvals sign over `payload_hash`.
 
-### 6.4 Destination registry (CS-133, FR-IR-2)
+### 6.4 Destination registry (CS-133/134, FR-IR-2)
 
 Implemented in `internal/enrich` (`Registry`). It is an engine `Enricher`, wired after the price/balance enricher and before the limiter (whose unknown-destination caps read `destination.known`), in both the chain and the devstub configuration.
 
-- **Storage:** bucket `destinations_v1` in the shared state file, keyed by quoted tenant + lowercase address, value `{address, label, source, added_at}`. It is read on every evaluation, so a change applies to the next request.
-- **Audit:** every add or remove writes a `destination_change` record (`{op, tenant, address, label?, source}`) **in the same transaction** as the change. A no-op change (adding a registered address, removing an absent one) writes nothing.
-- **Facts:** `known` = the destination is registered for the request's tenant, or is the sending wallet. `similar_to_known` = not known, and it shares at least 4 leading **and** 4 trailing hex digits with a registered address, or at least 8 at either end (what wallets and explorers show; a random address matches by chance with probability ~3 × 16⁻⁸). A request with no destination is neither, and tool calls are skipped. The starter pack escalates `address-poisoning` (`dest_similar_to_known && !dest_known`).
-- **Changes:** `stopbar contacts add|remove <address> --state-dir DIR --tenant T [--label L] [--decision-key FILE]` and `stopbar contacts list`. They edit the state file directly, never over the API: registering a destination loosens policy, so it requires the operator's state directory, not a requester credential (a compromised requester, T3, could otherwise allowlist its own address). stopbard holds the file lock, so it must be stopped. `--decision-key` signs an audit checkpoint over the change; otherwise stopbard's next exit checkpoint covers it. With `-dev-world`, the world's `known_destinations` seed the registry for `-tenant` (added if missing, `source: dev-world`, audited).
+- **Storage:** bucket `destinations_v2` in the shared state file, keyed by quoted tenant + lowercase address, value `model.Contact` `{id, tenant, address, label?, requested_by, requested_at, approved_by?, approved_at?, active_from?, similar_to}`. `status` is derived when read: no approval → `pending_approval`; approved and `now < active_from` → `cooling_off`; otherwise `active`. CS-133's `destinations_v1` entries are not read (they become unknown, which only tightens policy). It is read on every evaluation, so a change applies to the next request.
+- **Lifecycle (CS-134, ADR 0004).** Adding a destination loosens policy, removing one tightens it, so they are treated differently:
+  - **Request** (`POST /v1/contacts`, `contacts` scope): recorded as pending. The address is checked against **every** entry of the tenant, active and pending, with the same similarity rule as the enricher, and every match (address + label) is stored in `similar_to`, in the audit record, in `GET /v1/contacts` and in the CLI output, so the approver sees a poisoning attempt before approving. An exact duplicate (case-insensitive) is refused `409`.
+  - **Approve** (`POST /v1/contacts/{id}/approve`, `approve` scope): by an identity other than the requester (`SELF_APPROVAL`, compared by API key id as for escalations). It sets `active_from = approval + cooling-off` (`-contact-cooling-off` / config `contact_cooling_off`, default **24h**; 0 is allowed with a warning; negative refused). The cooling-off runs from the approval, so a late approval cannot activate at once, and the rest of the team gets the whole window to see and remove it. The approval call site is thin (the registry's `Approve`), so CS-151 signed owner-quorum approvals can replace the identity check without changing the route.
+  - **Remove** (`DELETE /v1/contacts/{address}`, `contacts` scope): applies at once, whatever the status.
+  - With auth off or no registry the API answers `503`; stopbard warns at start if `-dev-world` runs without `-auth-keys`.
+- **Audit:** `contact_request` (`{contact, identity}`), `contact_approval` (`{contact, identity, cooling_off}`) and `contact_removal` (`{contact, identity}`), each **in the same transaction** as the change. Refused changes (duplicate, unknown id, self-approval) change nothing; a self-approval or missing scope is recorded as `auth_reject`.
+- **Facts:** judged against entries **active at the server clock** (no clock override in stopbard; injected clocks in unit tests only). A pending or cooling-off addition is still a new destination: `known` and the unknown-destination soft caps are unchanged until `active_from`. `known` = the destination is active for the request's tenant, or is the sending wallet. `similar_to_known` = not known, and it shares at least 4 leading **and** 4 trailing hex digits with an active address, or at least 8 at either end (what wallets and explorers show; a random address matches by chance with probability ~3 × 16⁻⁸). A request with no destination is neither, and tool calls are skipped. The starter pack escalates `address-poisoning` (`dest_similar_to_known && !dest_known`).
+- **CLI:** `stopbar contacts add <address> [--label L] | approve <id> | remove <address> | list`, each with `--url URL --key KEY`, talks to a running stopbard; no restart is needed. The offline state-file path (CS-133) is removed: the approval, separation and cooling-off above are what make an API path safe against a compromised requester (T3), and an offline path would bypass them. With `-dev-world`, the world's `known_destinations` seed the registry for `-tenant` as already active (`requested_by`/`approved_by: dev-world`, audited as `contact_request`): the operator's world file is the approval.
 
 ## 7. Limiter
 
@@ -621,7 +632,7 @@ Implemented in `internal/audit` (CS-171/172), per `spec/audit-hash-v1.md`.
   | `request` | the consumed nonce (gateway) |
   | `decision` (allow) | its reservation |
   | `commit` / `release` | the limiter commit or release (with the settler's identity) |
-  | `destination_change` | the registry add or remove (§6.4) |
+  | `contact_request` / `contact_approval` / `contact_removal` | the registry change (§6.4; CS-133 logs carry `destination_change`) |
   | `decision` (escalate) | the pending escalation record |
   | `decision` (reject / expiry), `approval` (approved) | the escalation's state change |
   | `decision` (deny) | nothing, so its own transaction |
@@ -724,6 +735,7 @@ tenant: acme
 listen: 127.0.0.1:7777
 store: {kind: bbolt, path: ./data/cs.db}
 policy: {bundle: ./policies, cooling_off_loosen: 24h, activation_quorum: 1}
+contact_cooling_off: 24h    # destination-registry additions: approval -> active (CS-134; stopbard -contact-cooling-off)
 limits:                     # internal/limiter Rule; window ∈ 1m | 1h | 24h | tx (per transaction)
   - {scope: wallet, window: tx, max_usd: "2500", max_pct_of_balance: "0.5"}   # hard per-tx caps (CS-123)
   - {scope: wallet, window: 1h, max_usd: "5000", max_count: 50}

@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math/big"
 	"mime"
 	"net/http"
@@ -52,10 +53,22 @@ var maxSafeInt = new(big.Rat).SetInt64(1 << 53)
 // EvalScope is the scope an API key needs to call /v1/evaluate (and to commit
 // or release its own reservations, CS-105); ApproveScope is the scope an
 // approver key needs to approve or reject an escalation (CS-151).
+// ContactsScope is the scope to request, remove or list destination
+// registry entries (CS-134); approving an addition takes ApproveScope.
 const (
-	EvalScope    = "evaluate"
-	ApproveScope = "approve"
+	EvalScope     = "evaluate"
+	ApproveScope  = "approve"
+	ContactsScope = "contacts"
 )
+
+// Contacts is the destination registry as the gateway sees it (CS-134,
+// enrich.Registry). Tenant and identity always come from the credential.
+type Contacts interface {
+	Request(tenant, addr, label string, by auth.Identity, now time.Time) (model.Contact, error)
+	Approve(tenant, id string, by auth.Identity, now time.Time) (model.Contact, error)
+	Remove(tenant, addr string, by auth.Identity, now time.Time) (model.Contact, error)
+	List(tenant string, now time.Time) ([]model.Contact, error)
+}
 
 // Approver drives the escalation lifecycle (CS-151/152): Approve re-evaluates
 // and, if it now allows, executes a pending escalation; Reject denies it;
@@ -142,6 +155,7 @@ const (
 	CodeAlreadyResolved   Code = "ALREADY_RESOLVED"  // the escalation was already allowed, denied or expired (CS-152)
 	CodeReservationGone   Code = "RESERVATION_EXPIRED"
 	CodeDuplicateVote     Code = "DUPLICATE_VOTE" // CS-124: the approver already holds a live breaker reset vote
+	CodeSelfApproval      Code = "SELF_APPROVAL"  // CS-134: the requester tried to approve their own contact addition
 )
 
 // ClockSkew is how far issued_at may lead or trail the gateway clock (LLD §4).
@@ -181,6 +195,7 @@ var codeStatus = map[Code]int{
 	CodeAlreadyResolved:   http.StatusConflict,
 	CodeReservationGone:   http.StatusGone,
 	CodeDuplicateVote:     http.StatusConflict,
+	CodeSelfApproval:      http.StatusForbidden,
 }
 
 // ErrorBody is the wire shape of every non-2xx response (LLD §4.1).
@@ -228,6 +243,8 @@ type Config struct {
 	Actions Actions
 	// Breaker serves /v1/breakers (CS-124); nil disables it.
 	Breaker Breaker
+	// Contacts serves /v1/contacts (CS-134); nil (or auth off) disables it.
+	Contacts Contacts
 }
 
 // Gateway is an http.Handler serving the Stopbar API.
@@ -246,12 +263,15 @@ type Gateway struct {
 	approver Approver
 	actions  Actions
 	breaker  Breaker
+	contacts Contacts
+	routes   map[string]map[string]func(http.ResponseWriter, *http.Request) error
 }
 
 // New returns a Gateway.
 func New(cfg Config) *Gateway {
 	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, keys: cfg.Keys, extra: cfg.Counters, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux(),
-		auth: cfg.Authenticator, audit: cfg.Audit, rate: newRateLimiter(cfg.RatePerMin), approver: cfg.Approver, actions: cfg.Actions, breaker: cfg.Breaker}
+		auth: cfg.Authenticator, audit: cfg.Audit, rate: newRateLimiter(cfg.RatePerMin), approver: cfg.Approver, actions: cfg.Actions, breaker: cfg.Breaker,
+		contacts: cfg.Contacts, routes: map[string]map[string]func(http.ResponseWriter, *http.Request) error{}}
 	if g.log == nil {
 		g.log = slog.New(slog.DiscardHandler)
 	}
@@ -269,6 +289,10 @@ func New(cfg Config) *Gateway {
 	g.route("/v1/actions/{id}/release", http.MethodPost, g.release)
 	g.route("/v1/breakers/{tenant}", http.MethodGet, g.breakerStatus)
 	g.route("/v1/breakers/{tenant}/reset", http.MethodPost, g.breakerReset)
+	g.route("/v1/contacts", http.MethodGet, g.listContacts)
+	g.route("/v1/contacts", http.MethodPost, g.requestContact)
+	g.route("/v1/contacts/{id}/approve", http.MethodPost, g.approveContact)
+	g.route("/v1/contacts/{address}", http.MethodDelete, g.removeContact)
 	g.route("/healthz", http.MethodGet, g.healthz)
 	g.route("/metrics", http.MethodGet, g.serveMetrics)
 	g.route("/v1/keys", http.MethodGet, g.serveKeys)
@@ -280,13 +304,24 @@ func New(cfg Config) *Gateway {
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) { g.mux.ServeHTTP(w, r) }
 
-// route registers path for one method, answering anything else with a typed
-// 405 (ServeMux's own 405 is plain text).
+// route registers h for method on path; a path may take several methods.
+// Any other method gets a typed 405 (ServeMux's own 405 is plain text).
 func (g *Gateway) route(path, method string, h func(http.ResponseWriter, *http.Request) error) {
+	ms, seen := g.routes[path]
+	if !seen {
+		ms = map[string]func(http.ResponseWriter, *http.Request) error{}
+		g.routes[path] = ms
+	}
+	ms[method] = h
+	if seen {
+		return
+	}
 	g.mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != method {
-			w.Header().Set("Allow", method)
-			g.writeError(w, path, fail(CodeMethodNotAllowed, "%s requires %s", path, method))
+		h, ok := ms[r.Method]
+		if !ok {
+			allow := slices.Sorted(maps.Keys(ms))
+			w.Header().Set("Allow", strings.Join(allow, ", "))
+			g.writeError(w, path, fail(CodeMethodNotAllowed, "%s requires %s", path, strings.Join(allow, " or ")))
 			return
 		}
 		defer func() {
@@ -628,6 +663,102 @@ func (g *Gateway) breakerReset(w http.ResponseWriter, r *http.Request) error {
 	return g.writeJSON(w, "/v1/breakers", status, st)
 }
 
+// contactsAuth is the guard every /v1/contacts route shares: the registry
+// and authentication must both be on (a registry change is attributed to,
+// and separated by, the authenticated key).
+func (g *Gateway) contactsAuth(r *http.Request, id string, scopes ...string) (auth.Identity, error) {
+	if g.contacts == nil || g.auth == nil {
+		return auth.Identity{}, withID(fail(CodeEngineUnavailable, "the contacts API needs a destination registry and authentication"), id)
+	}
+	return g.authorize(r, id, scopes...)
+}
+
+// contactError maps registry errors to typed codes.
+func contactError(err error, id string) error {
+	switch {
+	case errors.Is(err, model.ErrNoContact):
+		return withID(fail(CodeNotFound, "%v", err), id)
+	case errors.Is(err, model.ErrContactExists), errors.Is(err, model.ErrContactApproved):
+		return withID(fail(CodeConflict, "%v", err), id)
+	case errors.Is(err, model.ErrSelfApproval):
+		return withID(fail(CodeSelfApproval, "%v", err), id)
+	}
+	return err
+}
+
+// requestContact records a pending addition (CS-134): 202, since it is not
+// active until approved and cooled off.
+func (g *Gateway) requestContact(w http.ResponseWriter, r *http.Request) error {
+	identity, err := g.contactsAuth(r, "", ContactsScope)
+	if err != nil {
+		return err
+	}
+	var cr model.ContactRequest
+	if err := decodeBody(w, r, &cr); err != nil {
+		return err
+	}
+	if err := cr.Validate(); err != nil {
+		return invalid(err)
+	}
+	c, err := g.contacts.Request(identity.Tenant, cr.Address, cr.Label, identity, g.clock())
+	if err != nil {
+		return contactError(err, "")
+	}
+	return g.writeJSON(w, "/v1/contacts", http.StatusAccepted, c)
+}
+
+// approveContact approves a pending addition. The approver must hold the
+// approve scope and must not be the requester; a self-approval is audited.
+// The approval itself is the registry's (a thin call site, so CS-151 signed
+// approvals can replace the identity check without touching the route).
+func (g *Gateway) approveContact(w http.ResponseWriter, r *http.Request) error {
+	id := r.PathValue("id")
+	identity, err := g.contactsAuth(r, id, ApproveScope)
+	if err != nil {
+		return err
+	}
+	c, err := g.contacts.Approve(identity.Tenant, id, identity, g.clock())
+	if errors.Is(err, model.ErrSelfApproval) {
+		g.auditReject(r.Context(), identity, model.ActionRequest{ID: id, Tenant: identity.Tenant}, "contact self-approval")
+	}
+	if err != nil {
+		return contactError(err, id)
+	}
+	return g.writeJSON(w, "/v1/contacts/approve", http.StatusOK, c)
+}
+
+// removeContact removes an entry at once, whatever its status.
+func (g *Gateway) removeContact(w http.ResponseWriter, r *http.Request) error {
+	addr := r.PathValue("address")
+	identity, err := g.contactsAuth(r, addr, ContactsScope)
+	if err != nil {
+		return err
+	}
+	if _, err := model.NormalizeAddress(addr); err != nil {
+		return withID(fail(CodeInvalidRequest, "%v", err), addr)
+	}
+	c, err := g.contacts.Remove(identity.Tenant, addr, identity, g.clock())
+	if err != nil {
+		return contactError(err, addr)
+	}
+	return g.writeJSON(w, "/v1/contacts/remove", http.StatusOK, c)
+}
+
+// listContacts lists the tenant's entries with their status now, including
+// every look-alike match. Approvers need it to review pending additions, so
+// either scope may list.
+func (g *Gateway) listContacts(w http.ResponseWriter, r *http.Request) error {
+	identity, err := g.contactsAuth(r, "", ContactsScope, ApproveScope)
+	if err != nil {
+		return err
+	}
+	cs, err := g.contacts.List(identity.Tenant, g.clock())
+	if err != nil {
+		return err
+	}
+	return g.writeJSON(w, "/v1/contacts", http.StatusOK, map[string]any{"contacts": cs})
+}
+
 // outcomeStatus makes the status code alone safe to act on: a client that
 // checks only "2xx" can never read a deny as an allow. 200 means allow and
 // nothing else. The decision is in the body for every outcome.
@@ -678,49 +809,64 @@ func (g *Gateway) checkFresh(req model.ActionRequest) error {
 // decodeActionRequest applies every structural check, in order.
 func decodeActionRequest(w http.ResponseWriter, r *http.Request) (model.ActionRequest, error) {
 	var req model.ActionRequest
+	if err := decodeBody(w, r, &req); err != nil {
+		return req, err
+	}
+	if err := req.Validate(); err != nil {
+		return req, withID(invalid(err), req.ID)
+	}
+	return req, nil
+}
+
+// decodeBody applies every structural check to a JSON body, in order, and
+// strictly decodes it into dst (a pointer to a model type). The caller
+// validates the result.
+func decodeBody(w http.ResponseWriter, r *http.Request, dst any) error {
 	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mt != "application/json" {
-		return req, fail(CodeUnsupportedMedia, "Content-Type must be application/json")
+		return fail(CodeUnsupportedMedia, "Content-Type must be application/json")
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxBodyBytes))
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
-			return req, fail(CodeBodyTooLarge, "body exceeds %d bytes", MaxBodyBytes)
+			return fail(CodeBodyTooLarge, "body exceeds %d bytes", MaxBodyBytes)
 		}
-		return req, fail(CodeMalformedJSON, "reading body: %v", err)
+		return fail(CodeMalformedJSON, "reading body: %v", err)
 	}
 	if _, err := canon.Transform(body); err != nil {
 		if errors.Is(err, canon.ErrDuplicateKey) {
-			return req, fail(CodeDuplicateKey, "%v", err)
+			return fail(CodeDuplicateKey, "%v", err)
 		}
-		return req, fail(CodeMalformedJSON, "%v", err)
+		return fail(CodeMalformedJSON, "%v", err)
 	}
 	if err := checkIntegerPrecision(body); err != nil {
-		return req, err
+		return err
 	}
-	if err := checkExactKeys(body); err != nil {
-		return req, err
+	if err := checkExactKeysAs(body, reflect.TypeOf(dst)); err != nil {
+		return err
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
+	if err := dec.Decode(dst); err != nil {
 		if strings.HasPrefix(err.Error(), "json: unknown field ") {
-			return req, fail(CodeUnknownField, "%s", strings.TrimPrefix(err.Error(), "json: "))
+			return fail(CodeUnknownField, "%s", strings.TrimPrefix(err.Error(), "json: "))
 		}
-		return req, fail(CodeInvalidRequest, "%s", strings.TrimPrefix(err.Error(), "json: "))
+		return fail(CodeInvalidRequest, "%s", strings.TrimPrefix(err.Error(), "json: "))
 	}
-	if err := req.Validate(); err != nil {
-		e := fail(CodeInvalidRequest, "request failed validation")
-		var ve *model.ValidationError
-		if errors.As(err, &ve) {
-			e.Problems = ve.Problems
-		} else {
-			e.Message = err.Error()
-		}
-		return req, withID(e, req.ID)
+	return nil
+}
+
+// invalid maps a model Validate error to INVALID_REQUEST with every problem.
+func invalid(err error) *apiError {
+	e := fail(CodeInvalidRequest, "request failed validation")
+	var ve *model.ValidationError
+	if errors.As(err, &ve) {
+		e.Problems = ve.Problems
+	} else {
+		e.Message = err.Error()
 	}
-	return req, nil
+	return e
 }
 
 // checkIntegerPrecision rejects any integer-valued number whose magnitude

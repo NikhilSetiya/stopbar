@@ -12,7 +12,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -49,13 +48,15 @@ const usage = `usage:
       recompute the audit hash chain and check the signed checkpoints, offline
   stopbar audit export --state-dir DIR [--from N] [--to M]
       print audit records as JSON lines (unverified; run verify first)
-  stopbar contacts add <address> --state-dir DIR --tenant T [--label L] [--decision-key FILE]
-  stopbar contacts remove <address> --state-dir DIR --tenant T [--decision-key FILE]
-  stopbar contacts list --state-dir DIR --tenant T
-      edit or list a tenant's known destinations (the registry behind dest_known
-      and address-poisoning checks). Changes are audited; stop stopbard first,
-      since it holds the state file. --decision-key signs an audit checkpoint
-      over the change; without it the change is covered at stopbard's next exit`
+  stopbar contacts add <address> [--label L] --url URL --key KEY
+  stopbar contacts approve <id> --url URL --key APPROVER_KEY
+  stopbar contacts remove <address> --url URL --key KEY
+  stopbar contacts list --url URL --key KEY
+      edit or list the key's tenant's known destinations (the registry behind
+      dest_known and address-poisoning checks) on a running stopbard. An
+      addition is pending until a different key approves it, then known only
+      after the server's cooling-off period; every existing entry it looks
+      like is shown. A removal applies at once. Every change is audited`
 
 func main() {
 	if len(os.Args) < 2 || os.Args[1] == "version" {
@@ -301,25 +302,16 @@ func approvalCall(verb string, args []string, suffix string) (httpResult, error)
 	if fs.NArg() != 0 {
 		return httpResult{}, errors.New(usage)
 	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(*url, "/")+"/v1/approvals/"+neturl.PathEscape(idArg)+suffix, nil)
+	status, body, err := callAPI(http.MethodPost, strings.TrimRight(*url, "/")+"/v1/approvals/"+neturl.PathEscape(idArg)+suffix, *key, nil)
 	if err != nil {
 		return httpResult{}, err
 	}
-	if *key != "" {
-		req.Header.Set("Authorization", "Bearer "+*key)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return httpResult{}, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
 	var pretty bytes.Buffer
 	if json.Indent(&pretty, body, "", "  ") != nil {
 		pretty.Write(body)
 	}
-	fmt.Printf("HTTP %d\n%s\n", resp.StatusCode, pretty.String())
-	return httpResult{resp.StatusCode, body}, nil
+	fmt.Printf("HTTP %d\n%s\n", status, pretty.String())
+	return httpResult{status, body}, nil
 }
 
 // keygenCmd generates the keys a deployment needs: the Ed25519 decision key

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NikhilSetiya/stopbar/spec/schemas/contact.v1.schema.json",
+  "title": "Stopbar Contact v1",
+  "description": "A destination registry entry as served by /v1/contacts (LLD §4.1, §6.4, CS-134). Mirrors internal/model.Contact. GET /v1/contacts returns {\"contacts\": [Contact]}. status is derived from the server clock when read: pending_approval (no approval), cooling_off (approved, before active_from), active (counts as a known destination).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "tenant", "address", "status", "requested_by", "requested_at", "similar_to"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "tenant": {"type": "string", "minLength": 1},
+    "address": {"type": "string", "pattern": "^0x[0-9a-f]{40}$"},
+    "label": {"type": "string", "maxLength": 128},
+    "status": {"enum": ["pending_approval", "cooling_off", "active"]},
+    "requested_by": {"type": "string", "minLength": 1},
+    "requested_at": {"type": "string", "format": "date-time"},
+    "approved_by": {"type": "string", "minLength": 1},
+    "approved_at": {"type": "string", "format": "date-time"},
+    "active_from": {"type": "string", "format": "date-time"},
+    "similar_to": {
+      "description": "Every existing entry (active or pending) this address looks like, computed when it was requested (address poisoning).",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["address"],
+        "properties": {
+          "address": {"type": "string", "pattern": "^0x[0-9a-f]{40}$"},
+          "label": {"type": "string", "maxLength": 128}
+        }
+      }
+    }
+  },
+  "dependentRequired": {
+    "approved_by": ["approved_at", "active_from"],
+    "approved_at": ["approved_by", "active_from"],
+    "active_from": ["approved_by", "approved_at"]
+  }
+}
