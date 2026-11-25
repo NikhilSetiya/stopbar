@@ -538,14 +538,41 @@ func TestReserveAndAuditAreAtomic(t *testing.T) {
 // the lock after every state change (so in every state the limiter passes
 // through), and by eight observers while the run is in progress, not only at the end. Finally, usage must
 // equal an independent ledger exactly: nothing double-counted or dropped.
+// slowFlakyStore makes every write take a while (the lock is released for
+// it, so other requests interleave) and fails one in ten of them.
+type slowFlakyStore struct {
+	MemStore
+	n atomic.Int64
+}
+
+var errFlaky = errors.New("flaky disk")
+
+func (s *slowFlakyStore) Put(Record, *model.AuditEntry) error {
+	time.Sleep(20 * time.Microsecond)
+	if s.n.Add(1)%10 == 0 {
+		return errFlaky
+	}
+	return nil
+}
+
 func TestConcurrentReservationsNeverExceedCaps(t *testing.T) {
+	t.Run("instant store", func(t *testing.T) { concurrentCaps(t, MemStore{}) })
+	// Writes run outside the limiter lock (group commit, CS-197): capacity is
+	// held while a write is in flight and given back when it fails.
+	t.Run("slow failing store", func(t *testing.T) { concurrentCaps(t, &slowFlakyStore{}) })
+}
+
+func concurrentCaps(t *testing.T, st Store) {
 	const workers = 1000
 	c := newClock()
 	walletCap, tenantCap, countCap := big.NewInt(1_000_000_000), big.NewInt(1_500_000_000), int64(400) // $1,000 / $1,500
-	l := newLimiter(t, c,
-		Rule{Scope: ScopeWallet, Window: "1h", MaxUSD: "1000", MaxCount: countCap},
-		Rule{Scope: ScopeTenant, Window: "1h", MaxUSD: "1500"},
-		Rule{Scope: ScopeWalletAsset, Window: "1h", MaxUnits: "100000"})
+	l, err := New(Config{Clock: c.Now, Store: st, Rules: []Rule{
+		{Scope: ScopeWallet, Window: "1h", MaxUSD: "1000", MaxCount: countCap},
+		{Scope: ScopeTenant, Window: "1h", MaxUSD: "1500"},
+		{Scope: ScopeWalletAsset, Window: "1h", MaxUnits: "100000"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	probeA, probeB := req(walletA, dest, "", "", true), req(walletB, dest, "", "", true)
 
 	type outcome struct {
@@ -615,7 +642,7 @@ func TestConcurrentReservationsNeverExceedCaps(t *testing.T) {
 				id := fmt.Sprintf("req-%d-%d", i, op)
 				ttl := time.Duration(30+rng.IntN(90)) * time.Second
 				if err := l.Reserve(bg, id, req(wallet, dest, amt, fmt.Sprint(rng.IntN(400)), true), ttl, nil); err != nil {
-					if !errors.Is(err, engine.ErrCapExceeded) {
+					if !errors.Is(err, engine.ErrCapExceeded) && !errors.Is(err, errFlaky) {
 						t.Errorf("reserve: %v", err)
 					}
 					continue
@@ -627,6 +654,7 @@ func TestConcurrentReservationsNeverExceedCaps(t *testing.T) {
 					switch {
 					case err == nil, errors.Is(err, ErrReservationExpired): // late commit still records spend
 						o.state = StateCommitted
+					case errors.Is(err, errFlaky): // not recorded: the reservation lapses
 					default:
 						t.Errorf("commit: %v", err)
 					}
@@ -635,7 +663,7 @@ func TestConcurrentReservationsNeverExceedCaps(t *testing.T) {
 					switch {
 					case err == nil:
 						o.state = StateReleased
-					case errors.Is(err, ErrReservationExpired):
+					case errors.Is(err, ErrReservationExpired), errors.Is(err, errFlaky):
 					default:
 						t.Errorf("release: %v", err)
 					}

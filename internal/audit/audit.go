@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -51,7 +50,6 @@ type Log struct {
 	signer CheckpointSigner
 	every  uint64
 	clock  func() time.Time
-	mu     sync.Mutex // serialises Append's own transactions with Checkpoint
 }
 
 // Config wires a Log.
@@ -142,9 +140,10 @@ func (l *Log) Op(e model.AuditEntry) store.Op {
 
 // Append writes a record in its own transaction (engine.AuditLog). Records
 // with no state change of their own (deny, escalate) come through here.
+// It takes no lock of its own: the chain head is read inside the write
+// transaction, so concurrent appends (group-committed by the store) chain in
+// commit order.
 func (l *Log) Append(_ context.Context, typ model.AuditRecordType, body any) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	if err := l.db.Update(l.Op(model.AuditEntry{Type: typ, Body: body})); err != nil {
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
@@ -157,8 +156,6 @@ func (l *Log) Checkpoint() error {
 	if l.signer == nil {
 		return errors.New("audit: no checkpoint signer")
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	return l.db.Update(func(tx *bolt.Tx) error {
 		seq, h, err := head(tx)
 		if err != nil || seq == 0 {

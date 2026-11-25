@@ -132,6 +132,7 @@ Sits between the requester (agent, service, UI) and the signer, in a **separate 
 | [HLD](docs/HLD.md) | Architecture, trust boundaries, flows, threat model |
 | [LLD](docs/LLD.md) | Data models, policy language, algorithms, APIs |
 | [TASKS](docs/TASKS.md) | Full build backlog with acceptance criteria |
+| [Benchmarks](docs/benchmarks.md) | Latency and throughput against NFR-1/2, with the exact command and environment |
 | [Attack corpus](corpus/) | Schema + seed attacks |
 | [Spec](spec/) | Wire schemas, fixtures, audit-hash v1 |
 

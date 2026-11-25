@@ -118,6 +118,9 @@ sdk/python/.venv/bin/python scripts/e2e_mtls.py "$BIN/stopbard" "$BIN/stopbar"  
 step "corpus attacks through live stopbard: real engine + policy, dev stubs (CS-111/112)"
 python3 scripts/e2e_corpus.py "$BIN/stopbard" "$BIN/stopbar"
 
+step "load harness smoke: allow/escalate/deny at low rate, gatekeeper + auth + state dir, no errors (CS-197; numbers: make bench)"
+go run ./scripts/bench -stopbard "$BIN/stopbard" -rate 100 -duration 5s -warmup 1s
+
 step "reservation + escalation lifecycle over HTTP: commit/release, poll, reject/approve CLI, timeout (CS-105/151/152)"
 # The SDK venv (built by the SDK step above) has the 'approver' extra the
 # script's Python SDK calls need to sign; CI installs it with pyyaml.

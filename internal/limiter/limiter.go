@@ -175,6 +175,9 @@ type entry struct {
 	Record
 	amt     amount
 	counted bool // currently included in usage
+	// settling is non-nil while a write for this record is in flight; it
+	// is closed when the write has landed (or failed). See lockSettled.
+	settling chan struct{}
 }
 
 type keyUsage struct {
@@ -434,8 +437,8 @@ func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest
 	if err != nil {
 		return err
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.lockSettled(id)
+	defer l.mu.Unlock() // re-taken after each durable write
 	now := l.clock()
 	l.sweep(now)
 	if e, ok := l.recs[id]; ok {
@@ -484,21 +487,49 @@ func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest
 	if amt.usd != nil {
 		rec.USDMicro = amt.usd.String()
 	}
-	if err := l.persist(rec, ae); err != nil {
-		return err
-	}
-	e := &entry{Record: rec, amt: amt}
+	// Hold the capacity before the durable write and release the lock for
+	// it, so concurrent requests share one fsync (store.DB.Update). Checks
+	// that run meanwhile count this reservation: conservative. Reserve
+	// returns only once the record and its audit entry are durable; a
+	// failed write gives the capacity back.
+	e := &entry{Record: rec, amt: amt, settling: make(chan struct{})}
 	l.track(e)
 	l.add(e)
-	return nil
+	l.mu.Unlock()
+	err = l.persist(rec, ae)
+	l.mu.Lock()
+	if err != nil {
+		l.subtract(e)
+		e.State = StateReleased // in memory only: never written, so never counted again
+		delete(l.recs, id)
+	}
+	close(e.settling)
+	e.settling = nil
+	return err
+}
+
+// lockSettled takes l.mu once no write for id is in flight, so an operation
+// on a record never acts on a state that is not yet durable.
+func (l *Limiter) lockSettled(id string) {
+	l.mu.Lock()
+	for {
+		e, ok := l.recs[id]
+		if !ok || e.settling == nil {
+			return
+		}
+		ch := e.settling
+		l.mu.Unlock()
+		<-ch
+		l.mu.Lock()
+	}
 }
 
 // Commit records that the action was broadcast. Committing after expiry
 // still records the spend (loss bounding must count what happened) and
 // returns ErrReservationExpired.
 func (l *Limiter) Commit(_ context.Context, id, txRef string, ae *model.AuditEntry) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.lockSettled(id)
+	defer l.mu.Unlock() // re-taken after each durable write
 	now := l.clock()
 	l.sweep(now)
 	e, ok := l.recs[id]
@@ -516,12 +547,27 @@ func (l *Limiter) Commit(_ context.Context, id, txRef string, ae *model.AuditEnt
 	rec.State, rec.TxRef = StateCommitted, txRef
 	t := now
 	rec.CommittedAt = &t
-	if err := l.persist(rec, ae); err != nil {
+	// The lock is released for the durable write (as in Reserve); a late
+	// spend is counted from before the write, so no check misses it.
+	e.settling = make(chan struct{})
+	l.add(e)
+	l.mu.Unlock()
+	err := l.persist(rec, ae)
+	l.mu.Lock()
+	if err != nil {
+		if late {
+			l.subtract(e)
+		}
+	} else {
+		e.Record = rec
+		l.add(e) // committed spend counts, even if the reservation lapsed during the write
+	}
+	close(e.settling)
+	e.settling = nil
+	if err != nil {
 		return err
 	}
-	e.Record = rec
 	if late {
-		l.add(e)
 		return fmt.Errorf("%w: %s committed after its reservation lapsed; spend recorded", ErrReservationExpired, id)
 	}
 	return nil
@@ -530,8 +576,8 @@ func (l *Limiter) Commit(_ context.Context, id, txRef string, ae *model.AuditEnt
 // Release frees a live reservation. Releasing one already released is a
 // no-op (nothing changes, so nothing is written or audited): retries are safe.
 func (l *Limiter) Release(_ context.Context, id string, ae *model.AuditEntry) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.lockSettled(id)
+	defer l.mu.Unlock() // re-taken after each durable write
 	now := l.clock()
 	l.sweep(now)
 	e, ok := l.recs[id]
@@ -547,12 +593,18 @@ func (l *Limiter) Release(_ context.Context, id string, ae *model.AuditEntry) er
 	}
 	rec := e.Record
 	rec.State = StateReleased
-	if err := l.persist(rec, ae); err != nil {
-		return err
+	// The capacity stays held until the release is durable (conservative).
+	e.settling = make(chan struct{})
+	l.mu.Unlock()
+	err := l.persist(rec, ae)
+	l.mu.Lock()
+	if err == nil {
+		e.Record = rec
+		l.subtract(e)
 	}
-	e.Record = rec
-	l.subtract(e)
-	return nil
+	close(e.settling)
+	e.settling = nil
+	return err
 }
 
 // Owner implements engine.Limiter: the tenant and agent a reservation (live,
@@ -768,8 +820,10 @@ func (l *Limiter) sweep(now time.Time) {
 		if e.counted {
 			l.subtract(e) // committed spend older than every window
 		}
-		delete(l.recs, e.ID)
-		forget = append(forget, e.ID)
+		if l.recs[e.ID] == e { // not a failed write whose ID was reserved again
+			delete(l.recs, e.ID)
+			forget = append(forget, e.ID)
+		}
 		n++
 	}
 	if n == 0 {
