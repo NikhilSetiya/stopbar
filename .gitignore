@@ -1,4 +1,6 @@
 /bin/
+# `stopbar init` output (README quickstart)
+/stopbar/
 /dist/
 /data/
 /keys/

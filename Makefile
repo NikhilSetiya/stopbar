@@ -1,4 +1,4 @@
-.PHONY: build test fuzz vet fmt check e2e demo demo-live demo-testnet
+.PHONY: build test fuzz vet fmt check e2e demo demo-live demo-testnet quickstart
 build: ; go build ./...
 demo: ; ./scripts/demo.sh
 demo-live: ; ./scripts/demo-live.sh
@@ -9,3 +9,4 @@ vet: ; go vet ./...
 fmt: ; gofmt -w .
 check: vet test
 e2e: ; ./scripts/e2e.sh
+quickstart: ; ./scripts/quickstart.sh
