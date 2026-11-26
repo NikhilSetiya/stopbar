@@ -77,7 +77,7 @@ Every attack in the [corpus](corpus/) is replayed over real HTTP on every PR. Th
 > **Honest scope (research).** Two pre-registered pilots ([`docs/research/pilots-1-2.md`](docs/research/pilots-1-2.md)) could **not** measure Stopbar's value against prompt injection: neither stock automated attacker landed a single success *even with no defence*, on Claude Haiku 4.5 or DeepSeek-V4.1-Flash, and the second pilot's attacker partly refused to attack. They did find real defects (now fixed and regression-tested) and showed session-level taint is too blunt. Stopbar's demonstrated, deterministic value is the part that holds **whatever the model does** — compromised requesters (T3), agent mistakes (T2), and hard loss caps — which the corpus replay proves end to end. No prompt-injection security claim is made.
 
 > **Status: v0.1.0-alpha. Alpha. Not for real funds. Dev-mode keys only.**
-> The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter, EVM decoder, hash-chained audit log and the chain-reading price/balance enricher (CS-131/132) are real, and every corpus attack is blocked end to end in CI. So are the destination registry (CS-133), per-transaction caps and the tenant circuit breaker (CS-123/124). A pip-installable Python SDK ([`sdk/python`](sdk/python/)) wraps the evaluate/approve API. Authentication has landed, opt-in and required for any non-loopback address: API keys (sidecar/dev) or mTLS with SPIFFE client identity (service mode; [ADR 0006](docs/adr/0006-mtls-spiffe-identity.md)). KMS/HSM key providers aren't in yet. No binaries are published yet; build from source. See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
+> The gateway, engine, Cedar policy, limiter, decision signer, gatekeeper adapter, EVM decoder, hash-chained audit log and the chain-reading price/balance enricher (CS-131/132) are real, and every corpus attack is blocked end to end in CI. So are the destination registry (CS-133), per-transaction caps and the tenant circuit breaker (CS-123/124). A pip-installable Python SDK ([`sdk/python`](sdk/python/)) wraps the evaluate/approve API. Authentication has landed, opt-in and required for any non-loopback address: API keys (sidecar/dev) or mTLS with SPIFFE client identity (service mode; [ADR 0006](docs/adr/0006-mtls-spiffe-identity.md)). KMS/HSM key providers aren't in yet. Release binaries and a container image are built, signed and verifiable from the first tagged release after CS-196; until then, build from source ([install](#install)). See [`docs/`](docs/) and the [task backlog](docs/TASKS.md).
 
 ```bash
 make e2e     # everything CI runs, plus corpus replay against a live stopbard
@@ -124,6 +124,21 @@ Sits between the requester (agent, service, UI) and the signer, in a **separate 
 - Not unproven by design: every control is rated against a threat tier (injected model, agent error, compromised requester, scheming agent), and the research track measures it on an external benchmark.
 - Not a blockchain. Borrows the wallet pattern (keys, policy, signed logs) without a chain.
 
+## Install
+
+**From source:** `go build -o bin/ ./cmd/stopbard ./cmd/stopbar` (Go ≥ 1.26, the toolchain is fetched automatically).
+
+**Release binaries and image** (from the first tag cut after CS-196): each GitHub release has `stopbard` + `stopbar` archives for linux/darwin × amd64/arm64, SPDX SBOMs, `checksums.txt` with a keyless cosign signature, and a signed multi-arch image `ghcr.io/nikhilsetiya/stopbar:<version>` (distroless, nonroot, entrypoint `stopbard`). Verify before you run:
+
+```bash
+cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+  --certificate-identity "https://github.com/NikhilSetiya/stopbar/.github/workflows/release.yml@refs/tags/$TAG" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum --ignore-missing -c checksums.txt
+```
+
+The image keeps `stopbard`'s loopback default; serving outside the container needs `-listen 0.0.0.0:7777` **and** authentication, either `-auth-keys` or mTLS (`-tls-cert`/`-tls-key`/`-tls-client-ca`/`-mtls-identities`, ADR 0006), or `stopbard` refuses to start. Full steps, image verification and a `docker run` example: [`docs/releasing.md`](docs/releasing.md).
+
 ## Docs
 
 | Doc | Purpose |
@@ -135,6 +150,7 @@ Sits between the requester (agent, service, UI) and the signer, in a **separate 
 | [Benchmarks](docs/benchmarks.md) | Latency and throughput against NFR-1/2, with the exact command and environment |
 | [Attack corpus](corpus/) | Schema + seed attacks |
 | [Spec](spec/) | Wire schemas, fixtures, audit-hash v1 |
+| [Releases](docs/releasing.md) | Install, verify signed binaries and image, cut a release |
 
 ## Roadmap (summary)
 
