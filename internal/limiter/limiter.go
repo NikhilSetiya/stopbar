@@ -503,9 +503,20 @@ func (l *Limiter) Reserve(_ context.Context, id string, er model.EnrichedRequest
 		e.State = StateReleased // in memory only: never written, so never counted again
 		delete(l.recs, id)
 	}
+	l.settled(e)
+	return err
+}
+
+// settled ends e's in-flight write (l.mu held). Capacity stays held while
+// a write is in flight (sweep skips it, so a commit never re-adds spend that
+// others took meanwhile); a reservation that lapsed during the write stops
+// counting here.
+func (l *Limiter) settled(e *entry) {
 	close(e.settling)
 	e.settling = nil
-	return err
+	if e.State == StateReserved && e.counted && !l.clock().Before(e.Expires) {
+		l.subtract(e)
+	}
 }
 
 // lockSettled takes l.mu once no write for id is in flight, so an operation
@@ -559,11 +570,9 @@ func (l *Limiter) Commit(_ context.Context, id, txRef string, ae *model.AuditEnt
 			l.subtract(e)
 		}
 	} else {
-		e.Record = rec
-		l.add(e) // committed spend counts, even if the reservation lapsed during the write
+		e.Record = rec // still counted: held since before the write
 	}
-	close(e.settling)
-	e.settling = nil
+	l.settled(e)
 	if err != nil {
 		return err
 	}
@@ -602,8 +611,7 @@ func (l *Limiter) Release(_ context.Context, id string, ae *model.AuditEntry) er
 		e.Record = rec
 		l.subtract(e)
 	}
-	close(e.settling)
-	e.settling = nil
+	l.settled(e)
 	return err
 }
 
@@ -809,7 +817,7 @@ func (l *Limiter) track(e *entry) {
 func (l *Limiter) sweep(now time.Time) {
 	for len(l.expiry) > 0 && !now.Before(l.expiry[0].Expires) {
 		e := heap.Pop(&l.expiry).(*entry)
-		if e.State == StateReserved && e.counted {
+		if e.State == StateReserved && e.counted && e.settling == nil { // in flight: settled decides
 			l.subtract(e)
 		}
 	}

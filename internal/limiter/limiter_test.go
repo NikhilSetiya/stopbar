@@ -440,6 +440,50 @@ type failingStore struct{ MemStore }
 
 func (failingStore) Put(Record, *model.AuditEntry) error { return errors.New("disk full") }
 
+// gateStore blocks a commit write until released, so a test can act while
+// the write is in flight.
+type gateStore struct {
+	MemStore
+	entered, release chan struct{}
+}
+
+func (g gateStore) Put(r Record, _ *model.AuditEntry) error {
+	if r.State == StateCommitted {
+		close(g.entered)
+		<-g.release
+	}
+	return nil
+}
+
+// TestCapacityHeldWhileCommitInFlight: a reservation that lapses while its
+// commit is being written keeps its capacity, so nobody else can take it and
+// then be joined by the committed spend over the cap.
+func TestCapacityHeldWhileCommitInFlight(t *testing.T) {
+	c := newClock()
+	g := gateStore{entered: make(chan struct{}), release: make(chan struct{})}
+	l, err := New(Config{Clock: c.Now, Store: g, Rules: []Rule{{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Reserve(bg, "r1", req(walletA, dest, "60", "1", true), time.Minute, nil); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- l.Commit(bg, "r1", "0xr1", nil) }()
+	<-g.entered
+	c.Advance(2 * time.Minute) // r1's reservation lapses mid-write
+	if err := l.Reserve(bg, "r2", req(walletA, dest, "60", "1", true), time.Minute, nil); !errors.Is(err, engine.ErrCapExceeded) {
+		t.Fatalf("r2: %v, want CAP_EXCEEDED while r1's commit is in flight", err)
+	}
+	close(g.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := usd(t, l, req(walletA, dest, "", "", true), ScopeWallet); got != "60" {
+		t.Fatalf("usage %s, want 60 (the committed spend)", got)
+	}
+}
+
 func TestStoreFailureChangesNothing(t *testing.T) {
 	l, err := New(Config{Rules: []Rule{{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"}}, Store: failingStore{}, Clock: newClock().Now})
 	if err != nil {
