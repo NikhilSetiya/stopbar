@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
@@ -47,14 +48,29 @@ const (
 )
 
 // Decoder implements engine.Decoder for evm_tx actions.
-type Decoder struct{}
+// It also decodes off-chain signature requests (evm_typed_data,
+// evm_personal_sign; offchain.go).
+type Decoder struct {
+	// Now is the clock long_expiry is judged against. nil: time.Now. Unit
+	// tests only; stopbard never sets it.
+	Now func() time.Time
+}
 
-func (Decoder) Supports(a model.Action) bool { return a.Kind == model.KindEVMTx }
+func (Decoder) Supports(a model.Action) bool {
+	switch a.Kind {
+	case model.KindEVMTx, model.KindEVMTypedData, model.KindEVMPersonalSign:
+		return true
+	}
+	return false
+}
 
 // Decode renders the whole transaction. A malformed call to a known
 // selector, or an unsupported chain, is an error (the engine fails closed);
 // an unknown selector is a flag (the policy decides).
-func (Decoder) Decode(_ context.Context, a model.Action) (model.IntentSummary, error) {
+func (dc Decoder) Decode(_ context.Context, a model.Action) (model.IntentSummary, error) {
+	if a.Kind == model.KindEVMTypedData || a.Kind == model.KindEVMPersonalSign {
+		return dc.offchain(a)
+	}
 	if a.ChainID == nil {
 		return model.IntentSummary{}, errors.New("evm: chain_id missing")
 	}

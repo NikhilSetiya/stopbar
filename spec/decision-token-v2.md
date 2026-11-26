@@ -31,6 +31,30 @@ payload_hash = "sha256:" + hex( SHA-256( JCS( canonical_action ) ) )
 
 `evm_tx` (complete unsigned EIP-1559 transaction, every field bound) and `tool_call` are bound exactly as in v1 §2.1–2.3. `withdrawal`, contract creation, legacy and EIP-2930 transactions and access lists have no binding, and no token can be issued for them.
 
+v2 adds two kinds for off-chain signature requests (CS-514, [ADR 0007](../docs/adr/0007-offchain-signatures.md)). They are additions only: the bindings above, and their vectors, are unchanged. A verifier that doesn't know these kinds MUST refuse them.
+
+### 2.4 `evm_typed_data`
+
+```json
+{"v": 1, "kind": "evm_typed_data", "chain_id": 8453, "from": "0x…",
+ "typed_data": {"types": {…}, "primaryType": "…", "domain": {…}, "message": {…}}}
+```
+
+- `from` is lower-cased.
+- `typed_data` is hashed as JCS of the JSON value as received, the same as `tool_call.args`. The action MUST first pass `ActionRequest` validation, which pins each value to the one JSON shape its EIP-712 type allows. For example, integers are decimal strings or JSON integers within ±2^53, never hex. Validation also requires `domain.chainId` = `chain_id`.
+- **The core never computes or accepts the EIP-712 digest**, because keccak-256 is edge code. The signer adapter derives the digest only from the bound `typed_data`. It recomputes the digest from these canonical bytes and refuses a mismatch, and it requires the recovered signer to equal `from` (LLD §10.1a).
+
+### 2.5 `evm_personal_sign`
+
+```json
+{"v": 1, "kind": "evm_personal_sign", "chain_id": 8453, "from": "0x…", "message": "0x…"}
+```
+
+- `message` is the EIP-191 payload bytes as lower-case 0x hex, at least one byte. Upper-case input binds the same way.
+- The adapter signs `keccak256("\x19Ethereum Signed Message:\n" || len || message)`.
+
+Vectors: `typed_data*` and `personal_sign*` in [`vectors/decision-token-v2.json`](vectors/decision-token-v2.json). These cover a tampered amount, a tampered spender, a typed-data token presented for a transaction, and non-canonical hex.
+
 ## 3. Token
 
 `BASE64URL(header) "." BASE64URL(payload) "." BASE64URL(signature)` uses unpadded base64url (RFC 7515). The signature is Ed25519 over the ASCII bytes of the first two segments joined by `"."`.

@@ -104,7 +104,7 @@ func mutate(t testing.TB, f func(m map[string]any)) []byte {
 }
 
 func TestEvaluateRejects(t *testing.T) {
-	evm := fixture(t, "action_request.evm_tx.json")
+	evm, typed := fixture(t, "action_request.evm_tx.json"), fixture(t, "action_request.evm_typed_data.json")
 	g := newGW(Config{Evaluator: decide(model.Allow)})
 	tests := []struct {
 		name   string
@@ -136,6 +136,13 @@ func TestEvaluateRejects(t *testing.T) {
 		{"array body", "POST", "/v1/evaluate", "application/json", []byte(`[]`), 400, CodeInvalidRequest},
 		{"null body", "POST", "/v1/evaluate", "application/json", []byte(`null`), 400, CodeInvalidRequest},
 		{"fails validation", "POST", "/v1/evaluate", "application/json", mutate(t, func(m map[string]any) { m["action"].(map[string]any)["value_wei"] = "-1" }), 400, CodeInvalidRequest},
+		// Off-chain signatures (CS-514): the same strict checks reach inside typed_data.
+		{"typed data: case-variant type member", "POST", "/v1/evaluate", "application/json", bytes.Replace(typed, []byte(`{"name": "spender", "type": "address"}`), []byte(`{"Name": "spender", "type": "address"}`), 1), 400, CodeUnknownField},
+		{"typed data: unknown type member", "POST", "/v1/evaluate", "application/json", bytes.Replace(typed, []byte(`{"name": "spender", "type": "address"}`), []byte(`{"name": "spender", "type": "address", "x": 1}`), 1), 400, CodeUnknownField},
+		{"typed data: amount as a JSON number above 2^53", "POST", "/v1/evaluate", "application/json", bytes.Replace(typed, []byte(`"amount": "250000000"`), []byte(`"amount": 9007199254740993`), 1), 400, CodeNumberPrecision},
+		{"typed data: duplicate message member", "POST", "/v1/evaluate", "application/json", bytes.Replace(typed, []byte(`"amount": "250000000"`), []byte(`"amount": "1", "amount": "250000000"`), 1), 400, CodeDuplicateKey},
+		{"typed data: chain mismatch", "POST", "/v1/evaluate", "application/json", bytes.Replace(typed, []byte(`"chainId": 8453`), []byte(`"chainId": 1`), 1), 400, CodeInvalidRequest},
+		{"typed data: hex integer", "POST", "/v1/evaluate", "application/json", bytes.Replace(typed, []byte(`"amount": "250000000"`), []byte(`"amount": "0xee6b280"`), 1), 400, CodeInvalidRequest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -176,6 +183,9 @@ func TestEvaluateOutcomes(t *testing.T) {
 		{"action_request.evm_tx.json", model.Escalate, 202},
 		{"action_request.tool_call.json", model.Deny, 403},
 		{"action_request.tool_call.json", model.Allow, 200},
+		{"action_request.evm_typed_data.json", model.Allow, 200},
+		{"action_request.evm_typed_data.json", model.Deny, 403},
+		{"action_request.evm_personal_sign.json", model.Allow, 200},
 	} {
 		t.Run(tt.fixture+"/"+string(tt.outcome), func(t *testing.T) {
 			g := newGW(Config{Evaluator: decide(tt.outcome)})
@@ -291,7 +301,7 @@ func TestMaxSafeIntBoundary(t *testing.T) {
 // known status, and returns 2xx only for a body that independently passes
 // strict decoding and validation.
 func FuzzEvaluate(f *testing.F) {
-	for _, name := range []string{"action_request.evm_tx.json", "action_request.tool_call.json"} {
+	for _, name := range []string{"action_request.evm_tx.json", "action_request.tool_call.json", "action_request.evm_typed_data.json", "action_request.evm_personal_sign.json"} {
 		f.Add(fixture(f, name))
 	}
 	f.Add([]byte(`{"id":"a","id":"b"}`))

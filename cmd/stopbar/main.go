@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -20,11 +21,13 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/NikhilSetiya/stopbar/internal/approval"
 	"github.com/NikhilSetiya/stopbar/internal/audit"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/gateway"
+	"github.com/NikhilSetiya/stopbar/internal/model"
 	"github.com/NikhilSetiya/stopbar/internal/signer"
 	"github.com/NikhilSetiya/stopbar/internal/store"
 	"github.com/NikhilSetiya/stopbar/internal/version"
@@ -33,6 +36,9 @@ import (
 const usage = `usage:
   stopbar version
   stopbar decode-tx <0x raw signed tx>   decode an EIP-1559 tx: recovered sender, every field, payload_hash
+  stopbar decode-sig <action.json|-> <0x signature>
+      check an off-chain signature (evm_typed_data, evm_personal_sign): the
+      EIP-712 / EIP-191 digest recomputed from the action, the recovered signer, payload_hash
   stopbar keygen decision-key <file>     generate a Stopbar decision key (Ed25519, mode 0600)
   stopbar keygen api-key --tenant T [--agent ID] [--scopes a,b]
       generate an API key: the secret (shown once) and the hashed record to store
@@ -110,6 +116,13 @@ func main() {
 		if err := decodeTx(os.Args[2]); err != nil {
 			fail(err.Error())
 		}
+	case "decode-sig":
+		if len(os.Args) != 4 {
+			fail(usage)
+		}
+		if err := decodeSig(os.Args[2], os.Args[3]); err != nil {
+			fail(err.Error())
+		}
 	default:
 		fail(usage)
 	}
@@ -136,6 +149,48 @@ func decodeTx(raw string) error {
 		return err
 	}
 	out := map[string]any{"tx_hash": tx.Hash().Hex(), "payload_hash": ph, "action": a}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+// decodeSig checks an off-chain signature (CS-514) independently of whatever
+// Stopbar said about it: the digest recomputed from the action (a JSON file,
+// or - for stdin), the signer recovered from the signature, and the
+// payload_hash the action binds to.
+func decodeSig(actionFile, sigHex string) error {
+	var raw []byte
+	var err error
+	if actionFile == "-" {
+		raw, err = io.ReadAll(os.Stdin)
+	} else {
+		raw, err = os.ReadFile(actionFile)
+	}
+	if err != nil {
+		return fmt.Errorf("decode-sig: %w", err)
+	}
+	var a model.Action
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return fmt.Errorf("decode-sig: action: %w", err)
+	}
+	digest, err := signer.MessageDigest(a)
+	if err != nil {
+		return fmt.Errorf("decode-sig: %w", err)
+	}
+	sig, err := hexutil.Decode(strings.TrimSpace(sigHex))
+	if err != nil || len(sig) != 65 || sig[64] < 27 {
+		return errors.New("decode-sig: signature must be 65 bytes of 0x hex with v = 27/28")
+	}
+	sig[64] -= 27
+	pub, err := crypto.SigToPub(digest[:], sig)
+	if err != nil {
+		return fmt.Errorf("decode-sig: %w", err)
+	}
+	ph, err := decision.PayloadHash(a)
+	if err != nil {
+		return err
+	}
+	out := map[string]any{"signer": strings.ToLower(crypto.PubkeyToAddress(*pub).Hex()), "signing_hash": digest.Hex(), "payload_hash": ph}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)

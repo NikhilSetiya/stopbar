@@ -56,20 +56,36 @@ func (g *Gatekeeper) Evaluate(ctx context.Context, req model.ActionRequest) (mod
 		return d, err
 	}
 	requester, _ := auth.FromContext(ctx) // set by the gateway's auth; zero when auth is off
-	raw, hash, err := g.Adapter.SignTx(ctx, d.Token, req.Action, requester)
+	return g.execute(ctx, d, req, requester), nil
+}
+
+// execute signs an allow and commits its reservation, with the signed tx
+// hash (or, for an off-chain signature, its digest) as the reference. A
+// refusal or failed commit releases the reservation, discards what was
+// signed and turns the allow into a deny.
+func (g *Gatekeeper) execute(ctx context.Context, d model.Decision, req model.ActionRequest, requester auth.Identity) model.Decision {
+	sign := g.Adapter.SignTx
+	offchain := req.Action.Kind == model.KindEVMTypedData || req.Action.Kind == model.KindEVMPersonalSign
+	if offchain {
+		sign = g.Adapter.SignMessage
+	}
+	raw, hash, err := sign(ctx, d.Token, req.Action, requester)
 	if err != nil {
-		reason := "adapter refused: " + adapterCode(err)
 		g.log().Warn("gatekeeper: adapter refused an allow", "request_id", req.ID, "err", err)
-		g.release(ctx, req.ID, reason)
-		return refused(d), nil
+		g.release(ctx, req.ID, "adapter refused: "+adapterCode(err))
+		return refused(d)
 	}
 	if err := g.Engine.Commit(ctx, req.ID, hash.Hex()); err != nil {
-		g.log().Error("gatekeeper: commit after signing failed; discarding the signed tx", "request_id", req.ID, "err", err)
-		g.release(ctx, req.ID, "commit failed after signing; signed tx discarded")
-		return refused(d), nil
+		g.log().Error("gatekeeper: commit after signing failed; discarding the signature", "request_id", req.ID, "err", err)
+		g.release(ctx, req.ID, "commit failed after signing; signature discarded")
+		return refused(d)
 	}
-	d.SignedTx, d.TxHash = hexutil.Encode(raw), hash.Hex()
-	return d, nil
+	if offchain {
+		d.Signature, d.SigningHash = hexutil.Encode(raw), hash.Hex()
+	} else {
+		d.SignedTx, d.TxHash = hexutil.Encode(raw), hash.Hex()
+	}
+	return d
 }
 
 // Approve re-evaluates a pending escalation (CS-151/152) and, if it now allows,
@@ -79,21 +95,7 @@ func (g *Gatekeeper) Evaluate(ctx context.Context, req model.ActionRequest) (mod
 // records the final decision (signed tx, or the refusal) as the
 // escalation's resolution, so a poll returns it.
 func (g *Gatekeeper) Approve(ctx context.Context, id string, sig approval.SignedEscalation) (model.Decision, error) {
-	return g.Engine.ApproveWith(ctx, id, sig, func(ctx context.Context, d model.Decision, req model.ActionRequest, requester auth.Identity) model.Decision {
-		raw, hash, err := g.Adapter.SignTx(ctx, d.Token, req.Action, requester)
-		if err != nil {
-			g.log().Warn("gatekeeper: adapter refused an approved allow", "request_id", req.ID, "err", err)
-			g.release(ctx, req.ID, "adapter refused: "+adapterCode(err))
-			return refused(d)
-		}
-		if err := g.Engine.Commit(ctx, req.ID, hash.Hex()); err != nil {
-			g.log().Error("gatekeeper: commit after approval signing failed; discarding the signed tx", "request_id", req.ID, "err", err)
-			g.release(ctx, req.ID, "commit failed after signing; signed tx discarded")
-			return refused(d)
-		}
-		d.SignedTx, d.TxHash = hexutil.Encode(raw), hash.Hex()
-		return d
-	})
+	return g.Engine.ApproveWith(ctx, id, sig, g.execute)
 }
 
 // Reject denies a pending escalation (CS-151/152); nothing is signed.
@@ -124,6 +126,8 @@ func adapterCode(err error) string {
 		return "NOT_BINDABLE"
 	case errors.Is(err, ErrDelegatedWallet):
 		return "DELEGATED_WALLET"
+	case errors.Is(err, ErrDigestMismatch):
+		return "DIGEST_MISMATCH"
 	default:
 		return "SIGNING_FAILED"
 	}

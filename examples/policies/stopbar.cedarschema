@@ -5,7 +5,7 @@ namespace Stopbar {
   entity Agent { tenant: String };
   entity Wallet { chain_id: Long, address: String };
   entity Destination { address: String };
-  action "transfer", "approve", "contract_call", "tool_call", "withdraw"
+  action "transfer", "approve", "contract_call", "sign_message", "tool_call", "withdraw"
     appliesTo {
       principal: Agent,
       resource: [Wallet],

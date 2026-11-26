@@ -70,7 +70,9 @@
           "enum": [
             "evm_tx",
             "tool_call",
-            "withdrawal"
+            "withdrawal",
+            "evm_typed_data",
+            "evm_personal_sign"
           ]
         },
         "chain_id": {
@@ -122,6 +124,89 @@
         "max_priority_fee_per_gas": {
           "type": "string",
           "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "typed_data": {
+          "description": "evm_typed_data: the EIP-712 payload as eth_signTypedData_v4 takes it. Integers are decimal strings or JSON integers within ±2^53 (never hex); domain.chainId is required and equals chain_id; domain members are declared in standard order. internal/model checks every value against its declared type.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "types",
+            "primaryType",
+            "domain",
+            "message"
+          ],
+          "properties": {
+            "types": {
+              "type": "object",
+              "required": [
+                "EIP712Domain"
+              ],
+              "additionalProperties": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name",
+                    "type"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z_$][A-Za-z0-9_$]*$"
+                    },
+                    "type": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "primaryType": {
+              "type": "string",
+              "minLength": 1
+            },
+            "domain": {
+              "type": "object",
+              "required": [
+                "chainId"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "version": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "chainId": {
+                  "type": [
+                    "integer",
+                    "string"
+                  ]
+                },
+                "verifyingContract": {
+                  "type": "string",
+                  "pattern": "^0x[0-9a-fA-F]{40}$"
+                },
+                "salt": {
+                  "type": "string",
+                  "pattern": "^0x[0-9a-fA-F]{64}$"
+                }
+              }
+            },
+            "message": {
+              "type": "object"
+            }
+          }
+        },
+        "message": {
+          "description": "evm_personal_sign: the bytes to sign (EIP-191), 0x-prefixed hex.",
+          "type": "string",
+          "pattern": "^0x([0-9a-fA-F]{2})+$"
         }
       },
       "allOf": [
@@ -189,6 +274,78 @@
             "required": [
               "to"
             ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "evm_typed_data",
+                  "evm_personal_sign"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "chain_id",
+              "from"
+            ],
+            "properties": {
+              "from": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{40}$"
+              },
+              "to": false,
+              "value_wei": false,
+              "data": false,
+              "tx_type": false,
+              "tx_nonce": false,
+              "gas_limit": false,
+              "max_fee_per_gas": false,
+              "max_priority_fee_per_gas": false,
+              "tool": {
+                "type": "null"
+              },
+              "args": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "evm_typed_data"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "typed_data"
+            ],
+            "properties": {
+              "message": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "evm_personal_sign"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "message"
+            ],
+            "properties": {
+              "typed_data": false
+            }
           }
         }
       ]

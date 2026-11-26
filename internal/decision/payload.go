@@ -72,6 +72,25 @@ func CanonicalAction(a model.Action) ([]byte, error) {
 			args = map[string]any{}
 		}
 		obj = map[string]any{"v": 1, "kind": "tool_call", "tool": *a.Tool, "args": args}
+	case model.KindEVMTypedData, model.KindEVMPersonalSign:
+		// Off-chain signatures (decision-token-v2 §2.4/§2.5). The signer
+		// derives the EIP-712 / EIP-191 digest from exactly these bytes; the
+		// core never computes or accepts a digest (keccak is edge code).
+		if a.ChainID == nil || *a.ChainID == 0 || *a.ChainID >= maxSafeInt {
+			return nil, fmt.Errorf("decision: %s chain_id must be in [1, 2^53)", a.Kind)
+		}
+		obj = map[string]any{"v": 1, "kind": string(a.Kind), "chain_id": *a.ChainID, "from": strings.ToLower(a.From)}
+		if a.Kind == model.KindEVMTypedData {
+			if a.TypedData == nil {
+				return nil, errors.New("decision: evm_typed_data typed_data required")
+			}
+			obj["typed_data"] = a.TypedData
+		} else {
+			if !strings.HasPrefix(a.Message, "0x") || len(a.Message) < 4 {
+				return nil, errors.New("decision: evm_personal_sign message must be 0x-prefixed hex")
+			}
+			obj["message"] = strings.ToLower(a.Message)
+		}
 	default:
 		return nil, fmt.Errorf("%w: kind %q", ErrNoBinding, a.Kind)
 	}

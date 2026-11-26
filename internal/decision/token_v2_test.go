@@ -159,10 +159,23 @@ func buildVectors(t *testing.T) vectorFile {
 	evmOtherGas.GasLimit = "30000000"
 	evmOtherTxNonce := evm
 	evmOtherTxNonce.TxNonce = "1"
+	const typedPath = "../../spec/fixtures/action_request.evm_typed_data.json"
+	typed := loadActionFixture(t, typedPath)
+	typedOtherAmount := loadActionFixture(t, typedPath) // amount raised to the Permit2 max after the decision
+	typedOtherAmount.TypedData.Message["details"].(map[string]any)["amount"] = "1461501637330902918203684832716283019655932542975"
+	typedOtherSpender := loadActionFixture(t, typedPath)
+	typedOtherSpender.TypedData.Message["spender"] = "0x9f30000000000000000000000000000000000c21"
+	personal := loadActionFixture(t, "../../spec/fixtures/action_request.evm_personal_sign.json")
+	personalMixed := personal
+	personalMixed.Message = "0x" + strings.ToUpper(personal.Message[2:]) // same bytes, upper-case hex
+	personalOther := personal
+	personalOther.Message = personal.Message + "00"
 	actions := map[string]model.Action{
 		"evm": evm, "evm_noncanonical_input": evmMixed, "evm_other_to": evmOtherTo,
 		"evm_other_value": evmOtherValue, "evm_other_fee": evmOtherFee, "evm_other_gas": evmOtherGas,
 		"evm_other_tx_nonce": evmOtherTxNonce, "tool_call": tool,
+		"typed_data": typed, "typed_data_other_amount": typedOtherAmount, "typed_data_other_spender": typedOtherSpender,
+		"personal_sign": personal, "personal_sign_noncanonical_input": personalMixed, "personal_sign_other_message": personalOther,
 	}
 	requester := auth.Identity{Method: auth.MethodAPIKey, Tenant: "acme", AgentID: "trading-bot-1", KeyID: "ak_01"}
 	with := func(f func(*auth.Identity)) auth.Identity { id := requester; f(&id); return id }
@@ -234,6 +247,14 @@ func buildVectors(t *testing.T) vectorFile {
 	add("allow_evm", good, once("evm", "OK"))
 	add("allow_evm_noncanonical_input", good, once("evm_noncanonical_input", "OK"))
 	add("allow_tool_call", sign(toolClaims), once("tool_call", "OK"))
+	typedTok, personalTok := sign(base(typed)), sign(base(personal))
+	add("allow_typed_data", typedTok, once("typed_data", "OK"))
+	add("payload_mismatch_typed_data_amount", typedTok, once("typed_data_other_amount", "PAYLOAD_MISMATCH"))
+	add("payload_mismatch_typed_data_spender", typedTok, once("typed_data_other_spender", "PAYLOAD_MISMATCH"))
+	add("payload_mismatch_typed_data_as_tx", typedTok, once("evm", "PAYLOAD_MISMATCH"))
+	add("allow_personal_sign", personalTok, once("personal_sign", "OK"))
+	add("allow_personal_sign_noncanonical_input", personalTok, once("personal_sign_noncanonical_input", "OK"))
+	add("payload_mismatch_personal_sign_message", personalTok, once("personal_sign_other_message", "PAYLOAD_MISMATCH"))
 	add("allow_unauthenticated", unauth, as("unauthenticated", "OK"))
 	add("allow_mtls", claims(func(c *Claims) { c.AuthMethod = string(auth.MethodMTLS) }), as("other_method", "OK"))
 	add("allow_no_agent", claims(func(c *Claims) { c.AgentID = "" }), as("no_agent", "OK"))
@@ -466,6 +487,10 @@ func TestPayloadHashRejectsUnbindable(t *testing.T) {
 		"evm negative":      {Kind: model.KindEVMTx, ChainID: ptr(uint64(1)), ValueWei: "-1"},
 		"evm hex value":     {Kind: model.KindEVMTx, ChainID: ptr(uint64(1)), ValueWei: "0x10"},
 		"tool no name":      {Kind: model.KindToolCall},
+		"typed no chain":    {Kind: model.KindEVMTypedData, TypedData: &model.TypedData{}},
+		"typed no data":     {Kind: model.KindEVMTypedData, ChainID: ptr(uint64(1))},
+		"personal no msg":   {Kind: model.KindEVMPersonalSign, ChainID: ptr(uint64(1))},
+		"personal raw text": {Kind: model.KindEVMPersonalSign, ChainID: ptr(uint64(1)), Message: "hello"},
 	} {
 		if _, err := PayloadHash(a); err == nil {
 			t.Errorf("%s: expected error", name)

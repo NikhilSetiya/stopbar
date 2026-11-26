@@ -54,13 +54,25 @@ def token_claims(tok):
 
 
 def check_signed(i, sent, d, identity=("none", "", "")):
-    """An allow must carry a signed tx that does exactly what was approved,
-    and a v2 token bound to the requester identity (method, key_id, agent_id)."""
-    if not d.get("signed_tx") or not d.get("token"):
-        return [f"step {i}: allow without signed_tx/token"]
+    """An allow must carry a signed tx (or, for an off-chain request, a
+    signature) that does exactly what was approved, and a v2 token bound to the
+    requester identity (method, key_id, agent_id)."""
+    offchain = sent["action"]["kind"] in ("evm_typed_data", "evm_personal_sign")
+    if not d.get("signature" if offchain else "signed_tx") or not d.get("token"):
+        return [f"step {i}: allow without {'signature' if offchain else 'signed_tx'}/token"]
     c = token_claims(d["token"])
     if c.get("v") != 2 or (c.get("auth_method"), c.get("key_id"), c.get("agent_id")) != identity:
         return [f"step {i}: token v{c.get('v')} binds {c.get('auth_method')}/{c.get('key_id')}/{c.get('agent_id')}, want v2 {'/'.join(identity)}"]
+    if offchain:  # CS-514: recompute the digest and recover the signer independently
+        out = subprocess.run([stopbar_cli, "decode-sig", "-", d["signature"]], input=json.dumps(sent["action"]), capture_output=True, text=True)
+        if out.returncode != 0:
+            return [f"step {i}: decode-sig failed: {out.stderr.strip()}"]
+        s = json.loads(out.stdout)
+        errs = [f"step {i}: {k} {s[k]} != {v}" for k, v in (("signer", sent["action"]["from"].lower()), ("signing_hash", d.get("signing_hash")),
+                                                            ("payload_hash", d["payload_hash"])) if s[k] != v]
+        if not errs:
+            print(f"     step {i}: off-chain signature by {s['signer']} over {s['signing_hash'][:18]}…, payload and requester ({identity[0]}) bound")
+        return errs
     out = subprocess.run([stopbar_cli, "decode-tx", d["signed_tx"]], capture_output=True, text=True)
     if out.returncode != 0:
         return [f"step {i}: decode-tx failed: {out.stderr.strip()}"]

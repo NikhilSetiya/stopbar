@@ -43,8 +43,10 @@ disable_agentkit_telemetry()
 class StopbarWalletProvider(EvmWalletProvider):
     """An AgentKit EvmWalletProvider whose signing goes only through Stopbar.
 
-    Off-chain signatures (sign_message, sign_typed_data) are refused: a signed
-    Permit2 message is as good as an approval and is not gated yet.
+    Off-chain signatures (sign_message, sign_typed_data) go through Stopbar
+    too (CS-514): a signed Permit2 message is as good as an approval, so it is
+    decoded and gated like one, and stopbard returns the signature only on an
+    allow.
     """
 
     def __init__(
@@ -88,10 +90,26 @@ class StopbarWalletProvider(EvmWalletProvider):
 
     # ---- signing: only through Stopbar ----
     def sign_message(self, message) -> str:
-        raise StopbarError("off-chain signing is not gated by Stopbar yet; refused")
+        """EIP-191 personal_sign through Stopbar (CS-514): readable text is
+        shown to policy; opaque bytes (a hash) escalate under the starter pack."""
+        return self._sign_offchain(Client.evm_personal_sign(chain_id=self.chain_id, from_addr=self.address, message=message))
 
     def sign_typed_data(self, typed_data: dict[str, Any]) -> str:
-        raise StopbarError("off-chain signing is not gated by Stopbar yet; refused")
+        """EIP-712 eth_signTypedData_v4 through Stopbar (CS-514): a Permit,
+        Permit2 permit or Seaport order is gated like the approval or transfer
+        it authorises."""
+        return self._sign_offchain(Client.evm_typed_data(chain_id=self.chain_id, from_addr=self.address, typed_data=typed_data))
+
+    def _sign_offchain(self, action: dict[str, Any]) -> str:
+        try:
+            decision = self.client.evaluate(action, labels=list(self.provenance()))
+        except StopbarDecisionError as e:
+            self.decisions.append({"status": e.status, "decision": e.decision})
+            raise
+        self.decisions.append({"status": decision.status, "decision": decision.body})
+        if not decision.signature:
+            raise StopbarError("allow without a signature (is stopbard in gatekeeper mode?)")
+        return decision.signature
 
     def sign_transaction(self, transaction) -> Any:
         raise StopbarError("sign-without-broadcast is not supported; use send_transaction")

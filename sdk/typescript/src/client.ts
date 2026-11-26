@@ -11,11 +11,21 @@ import { request as httpsRequest } from "node:https";
 import { APPROVE, REJECT, loadKeyFile, signEscalation } from "./approval.js";
 import { detectEncodings } from "./encoding.js";
 import { StopbarAuthError, StopbarDenied, StopbarEscalated, StopbarRequestError, StopbarUnavailable, reasonIds } from "./errors.js";
-import type { Action, ActionRequest, DecisionBody, ErrorBody, Label, Source } from "./types.js";
+import type { Action, ActionRequest, DecisionBody, ErrorBody, Label, Source, TypedData } from "./types.js";
 
 /** An approver key: a raw 32-byte Ed25519 seed, or a path to a key file
  * written by `stopbar approver keygen` / approval.writeKeyFile. */
 export type ApproverKey = Buffer | string;
+
+/** Typed data as Stopbar takes it: integers (number, bigint) as decimal
+ * strings, never JSON numbers beyond 2^53; bytes as 0x hex. */
+function typedJson(v: unknown): unknown {
+  if (typeof v === "bigint" || (typeof v === "number" && Number.isInteger(v))) return v.toString();
+  if (v instanceof Uint8Array) return "0x" + Buffer.from(v).toString("hex");
+  if (Array.isArray(v)) return v.map(typedJson);
+  if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, typedJson(x)]));
+  return v;
+}
 
 function approverSeed(key: ApproverKey): Buffer {
   return Buffer.isBuffer(key) ? key : loadKeyFile(key);
@@ -29,6 +39,9 @@ export class Decision {
   get requestId(): string { return this.body.request_id ?? ""; }
   get signedTx(): string | undefined { return this.body.signed_tx; }
   get txHash(): string | undefined { return this.body.tx_hash; }
+  /** Gatekeeper mode, off-chain requests (CS-514): the signature and the digest it signs. */
+  get signature(): string | undefined { return this.body.signature; }
+  get signingHash(): string | undefined { return this.body.signing_hash; }
   get token(): string | undefined { return this.body.token; }
   get reasons(): string[] { return reasonIds(this.body); }
 }
@@ -123,6 +136,23 @@ export class Client {
 
   evmTx(p: EvmTxParams): Action {
     return Client.evmTx(p);
+  }
+
+  /** Build an off-chain EIP-712 signature request (eth_signTypedData_v4,
+   * CS-514). Stopbar decodes it like the approval or transfer it authorises
+   * (Permit, Permit2, Seaport) and binds the exact payload. Integers (number
+   * or bigint) become decimal strings, since uint256 values exceed 2^53. */
+  static evmTypedData(p: { chainId: number; from: string; typedData: TypedData }): Action {
+    return { kind: "evm_typed_data", chain_id: p.chainId, from: p.from.toLowerCase(), typed_data: typedJson(p.typedData) as TypedData };
+  }
+
+  /** Build an EIP-191 personal_sign request. `message` is text (UTF-8), raw
+   * bytes, or a 0x-hex string taken as bytes, as wallets do. */
+  static evmPersonalSign(p: { chainId: number; from: string; message: string | Uint8Array }): Action {
+    const m = p.message;
+    const hex = typeof m !== "string" ? Buffer.from(m).toString("hex")
+      : /^0x([0-9a-fA-F]{2})+$/.test(m) ? m.slice(2).toLowerCase() : Buffer.from(m, "utf8").toString("hex");
+    return { kind: "evm_personal_sign", chain_id: p.chainId, from: p.from.toLowerCase(), message: "0x" + hex };
   }
 
   /** Send an action to Stopbar. Resolves with the Decision on an allow; rejects
