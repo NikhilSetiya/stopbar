@@ -64,7 +64,10 @@ const usage = `usage:
       dest_known and address-poisoning checks) on a running stopbard. An
       addition is pending until a different key approves it, then known only
       after the server's cooling-off period; every existing entry it looks
-      like is shown. A removal applies at once. Every change is audited`
+      like is shown. A removal applies at once. Every change is audited
+
+  Against a stopbard in mTLS mode, approve, reject, breaker and contacts take
+  --cert FILE --cert-key FILE [--cacert FILE] in place of --key (CS-103)`
 
 func main() {
 	if len(os.Args) < 2 || os.Args[1] == "version" {
@@ -339,7 +342,11 @@ func signedApprovalCall(verb string, args []string, dec, suffix string) (httpRes
 	url := fs.String("url", "http://127.0.0.1:7777", "stopbard base URL")
 	key := fs.String("key", "", "API key for the HTTP call itself (optional; never what authorizes the "+verb+")")
 	approverKeyFile := fs.String("approver-key", "", "local approver private key file (required; signs the "+verb+")")
+	useTLS := mtlsFlags(fs)
 	if err := fs.Parse(args[1:]); err != nil {
+		return httpResult{}, err
+	}
+	if err := useTLS(); err != nil {
 		return httpResult{}, err
 	}
 	if fs.NArg() != 0 {
