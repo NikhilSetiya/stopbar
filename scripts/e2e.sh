@@ -131,6 +131,9 @@ python3 scripts/e2e_contacts.py "$BIN/stopbard" "$BIN/stopbar"
 step "circuit breaker over HTTP: trip -> CIRCUIT_OPEN, 1-of-2 reset refused, 2-of-2 resets, alert metric, audited (CS-124)"
 python3 scripts/e2e_breaker.py "$BIN/stopbard" "$BIN/stopbar"
 
+step "stopbar init -> stopbard -config: allow, escalate, 2-of-2 approve, audit verify (CS-195)"
+python3 scripts/e2e_init.py "$BIN/stopbard" "$BIN/stopbar"
+
 # Tool pins; keep in step with .github/workflows/ci.yml.
 GOLANGCI_LINT=v2.15.0
 GOVULNCHECK=v1.9.0

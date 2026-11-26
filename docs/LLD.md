@@ -755,6 +755,17 @@ escalation: {approvers: ["ed25519:…"], quorum: 1, timeout: 15m, channels: [cli
 audit: {checkpoint_every: 1000, rekor: false}
 ```
 
+### 17.1 `stopbar init` (CS-195, FR-DX-1/3)
+
+`stopbar init [--persona agent-wallet] [--dir DIR] [--tenant T] [--agent ID] [--chain dev|base|base-sepolia] [--rpc URL] [--force]` writes one directory that `stopbard -config DIR/stopbard.json` runs as is. The config uses the current flag surface (`cmd/stopbard` `applyConfigFile`, JSON with snake_case flag names, absolute paths), not the target `stopbar.yaml` above.
+
+- **Secure by default, never optional:** `listen` is `127.0.0.1:7777`, `auth_keys` is set (one `evaluate`-scoped key for `--agent`), `approvers` names two fresh Ed25519 approver keys whose owners are `approver-1`/`approver-2` (never the agent, so it cannot self-approve), `approval_quorum` and `breaker_quorum` are 2, `rate_per_min` is 600, and a fresh gatekeeper wallet (`dev_wallet`) makes it gatekeeper mode. `init` has no flag that weakens any of these.
+- **Policies:** the persona's starter pack, embedded from `examples/policies` (`examples/policies/embed.go`), so the written bundle is that pack byte for byte. `agent-wallet` is the only persona.
+- **World:** `limits` are `devstub.DefaultLimits` written out so they can be edited, `known_destinations` is empty, and the price/balance source is `--chain`: `dev` is static (1 ETH at $3,500, 1,000 USDC on Base, sized so the 20%-of-balance escalation fits under the $5,000/h wallet cap and an approval can execute), `base`/`base-sepolia` set `chain_rpc` (public RPC, or `--rpc`) and the Chainlink feeds the demos verified.
+- **Secrets:** key files, configs and the key store are 0600, directories 0700 (`policies/` 0755). The API key secret is printed once and stored nowhere.
+- **Overwrite:** any existing target fails the run, listing each file; `--force` removes and rewrites them (so modes are fresh). An existing `state/state.db` is refused even with `--force`: it holds the audit log signed with the old decision key.
+- **Output:** what was written, the secret, and the exact next commands (start stopbard, SDK environment, `stopbar approve` with each approver key, `stopbar audit verify --decision-key`). `scripts/e2e_init.py` runs that journey in CI.
+
 ## 18. Research evaluation harness (Phase 1R)
 
 Lives in `research/agentdojo/`. Python, pinned dependencies, one command per run. Talks to the same `stopbard` binary over `/v1/evaluate`; no Python re-implementation of policy.
