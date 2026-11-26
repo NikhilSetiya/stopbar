@@ -230,7 +230,7 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 	}
 	runErr := run(addr, gateway.Config{Evaluator: rt.eval, Nonces: nonces, Keys: rt.keys, Counters: rt.counters, Logger: log,
 		Authenticator: authn, Audit: rt.audit, RatePerMin: o.ratePerMin, Approver: rt.approver, Breaker: rt.breaker, Actions: rt.actions,
-		Contacts: rt.contacts}, tlsCfg, log)
+		Contacts: rt.contacts, State: db}, tlsCfg, log)
 	if rt.signed {
 		if err := rt.audit.Checkpoint(); err != nil {
 			log.Error("final audit checkpoint failed", "severity", "high", "err", err)
@@ -515,19 +515,19 @@ func newPendingStore(db *store.DB, log *audit.Log) (*pendingStore, error) {
 	return &pendingStore{db, log}, nil
 }
 
-func (p *pendingStore) Put(_ context.Context, e engine.PendingEscalation, rec *model.AuditEntry) error {
+func (p *pendingStore) Put(ctx context.Context, e engine.PendingEscalation, rec *model.AuditEntry) error {
 	b, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}
-	return p.db.Update(func(tx *bolt.Tx) error {
+	return p.db.Write(ctx, func(tx *bolt.Tx) error {
 		if rec != nil {
 			if err := p.log.AppendTx(tx, *rec); err != nil {
 				return err
 			}
 		}
 		return tx.Bucket(pendingBucket).Put([]byte(e.Request.ID), b)
-	})
+	}, nil)
 }
 
 func (p *pendingStore) Get(_ context.Context, id string) (engine.PendingEscalation, bool, error) {

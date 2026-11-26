@@ -27,6 +27,7 @@ import (
 	"math/big"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
@@ -117,6 +118,33 @@ func (a *Adapter) Addresses() []common.Address {
 	return out
 }
 
+// ctxSpent is a spent-token store whose write can join the store.Unit in ctx
+// (nonce.Store). The trusted core's SpentStore takes no context, so SignTx
+// binds it per call.
+type ctxSpent interface {
+	ConsumeCtx(ctx context.Context, key string, until time.Time) (bool, error)
+}
+
+type boundSpent struct {
+	ctx context.Context
+	s   ctxSpent
+}
+
+func (b boundSpent) Consume(key string, until time.Time) (bool, error) {
+	return b.s.ConsumeCtx(b.ctx, key, until)
+}
+
+// verify runs the core verifier with the spent token joining the caller's
+// state unit, if any (CS-197): the token is spent in the same transaction as
+// the evaluation's commit, and nothing is released before that is durable.
+func (a *Adapter) verify(ctx context.Context, token string, act model.Action, requester auth.Identity) (decision.Claims, error) {
+	v := *a.verifier
+	if cs, ok := v.Spent.(ctxSpent); ok {
+		v.Spent = boundSpent{ctx, cs}
+	}
+	return v.Verify(token, act, requester)
+}
+
 // SignTx returns the raw signed transaction and its hash. requester is the
 // authenticated identity of the request act came from (the zero Identity
 // when auth is off); a token bound to any other identity is refused.
@@ -124,7 +152,7 @@ func (a *Adapter) SignTx(ctx context.Context, token string, act model.Action, re
 	if act.Kind != model.KindEVMTx {
 		return nil, common.Hash{}, ErrNotBindable
 	}
-	claims, err := a.verifier.Verify(token, act, requester) // step 1: core first
+	claims, err := a.verify(ctx, token, act, requester) // step 1: core first
 	if err != nil {
 		return nil, common.Hash{}, err
 	}
@@ -196,7 +224,7 @@ func (a *Adapter) SignMessage(ctx context.Context, token string, act model.Actio
 	if act.Kind != model.KindEVMTypedData && act.Kind != model.KindEVMPersonalSign {
 		return nil, common.Hash{}, ErrNotBindable
 	}
-	if _, err := a.verifier.Verify(token, act, requester); err != nil { // step 1: core first
+	if _, err := a.verify(ctx, token, act, requester); err != nil { // step 1: core first, spent in the unit
 		return nil, common.Hash{}, err
 	}
 	from, key, err := a.keyFor(ctx, act.From) // step 2
@@ -392,4 +420,14 @@ func LoadDevWallet(path string) ([]*ecdsa.PrivateKey, error) {
 // WriteDevWallet writes keys (hex) to a tagged 0600 file.
 func WriteDevWallet(path string, hexKeys ...string) error {
 	return os.WriteFile(path, []byte(walletFileTag+strings.Join(hexKeys, "\n")+"\n"), 0o600)
+}
+
+// GenerateDevWallet writes a fresh secp256k1 key to a tagged 0600 file and
+// returns its address (`stopbar init`, CS-195).
+func GenerateDevWallet(path string) (common.Address, error) {
+	k, err := crypto.GenerateKey()
+	if err != nil {
+		return common.Address{}, err
+	}
+	return crypto.PubkeyToAddress(k.PublicKey), WriteDevWallet(path, hexutil.Encode(crypto.FromECDSA(k)))
 }

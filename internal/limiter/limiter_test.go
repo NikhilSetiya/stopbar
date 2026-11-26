@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	bolt "go.etcd.io/bbolt"
+
 	"github.com/NikhilSetiya/stopbar/internal/audit"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/model"
@@ -440,6 +442,50 @@ type failingStore struct{ MemStore }
 
 func (failingStore) Put(Record, *model.AuditEntry) error { return errors.New("disk full") }
 
+// gateStore blocks a commit write until released, so a test can act while
+// the write is in flight.
+type gateStore struct {
+	MemStore
+	entered, release chan struct{}
+}
+
+func (g gateStore) Put(r Record, _ *model.AuditEntry) error {
+	if r.State == StateCommitted {
+		close(g.entered)
+		<-g.release
+	}
+	return nil
+}
+
+// TestCapacityHeldWhileCommitInFlight: a reservation that lapses while its
+// commit is being written keeps its capacity, so nobody else can take it and
+// then be joined by the committed spend over the cap.
+func TestCapacityHeldWhileCommitInFlight(t *testing.T) {
+	c := newClock()
+	g := gateStore{entered: make(chan struct{}), release: make(chan struct{})}
+	l, err := New(Config{Clock: c.Now, Store: g, Rules: []Rule{{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Reserve(bg, "r1", req(walletA, dest, "60", "1", true), time.Minute, nil); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- l.Commit(bg, "r1", "0xr1", nil) }()
+	<-g.entered
+	c.Advance(2 * time.Minute) // r1's reservation lapses mid-write
+	if err := l.Reserve(bg, "r2", req(walletA, dest, "60", "1", true), time.Minute, nil); !errors.Is(err, engine.ErrCapExceeded) {
+		t.Fatalf("r2: %v, want CAP_EXCEEDED while r1's commit is in flight", err)
+	}
+	close(g.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := usd(t, l, req(walletA, dest, "", "", true), ScopeWallet); got != "60" {
+		t.Fatalf("usage %s, want 60 (the committed spend)", got)
+	}
+}
+
 func TestStoreFailureChangesNothing(t *testing.T) {
 	l, err := New(Config{Rules: []Rule{{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"}}, Store: failingStore{}, Clock: newClock().Now})
 	if err != nil {
@@ -538,14 +584,41 @@ func TestReserveAndAuditAreAtomic(t *testing.T) {
 // the lock after every state change (so in every state the limiter passes
 // through), and by eight observers while the run is in progress, not only at the end. Finally, usage must
 // equal an independent ledger exactly: nothing double-counted or dropped.
+// slowFlakyStore makes every write take a while (the lock is released for
+// it, so other requests interleave) and fails one in ten of them.
+type slowFlakyStore struct {
+	MemStore
+	n atomic.Int64
+}
+
+var errFlaky = errors.New("flaky disk")
+
+func (s *slowFlakyStore) Put(Record, *model.AuditEntry) error {
+	time.Sleep(20 * time.Microsecond)
+	if s.n.Add(1)%10 == 0 {
+		return errFlaky
+	}
+	return nil
+}
+
 func TestConcurrentReservationsNeverExceedCaps(t *testing.T) {
+	t.Run("instant store", func(t *testing.T) { concurrentCaps(t, MemStore{}) })
+	// Writes run outside the limiter lock (group commit, CS-197): capacity is
+	// held while a write is in flight and given back when it fails.
+	t.Run("slow failing store", func(t *testing.T) { concurrentCaps(t, &slowFlakyStore{}) })
+}
+
+func concurrentCaps(t *testing.T, st Store) {
 	const workers = 1000
 	c := newClock()
 	walletCap, tenantCap, countCap := big.NewInt(1_000_000_000), big.NewInt(1_500_000_000), int64(400) // $1,000 / $1,500
-	l := newLimiter(t, c,
-		Rule{Scope: ScopeWallet, Window: "1h", MaxUSD: "1000", MaxCount: countCap},
-		Rule{Scope: ScopeTenant, Window: "1h", MaxUSD: "1500"},
-		Rule{Scope: ScopeWalletAsset, Window: "1h", MaxUnits: "100000"})
+	l, err := New(Config{Clock: c.Now, Store: st, Rules: []Rule{
+		{Scope: ScopeWallet, Window: "1h", MaxUSD: "1000", MaxCount: countCap},
+		{Scope: ScopeTenant, Window: "1h", MaxUSD: "1500"},
+		{Scope: ScopeWalletAsset, Window: "1h", MaxUnits: "100000"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	probeA, probeB := req(walletA, dest, "", "", true), req(walletB, dest, "", "", true)
 
 	type outcome struct {
@@ -615,7 +688,7 @@ func TestConcurrentReservationsNeverExceedCaps(t *testing.T) {
 				id := fmt.Sprintf("req-%d-%d", i, op)
 				ttl := time.Duration(30+rng.IntN(90)) * time.Second
 				if err := l.Reserve(bg, id, req(wallet, dest, amt, fmt.Sprint(rng.IntN(400)), true), ttl, nil); err != nil {
-					if !errors.Is(err, engine.ErrCapExceeded) {
+					if !errors.Is(err, engine.ErrCapExceeded) && !errors.Is(err, errFlaky) {
 						t.Errorf("reserve: %v", err)
 					}
 					continue
@@ -627,6 +700,7 @@ func TestConcurrentReservationsNeverExceedCaps(t *testing.T) {
 					switch {
 					case err == nil, errors.Is(err, ErrReservationExpired): // late commit still records spend
 						o.state = StateCommitted
+					case errors.Is(err, errFlaky): // not recorded: the reservation lapses
 					default:
 						t.Errorf("commit: %v", err)
 					}
@@ -635,7 +709,7 @@ func TestConcurrentReservationsNeverExceedCaps(t *testing.T) {
 					switch {
 					case err == nil:
 						o.state = StateReleased
-					case errors.Is(err, ErrReservationExpired):
+					case errors.Is(err, ErrReservationExpired), errors.Is(err, errFlaky):
 					default:
 						t.Errorf("release: %v", err)
 					}
@@ -691,4 +765,113 @@ func mustUSD(s string) *big.Int {
 		panic(err)
 	}
 	return v
+}
+
+// TestReserveAndCommitInOneUnit: within one evaluation's store.Unit
+// (CS-197), reserve then commit do not wait on each other, hold capacity
+// until the unit settles, and are undone together if the unit fails: no
+// capacity held, no record in memory or on disk. When the unit commits,
+// both land.
+func TestReserveAndCommitInOneUnit(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	lg, err := audit.New(audit.Config{DB: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewBoltStore(db, lg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newClock()
+	l, err := New(Config{Rules: []Rule{{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"}}, Store: s, Clock: c.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := req(walletA, dest, "", "", true)
+	run := func(id string, fail bool) error {
+		u := db.NewUnit()
+		ctx := store.WithUnit(bg, u)
+		if err := l.Reserve(ctx, id, req(walletA, dest, "60", "1", true), time.Minute, &model.AuditEntry{Type: model.AuditDecision, Body: map[string]any{"request_id": id}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Commit(ctx, id, "0x"+id, &model.AuditEntry{Type: model.AuditCommit, Body: map[string]any{"request_id": id}}); err != nil {
+			t.Fatal(err)
+		}
+		if got := usd(t, l, probe, ScopeWallet); got != "60" {
+			t.Fatalf("%s: usage %s while the unit is open, want 60 (held)", id, got)
+		}
+		if fail {
+			_ = db.Write(ctx, func(*bolt.Tx) error { return errors.New("disk full") }, nil)
+		}
+		return u.Commit()
+	}
+	if err := run("r1", true); err == nil {
+		t.Fatal("unit with a failing write committed")
+	}
+	if got := usd(t, l, probe, ScopeWallet); got != "0" {
+		t.Fatalf("usage %s after a failed unit, want 0", got)
+	}
+	if recs, _ := s.Load(); len(recs) != 0 {
+		t.Fatalf("%d records on disk after a failed unit", len(recs))
+	}
+	if err := l.Commit(bg, "r1", "0xr1", nil); !errors.Is(err, ErrUnknownReservation) {
+		t.Fatalf("r1 after failed unit: %v", err)
+	}
+	if err := run("r2", false); err != nil {
+		t.Fatal(err)
+	}
+	if recs, _ := s.Load(); len(recs) != 1 || recs[0].State != StateCommitted {
+		t.Fatalf("records after a committed unit: %+v", recs)
+	}
+	if got := usd(t, l, probe, ScopeWallet); got != "60" {
+		t.Fatalf("usage %s after commit, want 60", got)
+	}
+}
+
+// TestRecordsPastRetentionAreCompacted: a record past retention is deleted
+// from the store by the next reservation, in that reservation's own unit (no
+// extra fsync), and only state is touched: the audit log keeps every record.
+func TestRecordsPastRetentionAreCompacted(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	lg, err := audit.New(audit.Config{DB: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewBoltStore(db, lg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newClock()
+	l, err := New(Config{Rules: []Rule{{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"}}, Store: s, Clock: c.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserve := func(id string) {
+		u := db.NewUnit()
+		if err := l.Reserve(store.WithUnit(bg, u), id, req(walletA, dest, "1", "1", true), time.Minute,
+			&model.AuditEntry{Type: model.AuditDecision, Body: map[string]any{"request_id": id}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := u.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reserve("old")
+	c.Advance(retention + time.Minute)
+	reserve("new")
+	recs, _ := s.Load()
+	if len(recs) != 1 || recs[0].ID != "new" {
+		t.Fatalf("records %+v, want only the new one", recs)
+	}
+	if a, _ := audit.Records(db, 0, 0); len(a) != 2 {
+		t.Fatalf("%d audit records, want 2 (the log is never compacted)", len(a))
+	}
 }

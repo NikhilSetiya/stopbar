@@ -270,7 +270,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check(any(who(b) == "ak_ops" and (b.get("veto") or {}).get("kid") for b in find("decision", lambda b: last_code(b) == "APPROVAL_REJECTED")),
           "reject audited with the rejecting owner's kid (not an API-key label)")
     check(any(who(b) == "ak_ops" and b["state"] == "allowed" for b in find("approval", lambda b: b["request_id"] == "req_life_e2")), "approval resolution audited")
-    check(any(b["request"]["id"] == "req_life_e3" for b in find("decision", lambda b: last_code(b) == "APPROVAL_EXPIRED")), "expiry audited as a deny")
+    check(any(b["decision"]["request_id"] == "req_life_e3" for b in find("decision", lambda b: last_code(b) == "APPROVAL_EXPIRED")), "expiry audited as a deny")
     check(any(who(b) == "ak_other" for b in find("auth_reject", lambda b: "not the requester" in b.get("reason", ""))), "a foreign settle attempt is audited")
 
 print("-- gatekeeper: escalate → approve → signed tx (CS-152 acceptance)")
