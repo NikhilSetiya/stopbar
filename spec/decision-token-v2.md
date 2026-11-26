@@ -64,7 +64,7 @@ Exactly these fifteen members, JCS-canonical:
 | `iat` | int | Issued at, Unix seconds. |
 | `exp` | int | Expiry, Unix seconds. `0 < exp − iat ≤ 300`, with a default of 60. |
 | `auth_method` | string | §3.3: `api_key`, `mtls` or `none`. |
-| `key_id` | string | §3.3: the credential's ID (API key record ID; later a SPIFFE ID). `""` only when `auth_method` is `none`. |
+| `key_id` | string | §3.3: the credential's ID (API key record ID, or for `mtls` the client certificate's SPIFFE ID, ADR 0006). `""` only when `auth_method` is `none`. |
 | `agent_id` | string | §3.3: the agent the credential is issued to. `""` when the credential names none, and always `""` when `auth_method` is `none`. |
 
 ### 3.3 Requester identity

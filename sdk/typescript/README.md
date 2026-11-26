@@ -22,6 +22,10 @@ const sb = new Client("http://127.0.0.1:7777", {
   apiKey: "stopbar_sk_...",            // from `stopbar keygen api-key`
   tenant: "demo", agentId: "wallet-agent",
 });
+// mTLS (service mode, CS-103): present the workload's certificate instead; its
+// SPIFFE ID is the identity. PEM contents, sent over node:https.
+//   new Client("https://stopbar.internal:7777", { tenant: "demo", agentId: "wallet-agent",
+//     tls: { cert: readFileSync("bot.crt"), key: readFileSync("bot.key"), ca: readFileSync("stopbar-ca.pem") } });
 
 const action = Client.evmTx({
   chainId: 8453, from: myWallet, to: recipient, valueWei: "5000000000000000000",
