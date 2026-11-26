@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"regexp"
 	"runtime/debug"
 	"slices"
@@ -310,34 +311,52 @@ func failed(code string, err error) *stageError { return &stageError{code, err} 
 // call runs fn with the stage timeout, converting a panic or a timeout into
 // an error. A component that ignores ctx is abandoned on timeout; callers
 // must not read state that fn may still be writing.
+//
+// A stage that times out is abandoned, not stopped: its goroutine may still
+// run. So fn must capture only values the caller will not change afterwards
+// (copies), and return results through stage, never by writing to a
+// variable the caller reads (CS-197: a timed-out Sign once read d while
+// evaluate rewrote it).
 func (e *Engine) call(ctx context.Context, fn func(context.Context) error) error {
-	return e.callWithin(ctx, e.cfg.StageTimeout, fn)
+	_, err := stage(ctx, e.cfg.StageTimeout, func(ctx context.Context) (struct{}, error) { return struct{}{}, fn(ctx) })
+	return err
 }
 
 // record runs a write that records a decision or a state change that has
 // already happened. It keeps the request's values but not its cancellation,
 // and has its own timeout, so a disconnecting caller can't stop the record.
 func (e *Engine) record(ctx context.Context, fn func(context.Context) error) error {
-	return e.callWithin(context.WithoutCancel(ctx), e.cfg.AuditTimeout, fn)
+	_, err := stage(context.WithoutCancel(ctx), e.cfg.AuditTimeout, func(ctx context.Context) (struct{}, error) { return struct{}{}, fn(ctx) })
+	return err
 }
 
-func (e *Engine) callWithin(ctx context.Context, timeout time.Duration, fn func(context.Context) error) error {
+// stage runs fn in its own goroutine under timeout and returns its result,
+// or an error on timeout or panic. The result comes back only through the
+// channel, so a goroutine abandoned at the timeout never writes to anything
+// the caller reads. Inputs are the caller's job: see call.
+func stage[T any](ctx context.Context, timeout time.Duration, fn func(context.Context) (T, error)) (T, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	done := make(chan error, 1)
+	type result struct {
+		v   T
+		err error
+	}
+	done := make(chan result, 1)
 	go func() {
 		defer func() {
 			if p := recover(); p != nil {
-				done <- fmt.Errorf("panic: %v\n%s", p, debug.Stack())
+				done <- result{err: fmt.Errorf("panic: %v\n%s", p, debug.Stack())}
 			}
 		}()
-		done <- fn(ctx)
+		v, err := fn(ctx)
+		done <- result{v, err}
 	}()
 	select {
-	case err := <-done:
-		return err
+	case r := <-done:
+		return r.v, r.err
 	case <-ctx.Done():
-		return fmt.Errorf("timed out after %s: %w", e.cfg.StageTimeout, ctx.Err())
+		var zero T
+		return zero, fmt.Errorf("timed out after %s: %w", timeout, ctx.Err())
 	}
 }
 
@@ -468,7 +487,8 @@ func (e *Engine) submitVote(ctx context.Context, id string, sig approval.SignedE
 		pe.Votes = append(pe.Votes, v)
 		rec := &model.AuditEntry{Type: model.AuditApproval, Body: addIdentity(ctx, map[string]any{
 			"request_id": id, "event": "vote", "kid": v.Kid, "owner": v.Owner, "decision": v.Decision})}
-		if err := e.record(ctx, func(ctx context.Context) error { return e.cfg.Pending.Put(ctx, pe, rec) }); err != nil {
+		put := pe // a copy: the record goroutine may outlive its timeout
+		if err := e.record(ctx, func(ctx context.Context) error { return e.cfg.Pending.Put(ctx, put, rec) }); err != nil {
 			e.unaudited(id, err)
 			return model.Decision{}, err
 		}
@@ -719,8 +739,9 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 
 	// circuit breaker (CS-124): a halted tenant gets nothing evaluated.
 	if e.cfg.Breaker != nil {
-		var open bool
-		if err := e.call(ctx, func(ctx context.Context) (err error) { open, err = e.cfg.Breaker.CircuitOpen(ctx, req.Tenant); return }); err != nil {
+		tenant := req.Tenant
+		open, err := stage(ctx, e.cfg.StageTimeout, func(ctx context.Context) (bool, error) { return e.cfg.Breaker.CircuitOpen(ctx, tenant) })
+		if err != nil {
 			return audit(e.deny(req.ID, now, payloadHash, failed(CodeLimiter, err)), nil)
 		}
 		if open {
@@ -742,8 +763,9 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 	ctxRecord := map[string]any{"context": auditContext(er)}
 
 	// policy
-	var pr PolicyResult
-	if err := e.call(ctx, func(ctx context.Context) (err error) { pr, err = e.cfg.Policy.Evaluate(ctx, er); return }); err != nil {
+	erPolicy := cloneEnriched(er)
+	pr, err := stage(ctx, e.cfg.StageTimeout, func(ctx context.Context) (PolicyResult, error) { return e.cfg.Policy.Evaluate(ctx, erPolicy) })
+	if err != nil {
 		return audit(e.deny(req.ID, now, payloadHash, failed(CodePolicyFail, err)), ctxRecord)
 	}
 	if err := checkPolicyResult(pr); err != nil {
@@ -773,8 +795,9 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 			// CS-152: record the escalation so `stopbar approve <id>` can re-run it,
 			// with the requester's identity so it cannot also approve itself. The
 			// record and the escalate decision's audit record are one transaction.
+			dc := d // the record goroutine gets its own copy of the decision
 			pe := PendingEscalation{Request: req, Reasons: policyIDs(reasons), IssuedAt: now, Requester: requester,
-				State: model.EscalationPending, Decision: &d}
+				State: model.EscalationPending, Decision: &dc}
 			rec := &model.AuditEntry{Type: model.AuditDecision, Body: addIdentity(ctx, map[string]any{"decision": d, "context": auditContext(er)})}
 			if perr := e.record(ctx, func(ctx context.Context) error { return e.cfg.Pending.Put(ctx, pe, rec) }); perr != nil {
 				e.unaudited(req.ID, perr)
@@ -794,8 +817,10 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 	// decision's audit record. If that fails, the token never leaves.
 	id := req.ID
 	d.ReservationID = &id
-	var token string
-	if err := e.call(ctx, func(ctx context.Context) (err error) { token, err = e.cfg.Signer.Sign(ctx, requester, req, d); return }); err != nil || token == "" {
+	signReq, signD := req, d
+	signD.Reasons = slices.Clone(d.Reasons)
+	token, err := stage(ctx, e.cfg.StageTimeout, func(ctx context.Context) (string, error) { return e.cfg.Signer.Sign(ctx, requester, signReq, signD) })
+	if err != nil || token == "" {
 		if err == nil {
 			err = errors.New("signer returned an empty token")
 		}
@@ -806,7 +831,8 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 
 	// limiter: reserve + audit the allow, atomically.
 	rec := &model.AuditEntry{Type: model.AuditDecision, Body: addIdentity(ctx, map[string]any{"decision": d, "context": auditContext(er)})}
-	if err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Reserve(ctx, id, er, e.cfg.DecisionTTL, rec) }); err != nil {
+	erReserve := cloneEnriched(er)
+	if err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Reserve(ctx, id, erReserve, e.cfg.DecisionTTL, rec) }); err != nil {
 		e.release(ctx, id, "reserve failed or timed out") // a timed-out Reserve may still land
 		if errors.Is(err, ErrAuditUnavailable) {
 			e.unaudited(req.ID, err)
@@ -829,8 +855,8 @@ func (e *Engine) decode(ctx context.Context, a model.Action, payloadHash string)
 	if dec == nil {
 		return model.IntentSummary{}, failed(CodeDecoder, fmt.Errorf("no decoder for action kind %q", a.Kind))
 	}
-	var intent model.IntentSummary
-	if err := e.call(ctx, func(ctx context.Context) (err error) { intent, err = dec.Decode(ctx, a); return }); err != nil {
+	intent, err := stage(ctx, e.cfg.StageTimeout, func(ctx context.Context) (model.IntentSummary, error) { return dec.Decode(ctx, a) })
+	if err != nil {
 		return model.IntentSummary{}, failed(CodeDecoder, err)
 	}
 	if intent.PayloadHash != "" && intent.PayloadHash != payloadHash {
@@ -855,10 +881,20 @@ func (e *Engine) enrich(ctx context.Context, req model.ActionRequest, intent mod
 		Velocity: map[string]model.Velocity{},
 	}
 	er.Request.Provenance.Labels = slices.Clone(req.Provenance.Labels)
+	er.Intent.Flags = slices.Clone(intent.Flags) // enrichers append; never into the caller's backing array
 	for i, en := range e.cfg.Enrichers {
-		if err := e.call(ctx, func(ctx context.Context) error { return en.Enrich(ctx, er) }); err != nil {
+		// Each enricher works on its own copy, and its copy becomes the
+		// request only if it finished in time: a timed-out enricher may still
+		// be writing, but to a copy nobody reads.
+		in := cloneEnriched(*er)
+		out, err := stage(ctx, e.cfg.StageTimeout, func(ctx context.Context) (model.EnrichedRequest, error) {
+			err := en.Enrich(ctx, &in)
+			return in, err
+		})
+		if err != nil {
 			return model.EnrichedRequest{}, failed(CodeEnrich, fmt.Errorf("enricher %d (%T): %w", i, en, err))
 		}
+		*er = out
 	}
 	if ph, err := decision.PayloadHash(er.Request.Action); err != nil || ph != payloadHash || er.Intent.PayloadHash != payloadHash {
 		return model.EnrichedRequest{}, failed(CodeEnrich, errors.New("an enricher modified the action or intent"))
@@ -869,6 +905,17 @@ func (e *Engine) enrich(ctx context.Context, req model.ActionRequest, intent mod
 		}
 	}
 	return *er, nil
+}
+
+// cloneEnriched copies er deeply enough that a stage working on the copy
+// shares no slice or map the engine writes: taint, flags, labels, velocity.
+func cloneEnriched(er model.EnrichedRequest) model.EnrichedRequest {
+	c := er
+	c.Taint = slices.Clone(er.Taint)
+	c.Intent.Flags = slices.Clone(er.Intent.Flags)
+	c.Request.Provenance.Labels = slices.Clone(er.Request.Provenance.Labels)
+	c.Velocity = maps.Clone(er.Velocity)
+	return c
 }
 
 var reSHA256 = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
