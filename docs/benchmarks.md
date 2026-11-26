@@ -9,7 +9,7 @@ Latency and throughput of the `stopbard` sidecar against the PRD's targets:
 
 (Quoted verbatim from [PRD §8](PRD.md).) The acceptance bar for CS-197 is p99 < 25 ms for the sidecar at 1,000 requests/s.
 
-**Status: the official run has not happened yet.** The official numbers come only from the `bench` workflow on a GitHub-hosted runner, or from an idle machine whose specs are written down here. Every number below says where it was measured. Numbers from a loaded machine are never evidence that a target is met.
+**Status: neither target is met at 1,000 rps.** On a GitHub-hosted runner the sidecar answers every request correctly at 1,000 rps (0 errors), but p99 is 155 ms to 3.2 s, depending on the run and its length. At 500 rps for 30 s, p99 was 15.7 ms. Official numbers come only from CI runners or from an idle machine whose specs are written down here, and every number below says where it was measured. Numbers from a loaded machine are never evidence that a target is met.
 
 ## What is measured
 
@@ -35,27 +35,42 @@ The official run is `gh workflow run bench.yml` (or Actions → bench → Run wo
 
 ## Results
 
-### Official
+### Official: GitHub-hosted runner
 
-Not run yet. After this lands, run the `bench` workflow and record its p50/p90/p99/p99.9/max, error rate and run link here.
+Environment for every run below: `ubuntu-latest` (image ubuntu-26.04, 20261116.202.1), 4 vCPU AMD EPYC 9V74, 15 GiB RAM, Azure VM disk (`/dev/root`, ext4), Linux 7.0.0-1020-azure, Go 1.26.11. The harness and `stopbard` share the runner. Mix 80/10/10 allow/escalate/deny, 5 s warm-up not measured, configuration as above. The stopbard code is the same in all three runs (commit 4083bd4; later commits changed only the harness's report and directory handling). The runs were made from a scratch branch, because a `workflow_dispatch` workflow can be dispatched only once it is on `main`.
+
+| Run | Rate, duration | p50 | p90 | p99 | p99.9 | max | errors |
+|---|---|---|---|---|---|---|---|
+| [45664030674](https://github.com/NikhilSetiya/stopbar/actions/runs/45664030674) (`make bench`) | 1,000 rps, 60 s | 11.18 ms | 41.99 ms | **1,080.54 ms** | 1,366.93 ms | 1,528.77 ms | 0 / 60,000 |
+| [45806473199](https://github.com/NikhilSetiya/stopbar/actions/runs/45806473199) (sweep) | 250 rps, 30 s | 5.03 ms | 31.43 ms | 554.80 ms | 697.27 ms | 745.48 ms | 0 / 7,500 |
+| same run | 500 rps, 30 s | 10.33 ms | 12.73 ms | **15.72 ms** | 85.41 ms | 107.75 ms | 0 / 15,000 |
+| same run | 750 rps, 30 s | 15.72 ms | 20.69 ms | 58.25 ms | 103.48 ms | 126.51 ms | 0 / 22,500 |
+| same run | 1,000 rps, 30 s | 33.34 ms | 51.42 ms | **155.02 ms** | 195.09 ms | 244.56 ms | 0 / 30,000 |
+| [45807052850](https://github.com/NikhilSetiya/stopbar/actions/runs/45807052850) (4 back-to-back runs) | 1,000 rps, 60 s each | 516–1,971 ms | 1.75–2.86 s | **2.33–3.23 s** | 2.55–3.49 s | 2.78–3.75 s | 24 / 240,000 (first run only) |
+
+How to read this:
+
+- **Correctness held at every rate.** All 375,000 requests got the expected outcome, except 24 in the first run of 45807052850. Those 24 allows were answered 403 deny while the service was seconds behind. That is the designed fail-closed behaviour when a stage times out (the reason codes were not captured in that run).
+- **Runners vary a lot.** The 250 rps run had a 4-second stall (seconds 20–23 of the run), and 45807052850 was much slower than the other two runs.
+- **At 1,000 rps the service falls behind as the state file grows.** In the 60 s runs, latency per second climbs steadily after about 15–20 s (the harness prints which seconds the tail comes from). The queue grows, so the sustained service rate on these runners is below 1,000/s once the file reaches a few hundred MB. 45807052850 also compared bbolt's `NoFreelistSync` + map freelist with the default: no difference (p99 2.33–2.40 s against 2.35–3.23 s), so the freelist is not the cause, and the option was not adopted.
 
 ### Component micro-benchmarks
 
-Measured on a dev machine under load from other builds, so **not official**. They are shown because per-call CPU costs are an order of magnitude apart from the fsync cost, and that gap is what the conclusions below rest on. Hardware: Apple M3, 8 cores, 16 GB, macOS 26.6.2, Go 1.26.11.
+The official column is the GitHub-hosted runner from run [45664030674](https://github.com/NikhilSetiya/stopbar/actions/runs/45664030674) (environment above). The M3 column was measured on a dev machine under load from other builds, so it is **not official**. It is shown only because the fsync cost on macOS differs so much. M3: Apple M3, 8 cores, 16 GB, macOS 26.6.2, Go 1.26.11.
 
-| Benchmark | Time/op | Allocs/op |
-|---|---|---|
-| `canon.BenchmarkTransform` (EVM request fixture) | 34 µs | 711 |
-| `decision.BenchmarkPayloadHash` | 15 µs | 292 |
-| `decision.BenchmarkSign` (v2 token, Ed25519) | 40 µs | 476 |
-| `evm.BenchmarkDecode/transfer` | 1.0 µs | 26 |
-| `evm.BenchmarkDecode/safe_multisend` | 7.5 µs | 78 |
-| `policy.BenchmarkEvaluate/allow` (starter bundle) | 8.2 µs | 135 |
-| `policy.BenchmarkEvaluate/escalate` | 10 µs | 137 |
-| `limiter.BenchmarkReserve` (in memory) | 4.6 µs | 80 |
-| `audit.BenchmarkAppend` (one fsynced bbolt transaction) | **6.2 ms** | 411 |
+| Benchmark | CI runner (official) | Apple M3 (dev machine under load, not official) | Allocs/op |
+|---|---|---|---|
+| `canon.BenchmarkTransform` (EVM request fixture) | 48.6 µs | 34 µs | 711 |
+| `decision.BenchmarkPayloadHash` | 20.1 µs | 15 µs | 292 |
+| `decision.BenchmarkSign` (v2 token, Ed25519) | 54.6 µs | 40 µs | 476 |
+| `evm.BenchmarkDecode/transfer` | 1.4 µs | 1.0 µs | 26 |
+| `evm.BenchmarkDecode/safe_multisend` | 4.9 µs | 7.5 µs | 78 |
+| `policy.BenchmarkEvaluate/allow` (starter bundle) | 9.8 µs | 8.2 µs | 135 |
+| `policy.BenchmarkEvaluate/escalate` | 9.8 µs | 10 µs | 137 |
+| `limiter.BenchmarkReserve` (in memory) | 7.3 µs | 4.6 µs | 80 |
+| `audit.BenchmarkAppend` (one fsynced bbolt transaction) | **0.28 ms** | **6.2 ms** | 411 |
 
-Everything except the durable write costs tens of microseconds. One fsynced transaction costs milliseconds.
+Everything except the durable write costs tens of microseconds. One fsynced bbolt transaction costs 0.28 ms on the Linux runner (`fdatasync`) and 6.2 ms on macOS (`F_FULLFSYNC`).
 
 ### Harness: dev machine under load, not official
 
@@ -77,7 +92,14 @@ A goroutine dump under load (SIGQUIT) showed almost every request blocked on a m
 
 Not changed: fail-closed mapping, one transaction per audit record and its state change, and fsync on every commit (`NoSync` stays off). See LLD §7.3a and §11.
 
+## Where the remaining time goes
+
+Each request writes about 5.2 KB of audit records (measured with `stopbar audit export` over a harness run): request 1.0 KB, allow decision 3.8 KB plus commit 0.5 KB, escalate 3.0 KB, deny 5.3 KB. The decision records carry the full request, decision and enriched context. It also writes random-keyed entries to the nonce, spent-token, reservation and pending-escalation B+trees. bbolt is copy-on-write, so each random insert rewrites a leaf page and its parents. The file grows about 10 KB per request (353 MB after 35,000 requests in the sweep), and the pages written per commit grow with it. Every allow pays four commits in sequence. CPU per request is about 0.2 ms (micro-benchmarks above), so the limit is the volume of durable writes on the runner's disk, not computation.
+
+Options not taken here, because each changes a design decision rather than tuning the implementation: fewer sequential commits per allow (for example, writing the spent token and the commit together), smaller decision records (the audit content is specified in LLD §11), or a storage engine with an append-only log. Each would need its own task and design review.
+
 ## Gap statement
 
-- **NFR-1 (p99 < 25 ms sidecar):** unverified on Linux until the official run. Not achievable on macOS with `F_FULLFSYNC`: the floor is four sequential full fsyncs, about 25 ms on an Apple M3.
-- **NFR-2 (≥ 1,000 evaluations/sec):** unverified until the official run.
+- **NFR-1 (p99 < 25 ms sidecar): not met at 1,000 rps.** On the GitHub-hosted runner, p99 at 1,000 rps was 155 ms (30 s), 1,081 ms (60 s), and 2.3–3.2 s (60 s, slower runner). It was met at 500 rps for 30 s (15.7 ms). On macOS with `F_FULLFSYNC` it cannot be met even when idle: the floor is four sequential full fsyncs, about 25 ms on an Apple M3.
+- **NFR-2 (≥ 1,000 evaluations/sec): not demonstrated as sustained.** Every request was answered with no errors in two of the three 1,000 rps runs, but the growing latency in the 60 s runs shows the sustained service rate on this runner is below 1,000/s once the state file is a few hundred MB.
+- The `bench` workflow (`gh workflow run bench.yml`, available once merged) reruns the official measurement. Record any new run here with its link.

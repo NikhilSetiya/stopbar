@@ -177,7 +177,10 @@ func main() {
 				var d struct {
 					Outcome  string `json:"outcome"`
 					SignedTx string `json:"signed_tx"`
-					Code     string `json:"code"`
+					Code     string `json:"code"` // gateway error
+					Reasons  []struct {
+						Code string `json:"code"`
+					} `json:"reasons"`
 				}
 				derr := json.NewDecoder(resp.Body).Decode(&d)
 				_, _ = io.Copy(io.Discard, resp.Body)
@@ -186,7 +189,7 @@ func main() {
 				case derr != nil:
 					r.err = "bad body: " + derr.Error()
 				case resp.StatusCode != s.status || d.Outcome != s.outcome:
-					r.err = fmt.Sprintf("HTTP %d %s %s, want %d %s", resp.StatusCode, d.Outcome, d.Code, s.status, s.outcome)
+					r.err = fmt.Sprintf("HTTP %d %s %s%v, want %d %s", resp.StatusCode, d.Outcome, d.Code, d.Reasons, s.status, s.outcome)
 				case s.outcome == "allow" && d.SignedTx == "":
 					r.err = "allow without signed_tx"
 				}
