@@ -124,7 +124,9 @@ func (l *Log) AppendTx(tx *bolt.Tx, e model.AuditEntry) error {
 	if err != nil {
 		return err
 	}
-	if err := tx.Bucket(recordsBucket).Put(seqKey(r.Seq), b); err != nil {
+	rb := tx.Bucket(recordsBucket)
+	rb.FillPercent = 1 // append-only by seq: fill pages, don't leave them half empty (CS-197)
+	if err := rb.Put(seqKey(r.Seq), b); err != nil {
 		return err
 	}
 	if l.signer != nil && r.Seq%l.every == 0 {

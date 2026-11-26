@@ -180,7 +180,9 @@ func (s *Store) ConsumeWith(ctx context.Context, key string, until time.Time, en
 	s.forget(ctx, gone)
 
 	err = s.db.Write(ctx, func(tx *bolt.Tx) error {
-		if err := tx.Bucket(s.bucket).Put(diskKey(key, until), v2Mark); err != nil {
+		b := tx.Bucket(s.bucket)
+		b.FillPercent = 1 // keys sort by expiry: inserts append, so fill pages (CS-197)
+		if err := b.Put(diskKey(key, until), v2Mark); err != nil {
 			return err
 		}
 		if entry != nil {
