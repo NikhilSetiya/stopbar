@@ -133,7 +133,7 @@ IDs are referenced from the [task backlog](TASKS.md).
 
 - FR-PRV-1: SDK labels inputs entering agent context (`trusted_user`, `untrusted_web`, `untrusted_onchain`, `untrusted_email`, `tool_output`, `decoded`).
 - FR-PRV-2: v1 context-level taint: any action produced while tainted content was in context carries those labels.
-- FR-PRV-3: Workload identity on requests (SPIFFE ID or signed service identity).
+- FR-PRV-3: Workload identity on requests (SPIFFE ID or signed service identity). Done for service mode: the mTLS client certificate's SPIFFE ID is the requester identity (CS-103, ADR 0006).
 - FR-PRV-4: Ingest deploy/change events; expose `minutes_since_code_change` for the requesting workload (Phase 4, designed in v1).
 - FR-PRV-5 (Phase 3): field-level taint via instrumented code-mode bindings.
 

@@ -55,7 +55,11 @@ func runContacts(args []string, out io.Writer) error {
 	key := fs.String("key", "", "API key ('contacts' scope; to approve, any key that can list contacts: it never authorizes the approval)")
 	label := fs.String("label", "", "add: a name for the address")
 	approverKey := fs.String("approver-key", "", "approve: local approver private key file (signs the approval)")
+	useTLS := mtlsFlags(fs)
 	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	if err := useTLS(); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 || (*label != "" && op != "add") || ((*approverKey != "") != (op == "approve")) {
@@ -184,7 +188,7 @@ func callAPI(method, u, key string, body any) (int, []byte, error) {
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := apiClient.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}

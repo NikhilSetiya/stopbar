@@ -98,7 +98,7 @@ v1 assumes the **harness** (agent framework + Provenance SDK) is trusted and the
 
 ### Trust boundary: authenticated identity
 
-Who is asking comes from the gateway's authenticator (API key now, mTLS/SPIFFE next), never the request body: a body whose tenant or agent disagrees with the credential is rejected (CS-103). The identity goes into every audit record and into the decision token (decision-token v2), and the gatekeeper adapter refuses a token whose identity is not that of the request it is signing. The credential is the limit: a compromised requester holding its own key is still that caller, so this stops token theft and cross-caller reuse, not T3.
+Who is asking comes from the gateway's authenticator, never the request body. There are two credentials, one per deployment: an API key (sidecar/dev), or, in service mode, an mTLS client certificate whose single SPIFFE ID is mapped to a tenant, agent and scopes by operator configuration, never by the certificate (ADR 0006). In both cases a body whose tenant or agent disagrees with the credential is rejected (CS-103), and so, under mTLS, is a body `workload_identity` other than the certificate's SPIFFE ID. The identity goes into every audit record and into the decision token (decision-token v2), and the gatekeeper adapter refuses a token whose identity is not that of the request it is signing. The credential is the limit: a compromised requester holding its own key is still that caller, so this stops token theft and cross-caller reuse, not T3.
 
 ### Note on provenance trust
 

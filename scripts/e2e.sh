@@ -112,6 +112,9 @@ fi
 step "SDKs: TypeScript + Python unit tests, encoding detector, examples vs live stopbard (CS-181/182/183)"
 ./scripts/e2e_sdk.sh "$BIN/stopbard" "$BIN/stopbar"
 
+step "mTLS / SPIFFE client identity: certs minted per run, SDKs + CLI present them, 401/handshake refusals, audited (CS-103)"
+sdk/python/.venv/bin/python scripts/e2e_mtls.py "$BIN/stopbard" "$BIN/stopbar"  # the SDK venv has cryptography; needs the TS dist built above
+
 step "corpus attacks through live stopbard: real engine + policy, dev stubs (CS-111/112)"
 python3 scripts/e2e_corpus.py "$BIN/stopbard" "$BIN/stopbar"
 

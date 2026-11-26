@@ -44,6 +44,16 @@ except StopbarEscalated as e:
     broadcast(approved.signed_tx)
 ```
 
+**mTLS (service mode).** Against a stopbard serving https with client-certificate
+auth (CS-103), present the workload's certificate instead of an API key. Its
+SPIFFE ID is the identity, and `tenant`/`agent_id` must match what the operator
+mapped it to:
+
+```python
+sb = Client("https://stopbar.internal:7777", tenant="demo", agent_id="wallet-agent",
+            client_cert="bot.crt", client_key="bot.key", ca_cert="stopbar-ca.pem")
+```
+
 **The HTTP status alone is safe to act on:** 200 is allow and only allow, 202 is
 escalate, 403 is deny. `evaluate` returns the `Decision` on an allow and raises a
 typed error otherwise, so a missed check can never read a deny as an allow.

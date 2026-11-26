@@ -8,5 +8,5 @@ USER nonroot:nonroot
 EXPOSE 7777
 # No default args: stopbard keeps its loopback default (127.0.0.1:7777), so the
 # bare image is unreachable from outside the container. Serving on 0.0.0.0
-# needs -auth-keys (CS-103); stopbard refuses a non-loopback listen without it.
+# needs authentication, -auth-keys or mTLS (CS-103, ADR 0006); stopbard refuses a non-loopback listen without it.
 ENTRYPOINT ["/stopbard"]

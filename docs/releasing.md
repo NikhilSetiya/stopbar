@@ -62,7 +62,7 @@ cosign verify "ghcr.io/nikhilsetiya/stopbar:$V" \
 
 ## Run the image
 
-The image is distroless (`static-debian13:nonroot`): no shell, uid 65532, entrypoint `/stopbard`. With no arguments `stopbard` keeps its loopback default (`127.0.0.1:7777`), which is unreachable from outside the container. To serve it you have to listen on a non-loopback address, and **`stopbard` refuses that without `-auth-keys` (CS-103)**:
+The image is distroless (`static-debian13:nonroot`): no shell, uid 65532, entrypoint `/stopbard`. With no arguments `stopbard` keeps its loopback default (`127.0.0.1:7777`), which is unreachable from outside the container. To serve it you have to listen on a non-loopback address, and **`stopbard` refuses that without authentication: `-auth-keys`, or mTLS with `-tls-cert`, `-tls-key`, `-tls-client-ca` and `-mtls-identities` (CS-103, ADR 0006)**. With API keys:
 
 ```bash
 docker run --rm -p 7777:7777 \
