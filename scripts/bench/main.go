@@ -139,6 +139,7 @@ func main() {
 		check(err)
 		dir = d
 	}
+	check(os.MkdirAll(dir, 0o700))
 	addr, secret, proc := start(*stopbard, *policies, dir)
 
 	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{MaxIdleConnsPerHost: 4096, MaxConnsPerHost: 0}}
