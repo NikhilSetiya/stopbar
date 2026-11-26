@@ -45,7 +45,13 @@ Each request also wrote about 5.2 KB of audit records. The decision record repea
 4. **Smaller decision records.** Decision records no longer carry `request`. The request record has it, written with the consumed nonce in the same transaction or, for an approval, earlier in the chain. The decision carries `request_id` and `payload_hash`. The enriched `context` drops its copy of the request. On the harness mix this takes audit bytes per request from 5.2 KB to 3.7 KB.
    - **Audit hash v1 is unchanged**, because the hash covers whatever the body is. Old and new logs verify with the same `stopbar audit verify`, and records written before this change are untouched.
 
-5. **Compaction is of state only.** It covers expired nonces and limiter records past retention, and it rides in the unit. The hash-chained audit log is never compacted. No checkpoint or archive scheme is specified for it.
+5. **Time-ordered state keys and filled pages.**
+   - **Nonces and spent tokens** are keyed `expiry || key` with the value `0x02`.
+   - **Limiter records** are keyed `created || id`.
+   - Request ids are client-chosen, so before this every insert rewrote a random leaf page and its parents on each commit. Now inserts append, and expired entries are deleted from the front.
+   - **Migration:** `nonce.Open` rewrites entries in the old layout (key: the nonce key, value: its expiry), so an upgrade never reopens a replay. The limiter reads records whatever their key, and its next write of a record removes the record's old key.
+   - The append-only audit bucket and the ordered buckets are filled to `FillPercent` 1.0 (0.9 for reservations, which are rewritten on commit) instead of being split half-empty. On the harness this took the state file from 520 MB to 369 MB after 65,000 requests.
+6. **Compaction is of state only.** It covers expired nonces and limiter records past retention, and it rides in the unit. The hash-chained audit log is never compacted. No checkpoint or archive scheme is specified for it.
 
 ## Consequences
 
