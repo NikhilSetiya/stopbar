@@ -26,6 +26,7 @@ import (
 	"math/big"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -113,11 +114,31 @@ func (a *Adapter) Addresses() []common.Address {
 	return out
 }
 
+// ctxSpent is a spent-token store whose write can join the store.Unit in ctx
+// (nonce.Store). The trusted core's SpentStore takes no context, so SignTx
+// binds it per call.
+type ctxSpent interface {
+	ConsumeCtx(ctx context.Context, key string, until time.Time) (bool, error)
+}
+
+type boundSpent struct {
+	ctx context.Context
+	s   ctxSpent
+}
+
+func (b boundSpent) Consume(key string, until time.Time) (bool, error) {
+	return b.s.ConsumeCtx(b.ctx, key, until)
+}
+
 // SignTx returns the raw signed transaction and its hash. requester is the
 // authenticated identity of the request act came from (the zero Identity
 // when auth is off); a token bound to any other identity is refused.
 func (a *Adapter) SignTx(ctx context.Context, token string, act model.Action, requester auth.Identity) ([]byte, common.Hash, error) {
-	claims, err := a.verifier.Verify(token, act, requester) // step 1: core first
+	v := *a.verifier // the spent token joins the caller's state unit, if any (CS-197)
+	if cs, ok := v.Spent.(ctxSpent); ok {
+		v.Spent = boundSpent{ctx, cs}
+	}
+	claims, err := v.Verify(token, act, requester) // step 1: core first
 	if err != nil {
 		return nil, common.Hash{}, err
 	}

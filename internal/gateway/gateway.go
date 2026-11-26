@@ -44,6 +44,7 @@ import (
 	"github.com/NikhilSetiya/stopbar/internal/decision"
 	"github.com/NikhilSetiya/stopbar/internal/model"
 	"github.com/NikhilSetiya/stopbar/internal/nonce"
+	"github.com/NikhilSetiya/stopbar/internal/store"
 )
 
 // MaxBodyBytes bounds a request body (LLD §4).
@@ -213,7 +214,7 @@ const NonceRetention = model.MaxTTL + 2*ClockSkew
 // The accepted request's audit entry is written in the same transaction as
 // the consumed nonce.
 type NonceStore interface {
-	ConsumeWith(key string, until time.Time, entry *model.AuditEntry) (fresh bool, err error)
+	ConsumeWith(ctx context.Context, key string, until time.Time, entry *model.AuditEntry) (fresh bool, err error)
 }
 
 var codeStatus = map[Code]int{
@@ -290,12 +291,18 @@ type Config struct {
 	Breaker Breaker
 	// Contacts serves /v1/contacts (CS-134); nil (or auth off) disables it.
 	Contacts Contacts
+	// State is the state file. When set, each evaluation's writes (nonce,
+	// reservation, records, spent token, commit) join one store.Unit and are
+	// committed in one transaction before the answer is written (CS-197).
+	// nil: each component writes on its own.
+	State *store.DB
 }
 
 // Gateway is an http.Handler serving the Stopbar API.
 type Gateway struct {
 	eval     Evaluator
 	nonces   NonceStore
+	state    *store.DB
 	keys     func() []decision.JWK
 	extra    func() map[string]uint64
 	clock    func() time.Time
@@ -314,7 +321,7 @@ type Gateway struct {
 
 // New returns a Gateway.
 func New(cfg Config) *Gateway {
-	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, keys: cfg.Keys, extra: cfg.Counters, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux(),
+	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, state: cfg.State, keys: cfg.Keys, extra: cfg.Counters, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux(),
 		auth: cfg.Authenticator, audit: cfg.Audit, rate: newRateLimiter(cfg.RatePerMin), approver: cfg.Approver, actions: cfg.Actions, breaker: cfg.Breaker,
 		contacts: cfg.Contacts, routes: map[string]map[string]func(http.ResponseWriter, *http.Request) error{}}
 	if g.log == nil {
@@ -431,7 +438,17 @@ func (g *Gateway) evaluate(w http.ResponseWriter, r *http.Request) error {
 		}
 		ctx = auth.WithIdentity(ctx, id)
 	}
-	if err := g.checkFresh(req); err != nil {
+	// One evaluation, one transaction (CS-197, ADR 0009): every write below
+	// joins u, and nothing is answered until u is durable. If it cannot be
+	// written, nothing of it is (nonce, reservation, records, spent token,
+	// commit all roll back) and the caller gets a 500, never the decision.
+	var u *store.Unit
+	if g.state != nil {
+		u = g.state.NewUnit()
+		ctx = store.WithUnit(ctx, u)
+		defer func() { _ = u.Commit() }() // an early return still settles what joined (failure paths, panics)
+	}
+	if err := g.checkFresh(ctx, req); err != nil {
 		return err
 	}
 	if g.eval == nil {
@@ -446,6 +463,14 @@ func (g *Gateway) evaluate(w http.ResponseWriter, r *http.Request) error {
 	if verr := d.Validate(); verr != nil || d.RequestID != req.ID {
 		g.log.Error("evaluator returned invalid decision", "request_id", req.ID, "decision_request_id", d.RequestID, "err", verr)
 		return withID(fail(CodeInternal, "evaluation failed"), req.ID)
+	}
+	if u != nil {
+		if err := u.Commit(); err != nil {
+			g.metrics.unwritten()
+			g.log.Error("state write failed; nothing of this evaluation was recorded, answering 500", "severity", "high",
+				"request_id", req.ID, "outcome", d.Outcome, "err", err)
+			return withID(fail(CodeInternal, "state unavailable"), req.ID)
+		}
 	}
 	g.metrics.decision(d.Outcome)
 	return g.writeJSON(w, "/v1/evaluate", outcomeStatus[d.Outcome], d)
@@ -958,7 +983,7 @@ func (g *Gateway) auditReject(ctx context.Context, id auth.Identity, req model.A
 // checkFresh enforces the time window (both directions) and spends the
 // nonce. It runs before evaluation, so the nonce is consumed whatever the
 // engine decides.
-func (g *Gateway) checkFresh(req model.ActionRequest) error {
+func (g *Gateway) checkFresh(ctx context.Context, req model.ActionRequest) error {
 	now := g.clock()
 	switch {
 	case req.IssuedAt.After(now.Add(ClockSkew)):
@@ -966,7 +991,7 @@ func (g *Gateway) checkFresh(req model.ActionRequest) error {
 	case !now.Before(req.IssuedAt.Add(time.Duration(req.TTLSeconds)*time.Second + ClockSkew)):
 		return withID(fail(CodeExpired, "request expired (issued_at + ttl_seconds + %s skew has passed)", ClockSkew), req.ID)
 	}
-	fresh, err := g.nonces.ConsumeWith(nonce.Key(req.Tenant, req.Actor.AgentID, req.Nonce), now.Add(NonceRetention),
+	fresh, err := g.nonces.ConsumeWith(ctx, nonce.Key(req.Tenant, req.Actor.AgentID, req.Nonce), now.Add(NonceRetention),
 		&model.AuditEntry{Type: model.AuditRequest, Body: req})
 	if err != nil {
 		g.log.Error("nonce store failed; failing closed", "request_id", req.ID, "err", err)

@@ -1,0 +1,23 @@
+name: bench
+# CS-197: the official NFR-1/NFR-2 measurement (docs/benchmarks.md). Manual
+# only: a shared runner is too noisy to gate PRs on latency. Run it from the
+# Actions tab or `gh workflow run bench.yml`, then record the printed numbers
+# and the run link in docs/benchmarks.md.
+on:
+  workflow_dispatch:
+    inputs:
+      rate: {description: "requests per second", default: "1000"}
+      duration: {description: "measured duration", default: "60s"}
+permissions: {contents: read}
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: {go-version-file: go.mod}
+      - name: runner
+        run: nproc; lscpu | grep -E 'Model name|^CPU\(s\)'; free -h; df -h "$RUNNER_TEMP"; uname -a
+      - name: make bench
+        env: {RATE: "${{ inputs.rate }}", DURATION: "${{ inputs.duration }}"}
+        run: make bench

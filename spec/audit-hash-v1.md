@@ -27,6 +27,11 @@ Constraints:
 - `ts` is hashed as the exact string stored; verifiers must not re-format it.
 - Monetary values inside `body` are decimal strings, never JSON numbers.
 - `v` is bumped for any change to the preimage. Verifiers reject unknown versions.
+- `body` is opaque to the hash. Changing what a record type puts in its body
+  does not change the preimage format, so it needs no new `v`. CS-197 (ADR 0009)
+  dropped the repeated request from `decision` bodies (it stays in the `request`
+  record). Logs written before and after that change verify alike under v1, and
+  the existing test vectors are unchanged.
 
 Test vectors: `internal/canon/jcs_test.go` (RFC 8785 Appendix B numbers, §3.2.2
 example, §3.2.3 key ordering; cross-checked against V8 `JSON.stringify` on

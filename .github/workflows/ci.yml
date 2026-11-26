@@ -40,6 +40,11 @@ jobs:
           python3 scripts/e2e_corpus.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
           python3 scripts/e2e_contacts.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
           python3 scripts/e2e_breaker.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
+      # Load harness smoke (CS-197): a few seconds at low rate against a real
+      # gatekeeper stopbard with auth and a state dir; fails on any wrong
+      # outcome or error. Correctness only, not a latency gate (bench.yml).
+      - name: load harness smoke
+        run: go run ./scripts/bench -stopbard "$RUNNER_TEMP/stopbard" -rate 100 -duration 5s -warmup 1s
       # Reservation and escalation lifecycle over HTTP (CS-105/151/152).
       - name: lifecycle over HTTP
         run: python3 scripts/e2e_lifecycle.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
@@ -66,6 +71,31 @@ jobs:
           echo "8d17599b42e3139f1a9c171be3798c4ed8e743ae17b84cc3435e57bf2a51ae99  $RUNNER_TEMP/foundry.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/foundry" && tar xzf "$RUNNER_TEMP/foundry.tgz" -C "$RUNNER_TEMP/foundry" anvil cast
           PATH="$RUNNER_TEMP/foundry:$PATH" ./scripts/quickstart.sh "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
+      # Release dry run (CS-196): the v* tag workflow's goreleaser config builds
+      # every binary, archive, SBOM and the image. Publishing and signing are
+      # skipped. Pins in step with release.yml and scripts/e2e.sh.
+      - uses: anchore/sbom-action/download-syft@dfcb83b97731532d72be422cbc51ee64adb6fd56 # v0.24.4
+        with: {syft-version: v1.57.2}
+      - name: goreleaser check
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with: {distribution: goreleaser, version: v2.20.3, args: check}
+      - name: goreleaser snapshot (no publish, no sign)
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: v2.20.3
+          args: release --snapshot --clean --skip=publish,sign  # block style: a comma would end a {flow} value
+      - name: release binaries report the snapshot version
+        run: |
+          dist/stopbard_linux_amd64_v1/stopbard -version | grep -q SNAPSHOT
+          dist/stopbar_linux_amd64_v1/stopbar version | grep -q SNAPSHOT
+          (cd dist && sha256sum -c checksums.txt)
+          img="$(docker images ghcr.io/nikhilsetiya/stopbar --format '{{.Repository}}:{{.Tag}}' | grep amd64 | head -1)"
+          docker run --rm "$img" -version | grep -q SNAPSHOT
+          test "$(docker inspect -f '{{.Config.User}}' "$img")" = nonroot:nonroot
+          # Non-loopback without auth (no API keys, no mTLS) must be the CS-103 refusal, not just any failure.
+          out="$(docker run --rm "$img" -listen 0.0.0.0:7777 2>&1)" && { echo "image served non-loopback without auth"; exit 1; }
+          grep -q "refusing to listen on .* without authentication" <<<"$out" || { echo "unexpected failure: $out"; exit 1; }
   lint:
     runs-on: ubuntu-latest
     steps:

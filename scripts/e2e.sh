@@ -118,6 +118,9 @@ sdk/python/.venv/bin/python scripts/e2e_mtls.py "$BIN/stopbard" "$BIN/stopbar"  
 step "corpus attacks through live stopbard: real engine + policy, dev stubs (CS-111/112)"
 python3 scripts/e2e_corpus.py "$BIN/stopbard" "$BIN/stopbar"
 
+step "load harness smoke: allow/escalate/deny at low rate, gatekeeper + auth + state dir, no errors (CS-197; numbers: make bench)"
+go run ./scripts/bench -stopbard "$BIN/stopbard" -rate 100 -duration 5s -warmup 1s
+
 step "reservation + escalation lifecycle over HTTP: commit/release, poll, reject/approve CLI, timeout (CS-105/151/152)"
 # The SDK venv (built by the SDK step above) has the 'approver' extra the
 # script's Python SDK calls need to sign; CI installs it with pyyaml.
@@ -140,6 +143,7 @@ step "README quickstart, verbatim: init, Anvil, sample agent, 2-of-2 approve, co
 # Tool pins; keep in step with .github/workflows/ci.yml.
 GOLANGCI_LINT=v2.15.0
 GOVULNCHECK=v1.9.0
+GORELEASER=v2.20.3  # also .github/workflows/release.yml; syft v1.57.2, cosign v3.1.5 there
 
 # Lint is required: a skipped lint let a CI failure through once. A stale
 # binary (e.g. v1) fails too, since its findings differ from CI's.
@@ -152,6 +156,20 @@ fi
 step golangci-lint; golangci-lint run
 if [[ "${OFFLINE:-0}" != 1 ]]; then
   step govulncheck; go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK}" ./...
+fi
+
+# Release dry run (CS-196), as in CI. Local-only skip like anvil: goreleaser
+# needs Go 1.27 to build from source, so it is not forced on every machine.
+if goreleaser --version 2>/dev/null | grep -q "GitVersion: *${GORELEASER#v}$"; then
+  step "release dry run: goreleaser check + snapshot (no publish, no sign) (CS-196)"
+  goreleaser check
+  skip=publish,sign
+  docker info >/dev/null 2>&1 || { echo "note: no docker daemon, image build skipped (CI builds it)"; skip+=,docker; }
+  command -v syft >/dev/null || { echo "note: syft not installed, SBOMs skipped (CI makes them)"; skip+=,sbom; }
+  goreleaser release --snapshot --clean --skip="$skip" >"$BIN/goreleaser.log" 2>&1 || { cat "$BIN/goreleaser.log"; exit 1; }
+  (cd dist && shasum -a 256 -c checksums.txt >/dev/null) && echo "ok   snapshot built, checksums verify"
+else
+  echo "SKIP release dry run: goreleaser ${GORELEASER} not installed (https://github.com/goreleaser/goreleaser/releases/tag/${GORELEASER}). CI runs it."
 fi
 
 # Pending stages, enabled as they land:
