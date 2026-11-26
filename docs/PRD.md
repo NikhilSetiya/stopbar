@@ -173,7 +173,7 @@ IDs are referenced from the [task backlog](TASKS.md).
 ### 7.10 Developer experience (FR-DX)
 
 - FR-DX-1: `stopbar init` generates a starter policy for a chosen persona.
-- FR-DX-2: Docker image and single-binary sidecar.
+- FR-DX-2: Docker image and single-binary sidecar. Built by goreleaser on each `v*` tag with keyless cosign signatures and SBOMs (NFR-7); verification in [`releasing.md`](releasing.md) (CS-196).
 - FR-DX-3: Quickstart: agent wallet protected in < 30 minutes.
 
 ## 8. Non-functional requirements
