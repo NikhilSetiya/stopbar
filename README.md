@@ -113,6 +113,69 @@ Then, as `init` prints: send `evm_tx` actions from the gatekeeper wallet through
 
 **Timed (FR-DX-3, < 30 min), 2026-11-25, Apple-silicon Mac, Go installed, empty module and build caches:** `git clone` 97 s (home network); `go build` of both binaries 22.5 s (all modules downloaded); `stopbar init` to a verified audit log 0.4 s of machine time: init 0.03 s, stopbard up 0.14 s, an allow (0.01 ETH, signed) and an escalation (0.5 ETH, `large-share-of-balance`), approver 1 (still pending) and approver 2 (allowed, signed), shutdown and `audit verify` OK. About two minutes of machine time in all; the rest of the 30 minutes is reading. CI replays the same journey on every PR (`scripts/e2e_init.py`).
 
+### End to end: Anvil, a sample agent, attacks, audit (CS-198)
+
+The whole journey from a fresh clone, as one shell session. Needs the two binaries on `PATH` (the `go build` line above; this block replaces the `init` and `stopbard` lines there), [Foundry](https://getfoundry.sh) for `anvil` and `cast`, Python ≥ 3.10 and `curl`; ports 7777 and 8545 free. The sample agent ([`examples/quickstart/agent.py`](examples/quickstart/agent.py)) pays through the Python SDK from the gatekeeper wallet `init` generated and broadcasts what Stopbar signs to Anvil; it never holds the wallet key.
+
+![The quickstart below, run end to end](docs/quickstart.gif)
+
+<sub>A real recording of `scripts/quickstart.sh` running this block (output paced for reading); regenerate it with `scripts/record_quickstart.sh` (asciinema 2.4.0 + agg 1.9.0, pinned).</sub>
+
+<!-- quickstart:begin (scripts/quickstart.sh runs this block verbatim in CI) -->
+```bash
+# 1. init: prints the API key (once) and the gatekeeper wallet; allowlist the vendor the agent pays
+out="$(stopbar init)" && echo "$out"
+export STOPBAR_URL=http://127.0.0.1:7777 STOPBAR_TENANT=demo ANVIL_URL=http://127.0.0.1:8545
+export STOPBAR_KEY="$(grep -om1 'stopbar_sk_[A-Za-z0-9_-]*' <<<"$out")"
+export STOPBAR_WALLET="$(grep -om1 'gatekeeper wallet 0x[0-9a-fA-F]*' <<<"$out" | cut -d' ' -f3)"
+python3 -c 'import json; p = "stopbar/world.json"; w = json.load(open(p))
+w["known_destinations"] = ["0x7a25a1c4e3b2d1f09876543210fedcba98760c21"]  # the vendor (corpus CS-2026-0011)
+json.dump(w, open(p, "w"), indent=2)'
+
+# 2. a local chain (chain id 8453, as init's dev world) with the gatekeeper wallet funded with 1 ETH
+anvil --chain-id 8453 --silent & ANVIL_PID=$!
+until cast chain-id >/dev/null 2>&1; do sleep 0.2; done
+cast rpc anvil_setBalance "$STOPBAR_WALLET" 0x0de0b6b3a7640000 >/dev/null
+
+# 3. stopbard from the generated config: loopback, auth on, gatekeeper, 2-of-2 approvals
+stopbard -config stopbar/stopbard.json >stopbar/stopbard.log 2>&1 & STOPBARD_PID=$!
+until curl -sf "$STOPBAR_URL/v1/keys" >/dev/null; do sleep 0.2; done
+
+# 4. the sample agent: an allow (signed, broadcast), an escalation, two corpus attacks
+export PYTHONPATH=sdk/python   # the SDK, stdlib only (or: pip install ./sdk/python)
+python3 examples/quickstart/agent.py | tee stopbar/agent.out
+eval "$(grep '^export ' stopbar/agent.out)"   # PAYMENT and POISONED: the two escalations' request ids
+
+# 5. the approvers: 2-of-2 on the payment (the first signature alone leaves it pending), reject the look-alike
+stopbar approve "$PAYMENT" --approver-key stopbar/approver-1.key --url "$STOPBAR_URL" --key "$STOPBAR_KEY" || true
+stopbar approve "$PAYMENT" --approver-key stopbar/approver-2.key --url "$STOPBAR_URL" --key "$STOPBAR_KEY"
+stopbar reject "$POISONED" --approver-key stopbar/approver-1.key --url "$STOPBAR_URL" --key "$STOPBAR_KEY"
+python3 examples/quickstart/agent.py resume "$PAYMENT"   # the agent broadcasts the approved tx
+
+# 6. T3: a compromised requester with the agent's key, no SDK, forged clean provenance
+python3 examples/quickstart/compromised_requester.py
+
+# 7. stop stopbard (it signs a final checkpoint) and verify the audit log offline
+kill "$STOPBARD_PID" "$ANVIL_PID"; wait "$STOPBARD_PID"
+stopbar audit verify --state-dir stopbar/state --decision-key stopbar/decision.key --require-covered
+```
+<!-- quickstart:end -->
+
+What each step shows:
+
+| Step | Request | Stopbar |
+|---|---|---|
+| 4.1 | 0.01 ETH to Bob | 200 allow; stopbard signs, the agent broadcasts it on Anvil and commits it |
+| 4.2 | 0.5 ETH to Bob (half the balance) | 202 escalate, `large-share-of-balance`; nothing signed |
+| 4.3 | 100 USDC to a look-alike of the allowlisted vendor ([CS-2026-0011](corpus/attacks/CS-2026-0011-address-poisoning.yaml)) | 202 escalate, `address-poisoning`: the starter pack holds it for a human, never signs it |
+| 4.4 | Safe batch hiding `approve(attacker, 2^256-1)` next to a 25 USDC payment ([CS-2026-0008](corpus/attacks/CS-2026-0008-approval-hidden-in-safe-batch.yaml), corpus calldata, its fixture token swapped for USDC) | 403 deny, `unlimited-approval` |
+| 5 | approver 1, then approver 2, on the 0.5 ETH; approver 1 rejects the look-alike | 202 (1 of 2, pending), then 200 allow with the signed tx; the look-alike 403 `APPROVAL_REJECTED` |
+| 5 | `agent.py resume` | the agent polls, broadcasts the approved tx on Anvil (Bob has 0.51 ETH) and commits it |
+| 6 | T3: unlimited USDC approval sent straight to `/v1/evaluate` with a stolen key and forged `trusted_user` | 403 deny, `unlimited-approval`; taint can't help against a lying requester, the decoded intent does |
+| 7 | `stopbar audit verify --require-covered` | OK: every decision audited, the chain and checkpoints verify |
+
+`make quickstart` (`scripts/quickstart.sh`) extracts the block above and runs it verbatim in a scratch directory, and the required CI job runs it on every PR with a pinned Anvil, so this section can't drift from what works.
+
 ---
 
 ## The problem in one line

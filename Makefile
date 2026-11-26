@@ -1,4 +1,4 @@
-.PHONY: build test fuzz vet fmt check e2e demo demo-live demo-testnet bench
+.PHONY: build test fuzz vet fmt check e2e demo demo-live demo-testnet quickstart bench
 build: ; go build ./...
 demo: ; ./scripts/demo.sh
 demo-live: ; ./scripts/demo-live.sh
@@ -9,6 +9,7 @@ vet: ; go vet ./...
 fmt: ; gofmt -w .
 check: vet test
 e2e: ; ./scripts/e2e.sh
+quickstart: ; ./scripts/quickstart.sh
 # CS-197: component micro-benchmarks, then the sidecar load harness (docs/benchmarks.md).
 bench:
 	go test -run='^$$' -bench=. -benchmem ./internal/canon ./internal/decision ./internal/decode/evm ./internal/policy ./internal/limiter ./internal/audit

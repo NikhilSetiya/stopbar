@@ -174,7 +174,7 @@ IDs are referenced from the [task backlog](TASKS.md).
 
 - FR-DX-1: `stopbar init` generates a starter policy for a chosen persona. Built (CS-195): `--persona agent-wallet` writes the policies plus a secure-by-default config, caps, keys and state dir (LLD §17.1).
 - FR-DX-2: Docker image and single-binary sidecar. Built by goreleaser on each `v*` tag with keyless cosign signatures and SBOMs (NFR-7); verification in [`releasing.md`](releasing.md) (CS-196).
-- FR-DX-3: Quickstart: agent wallet protected in < 30 minutes. Timed in the README quickstart: about two minutes of machine time from a cold clone.
+- FR-DX-3: Quickstart: agent wallet protected in < 30 minutes. Timed in the README quickstart: about two minutes of machine time from a cold clone. The README's end-to-end block (CS-198: init, Anvil, a sample SDK agent, a 2-of-2 approval, corpus attacks, a T3 request, audit verify) runs verbatim in the required CI job (`scripts/quickstart.sh`).
 
 ## 8. Non-functional requirements
 

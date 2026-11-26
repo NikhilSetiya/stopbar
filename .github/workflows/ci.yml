@@ -62,6 +62,15 @@ jobs:
       # and the CLI over https; needs the TypeScript dist the SDK step built.
       - name: mTLS over HTTPS
         run: python3 scripts/e2e_mtls.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
+      # The README's end-to-end quickstart block, verbatim (CS-198): init, Anvil,
+      # the sample agent, 2-of-2 approval, corpus attacks, T3, audit verify.
+      # Foundry is a pinned release, checksum-verified.
+      - name: README quickstart (Anvil)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/foundry.tgz" https://github.com/foundry-rs/foundry/releases/download/v1.9.0/foundry_v1.9.0_linux_amd64.tar.gz
+          echo "8d17599b42e3139f1a9c171be3798c4ed8e743ae17b84cc3435e57bf2a51ae99  $RUNNER_TEMP/foundry.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/foundry" && tar xzf "$RUNNER_TEMP/foundry.tgz" -C "$RUNNER_TEMP/foundry" anvil cast
+          PATH="$RUNNER_TEMP/foundry:$PATH" ./scripts/quickstart.sh "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
       # Release dry run (CS-196): the v* tag workflow's goreleaser config builds
       # every binary, archive, SBOM and the image. Publishing and signing are
       # skipped. Pins in step with release.yml and scripts/e2e.sh.

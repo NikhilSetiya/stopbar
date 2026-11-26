@@ -26,7 +26,7 @@ echo "--- typescript SDK: unit tests (node:test), npm pack"
 
 echo "--- stopbard: dev world, gatekeeper, auth on"
 cat >"$T/world.json" <<'EOF'
-{"balances": {"ETH": "10"}, "prices_usd": {"ETH": "3500"},
+{"balances": {"ETH": "1"}, "prices_usd": {"ETH": "3500"},
  "known_destinations": ["0x000000000000000000000000000000000000b0b0"],
  "limits": [{"scope": "wallet", "window": "24h", "max_usd": "50000", "max_count": 10}]}
 EOF
