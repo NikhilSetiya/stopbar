@@ -40,6 +40,11 @@ jobs:
           python3 scripts/e2e_corpus.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
           python3 scripts/e2e_contacts.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
           python3 scripts/e2e_breaker.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
+      # Load harness smoke (CS-197): a few seconds at low rate against a real
+      # gatekeeper stopbard with auth and a state dir; fails on any wrong
+      # outcome or error. Correctness only, not a latency gate (bench.yml).
+      - name: load harness smoke
+        run: go run ./scripts/bench -stopbard "$RUNNER_TEMP/stopbard" -rate 100 -duration 5s -warmup 1s
       # Reservation and escalation lifecycle over HTTP (CS-105/151/152).
       - name: lifecycle over HTTP
         run: python3 scripts/e2e_lifecycle.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"

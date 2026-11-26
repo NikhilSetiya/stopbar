@@ -10,6 +10,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -634,10 +635,24 @@ func deref(d *model.Decision) model.Decision {
 // record. The outcome is already deny, so a failed audit still fails closed;
 // it is counted, loudly, as an unaudited denial.
 func (e *Engine) auditRefusal(ctx context.Context, req model.ActionRequest, d model.Decision) {
-	body := addIdentity(ctx, map[string]any{"request": req, "decision": d})
+	body := addIdentity(ctx, map[string]any{"decision": d})
 	if err := e.record(ctx, func(ctx context.Context) error { return e.cfg.Audit.Append(ctx, model.AuditDecision, body) }); err != nil {
 		e.unaudited(req.ID, err)
 	}
+}
+
+// auditContext is the enriched context for a decision record, without its
+// copy of the request: the request record (written with the consumed nonce,
+// in the same transaction or earlier in the chain) holds the request, and the
+// decision carries request_id and payload_hash (CS-197: smaller records).
+func auditContext(er model.EnrichedRequest) map[string]any {
+	b, err := json.Marshal(er)
+	var m map[string]any
+	if err != nil || json.Unmarshal(b, &m) != nil {
+		return map[string]any{"marshal_error": fmt.Sprint(err)} // the record still lands: never lose the decision
+	}
+	delete(m, "request")
+	return m
 }
 
 // addIdentity puts the authenticated caller (if any) into an audit body, so
@@ -684,7 +699,7 @@ func allApproved(reasons []model.Reason, approved map[string]bool) bool {
 // verbatim if this re-run allows.
 func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time.Time, approved map[string]bool, approvals []model.Approval, requester auth.Identity) model.Decision {
 	audit := func(d model.Decision, extra map[string]any) model.Decision {
-		body := addIdentity(ctx, map[string]any{"request": req, "decision": d})
+		body := addIdentity(ctx, map[string]any{"decision": d})
 		for k, v := range extra {
 			body[k] = v
 		}
@@ -724,7 +739,7 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 	if serr != nil {
 		return audit(e.deny(req.ID, now, payloadHash, serr), map[string]any{"intent": intent})
 	}
-	ctxRecord := map[string]any{"context": er}
+	ctxRecord := map[string]any{"context": auditContext(er)}
 
 	// policy
 	var pr PolicyResult
@@ -760,7 +775,7 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 			// record and the escalate decision's audit record are one transaction.
 			pe := PendingEscalation{Request: req, Reasons: policyIDs(reasons), IssuedAt: now, Requester: requester,
 				State: model.EscalationPending, Decision: &d}
-			rec := &model.AuditEntry{Type: model.AuditDecision, Body: addIdentity(ctx, map[string]any{"request": req, "decision": d, "context": er})}
+			rec := &model.AuditEntry{Type: model.AuditDecision, Body: addIdentity(ctx, map[string]any{"decision": d, "context": auditContext(er)})}
 			if perr := e.record(ctx, func(ctx context.Context) error { return e.cfg.Pending.Put(ctx, pe, rec) }); perr != nil {
 				e.unaudited(req.ID, perr)
 				return audit(e.deny(req.ID, now, payloadHash, failed(CodeAudit, perr)), ctxRecord)
@@ -790,7 +805,7 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 	d.Token = token
 
 	// limiter: reserve + audit the allow, atomically.
-	rec := &model.AuditEntry{Type: model.AuditDecision, Body: addIdentity(ctx, map[string]any{"request": req, "decision": d, "context": er})}
+	rec := &model.AuditEntry{Type: model.AuditDecision, Body: addIdentity(ctx, map[string]any{"decision": d, "context": auditContext(er)})}
 	if err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Reserve(ctx, id, er, e.cfg.DecisionTTL, rec) }); err != nil {
 		e.release(ctx, id, "reserve failed or timed out") // a timed-out Reserve may still land
 		if errors.Is(err, ErrAuditUnavailable) {
