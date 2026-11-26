@@ -34,6 +34,11 @@ import (
 
 const usage = `usage:
   stopbar version
+  stopbar init [--persona agent-wallet] [--dir DIR] [--tenant T] [--agent ID] [--chain dev|base|base-sepolia] [--rpc URL] [--force]
+      write a ready stopbard deployment into DIR (default ./stopbar): config
+      (loopback, auth on, gatekeeper, 2-of-2 approvals), the persona's starter
+      policies, caps, decision/wallet/approver keys (0600), the agent's API key
+      (secret printed once) and a state dir; prints the next commands
   stopbar decode-tx <0x raw signed tx>   decode an EIP-1559 tx: recovered sender, every field, payload_hash
   stopbar keygen decision-key <file>     generate a Stopbar decision key (Ed25519, mode 0600)
   stopbar keygen api-key --tenant T [--agent ID] [--scopes a,b]
@@ -79,6 +84,10 @@ func main() {
 		return
 	}
 	switch os.Args[1] {
+	case "init":
+		if err := initCmd(os.Args[2:]); err != nil {
+			fail(err.Error())
+		}
 	case "audit":
 		if err := auditCmd(os.Args[2:]); err != nil {
 			fail(err.Error())
@@ -272,16 +281,23 @@ func approverCmd(args []string) error {
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("approver keygen: %s already exists; refusing to overwrite a key", path)
 	}
-	pub, priv, err := approval.GenerateKey()
+	pub, err := writeApproverKey(path)
 	if err != nil {
-		return err
-	}
-	if err := approval.WriteKeyFile(path, priv); err != nil {
 		return err
 	}
 	fmt.Printf("wrote approver key %s (kid %s, mode 0600)\n", path, approval.Kid(pub))
 	fmt.Printf("public_key (base64url, for stopbard's approver config): %s\n", base64.RawURLEncoding.EncodeToString(pub))
 	return nil
+}
+
+// writeApproverKey generates an approver key, writes it to path (0600, never
+// over an existing file) and returns its public half.
+func writeApproverKey(path string) (ed25519.PublicKey, error) {
+	pub, priv, err := approval.GenerateKey()
+	if err != nil {
+		return nil, err
+	}
+	return pub, approval.WriteKeyFile(path, priv)
 }
 
 // approveCmd fetches the escalation's current {escalation_id, payload_hash}
@@ -456,14 +472,11 @@ func keygenCmd(args []string) error {
 		if _, err := os.Stat(path); err == nil {
 			return fmt.Errorf("keygen: %s already exists; refusing to overwrite a key", path)
 		}
-		pub, priv, err := ed25519.GenerateKey(nil)
+		kid, err := writeDecisionKey(path)
 		if err != nil {
 			return err
 		}
-		if err := decision.WriteKeyFile(path, priv); err != nil {
-			return err
-		}
-		fmt.Printf("wrote decision key %s (kid %s, mode 0600)\n", path, decision.Kid(pub))
+		fmt.Printf("wrote decision key %s (kid %s, mode 0600)\n", path, kid)
 		return nil
 	case "api-key":
 		fs := flag.NewFlagSet("keygen api-key", flag.ContinueOnError)
@@ -476,19 +489,9 @@ func keygenCmd(args []string) error {
 		if *tenant == "" {
 			return errors.New("keygen api-key: --tenant is required")
 		}
-		raw := make([]byte, 24)
-		if _, err := rand.Read(raw); err != nil {
+		secret, rec, err := newAPIKey(*tenant, *agent, strings.Split(*scopes, ","))
+		if err != nil {
 			return err
-		}
-		secret := "stopbar_sk_" + base64.RawURLEncoding.EncodeToString(raw)
-		sum := sha256.Sum256([]byte(secret))
-		rec := map[string]any{
-			"id":          "ak_" + hex.EncodeToString(sum[:4]),
-			"tenant":      *tenant,
-			"agent_id":    *agent,
-			"scopes":      strings.Split(*scopes, ","),
-			"sha256":      hex.EncodeToString(sum[:]),
-			"created_utc": time.Now().UTC().Format(time.RFC3339),
 		}
 		recJSON, err := json.MarshalIndent(rec, "", "  ")
 		if err != nil {
@@ -501,4 +504,33 @@ func keygenCmd(args []string) error {
 	default:
 		return errors.New(usage)
 	}
+}
+
+// writeDecisionKey generates an Ed25519 decision key, writes it to path in
+// Stopbar's tagged format (0600) and returns its kid.
+func writeDecisionKey(path string) (string, error) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return "", err
+	}
+	return decision.Kid(pub), decision.WriteKeyFile(path, priv)
+}
+
+// newAPIKey returns a fresh API key secret and the hashed record stopbard's
+// -auth-keys store holds. The secret itself is never stored.
+func newAPIKey(tenant, agent string, scopes []string) (string, map[string]any, error) {
+	raw := make([]byte, 24)
+	if _, err := rand.Read(raw); err != nil {
+		return "", nil, err
+	}
+	secret := "stopbar_sk_" + base64.RawURLEncoding.EncodeToString(raw)
+	sum := sha256.Sum256([]byte(secret))
+	return secret, map[string]any{
+		"id":          "ak_" + hex.EncodeToString(sum[:4]),
+		"tenant":      tenant,
+		"agent_id":    agent,
+		"scopes":      scopes,
+		"sha256":      hex.EncodeToString(sum[:]),
+		"created_utc": time.Now().UTC().Format(time.RFC3339),
+	}, nil
 }

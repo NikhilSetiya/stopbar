@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -51,7 +50,6 @@ type Log struct {
 	signer CheckpointSigner
 	every  uint64
 	clock  func() time.Time
-	mu     sync.Mutex // serialises Append's own transactions with Checkpoint
 }
 
 // Config wires a Log.
@@ -126,7 +124,9 @@ func (l *Log) AppendTx(tx *bolt.Tx, e model.AuditEntry) error {
 	if err != nil {
 		return err
 	}
-	if err := tx.Bucket(recordsBucket).Put(seqKey(r.Seq), b); err != nil {
+	rb := tx.Bucket(recordsBucket)
+	rb.FillPercent = 1 // append-only by seq: fill pages, don't leave them half empty (CS-197)
+	if err := rb.Put(seqKey(r.Seq), b); err != nil {
 		return err
 	}
 	if l.signer != nil && r.Seq%l.every == 0 {
@@ -142,10 +142,14 @@ func (l *Log) Op(e model.AuditEntry) store.Op {
 
 // Append writes a record in its own transaction (engine.AuditLog). Records
 // with no state change of their own (deny, escalate) come through here.
-func (l *Log) Append(_ context.Context, typ model.AuditRecordType, body any) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if err := l.db.Update(l.Op(model.AuditEntry{Type: typ, Body: body})); err != nil {
+// It takes no lock of its own: the chain head is read inside the write
+// transaction, so concurrent appends (group-committed by the store) chain in
+// commit order.
+//
+// Under a context carrying a store.Unit it joins that unit (CS-197): the
+// record is written with the evaluation's other state, in one transaction.
+func (l *Log) Append(ctx context.Context, typ model.AuditRecordType, body any) error {
+	if err := l.db.Write(ctx, l.Op(model.AuditEntry{Type: typ, Body: body}), nil); err != nil {
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	return nil
@@ -157,8 +161,6 @@ func (l *Log) Checkpoint() error {
 	if l.signer == nil {
 		return errors.New("audit: no checkpoint signer")
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	return l.db.Update(func(tx *bolt.Tx) error {
 		seq, h, err := head(tx)
 		if err != nil || seq == 0 {

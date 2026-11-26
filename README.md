@@ -84,6 +84,35 @@ make e2e     # everything CI runs, plus corpus replay against a live stopbard
 make check   # vet + race tests
 ```
 
+## Quickstart: protect an agent wallet (`stopbar init`)
+
+Needs Go (the toolchain in `go.mod` is fetched automatically).
+
+```bash
+git clone https://github.com/NikhilSetiya/stopbar && cd stopbar
+go build -o bin/ ./cmd/stopbar ./cmd/stopbard && export PATH="$PWD/bin:$PATH"
+stopbar init                                  # writes ./stopbar/ and prints the API key ONCE and the next commands
+stopbard -config stopbar/stopbard.json        # loopback 127.0.0.1:7777, auth on, gatekeeper, 2-of-2 approvals
+```
+
+`stopbar init [--persona agent-wallet] [--dir DIR] [--tenant T] [--agent ID] [--chain dev|base|base-sepolia] [--rpc URL] [--force]` writes into `DIR` (default `./stopbar`):
+
+| File | What it is |
+|---|---|
+| `stopbard.json` | the `stopbard -config` file: listens on `127.0.0.1:7777` only, `auth_keys` set, `approvers` set, `approval_quorum` and `breaker_quorum` 2, `rate_per_min` 600, gatekeeper wallet |
+| `policies/` | the agent-wallet starter pack ([`examples/policies`](examples/policies/), embedded in the binary byte for byte) |
+| `world.json` | caps (the default limits: $5,000/h per wallet, $20,000/h per tenant, the salami soft cap), `known_destinations` (your allowlist, empty) and the price/balance source: `--chain dev` (default) is static, offline prices (1 ETH at $3,500, 1,000 USDC); `--chain base` or `base-sepolia` reads balances and Chainlink prices from the chain (`--rpc` overrides the public RPC) |
+| `decision.key`, `wallet.key` | the decision signing key and a fresh gatekeeper wallet (stopbard signs for it; the agent never holds it) |
+| `api-keys.json` | the agent's API key record, hashed, scope `evaluate`. The secret is printed once and written nowhere |
+| `approvers.json`, `approver-1.key`, `approver-2.key` | two Ed25519 approver keys (give each to a different person) and their public halves |
+| `state/` | `state.db`: limiter, nonces and the audit log |
+
+Every file holding a key or a config is mode 0600. A second `init` refuses to overwrite anything; `--force` regenerates the files, but never runs over an existing `state/state.db` (it holds the audit log signed with the old decision key). `--persona agent-wallet` is the only persona so far (FR-DX-1).
+
+Then, as `init` prints: send `evm_tx` actions from the gatekeeper wallet through the SDK (`STOPBAR_URL`, `STOPBAR_KEY`, `STOPBAR_TENANT`); an allow returns the signed transaction, an escalation (HTTP 202) is approved by both approvers with `stopbar approve <request_id> --approver-key stopbar/approver-N.key --url http://127.0.0.1:7777 --key "$STOPBAR_KEY"`, and after stopping stopbard `stopbar audit verify --state-dir stopbar/state --decision-key stopbar/decision.key --require-covered` checks the log offline.
+
+**Timed (FR-DX-3, < 30 min), 2026-11-25, Apple-silicon Mac, Go installed, empty module and build caches:** `git clone` 97 s (home network); `go build` of both binaries 22.5 s (all modules downloaded); `stopbar init` to a verified audit log 0.4 s of machine time: init 0.03 s, stopbard up 0.14 s, an allow (0.01 ETH, signed) and an escalation (0.5 ETH, `large-share-of-balance`), approver 1 (still pending) and approver 2 (allowed, signed), shutdown and `audit verify` OK. About two minutes of machine time in all; the rest of the 30 minutes is reading. CI replays the same journey on every PR (`scripts/e2e_init.py`).
+
 ---
 
 ## The problem in one line
@@ -147,6 +176,7 @@ The image keeps `stopbard`'s loopback default; serving outside the container nee
 | [HLD](docs/HLD.md) | Architecture, trust boundaries, flows, threat model |
 | [LLD](docs/LLD.md) | Data models, policy language, algorithms, APIs |
 | [TASKS](docs/TASKS.md) | Full build backlog with acceptance criteria |
+| [Benchmarks](docs/benchmarks.md) | Latency and throughput against NFR-1/2, with the exact command and environment |
 | [Attack corpus](corpus/) | Schema + seed attacks |
 | [Spec](spec/) | Wire schemas, fixtures, audit-hash v1 |
 | [Releases](docs/releasing.md) | Install, verify signed binaries and image, cut a release |

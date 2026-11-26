@@ -1,6 +1,8 @@
 package limiter
 
 import (
+	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,7 +72,7 @@ func fromRecord(r Record) (*entry, error) {
 // returns every open breaker.
 type Store interface {
 	Put(r Record, entry *model.AuditEntry) error
-	Delete(ids []string) error
+	Delete(recs []Record) error
 	Load() ([]Record, error)
 	PutBreaker(b model.BreakerStatus, entries ...*model.AuditEntry) error
 	LoadBreakers() ([]model.BreakerStatus, error)
@@ -87,7 +89,7 @@ func (MemStore) Put(_ Record, entry *model.AuditEntry) error {
 	}
 	return nil
 }
-func (MemStore) Delete([]string) error   { return nil }
+func (MemStore) Delete([]Record) error   { return nil }
 func (MemStore) Load() ([]Record, error) { return nil, nil }
 
 // PutBreaker refuses: every breaker change is audited, and MemStore cannot
@@ -164,30 +166,75 @@ func (s *BoltStore) LoadBreakers() ([]model.BreakerStatus, error) {
 	return out, err
 }
 
+// UnitStore is a Store whose writes can join the store.Unit in ctx (CS-197).
+// after(err) runs once the write has landed or failed.
+type UnitStore interface {
+	PutCtx(ctx context.Context, r Record, entry *model.AuditEntry, after func(error)) error
+	DeleteCtx(ctx context.Context, recs []Record) // best effort compaction; never fails the unit
+}
+
 func (s *BoltStore) Put(r Record, entry *model.AuditEntry) error {
+	return s.PutCtx(context.Background(), r, entry, nil)
+}
+
+// PutCtx is Put joining the unit in ctx, if any (store.DB.Write).
+func (s *BoltStore) PutCtx(ctx context.Context, r Record, entry *model.AuditEntry, after func(error)) error {
 	b, err := json.Marshal(r)
+	if err == nil && entry != nil && s.log == nil {
+		err = errors.New("limiter: no audit log configured")
+	}
 	if err != nil {
+		if after != nil {
+			after(err)
+		}
 		return err
 	}
-	if entry != nil && s.log == nil {
-		return errors.New("limiter: no audit log configured")
-	}
-	return s.db.Update(func(tx *bolt.Tx) error {
-		if err := tx.Bucket(boltBucket).Put([]byte(r.ID), b); err != nil {
+	return s.db.Write(ctx, func(tx *bolt.Tx) error {
+		bk := tx.Bucket(boltBucket)
+		// The pre-CS-197 key, if this record has one (a no-op otherwise).
+		_ = bk.Delete([]byte(r.ID))
+		// Keys sort by creation, so inserts append; 0.9 leaves headroom for the commit rewrite.
+		bk.FillPercent = 0.9
+		if err := bk.Put(recordKey(r), b); err != nil {
 			return err
 		}
 		if entry != nil {
 			return s.log.AppendTx(tx, *entry)
 		}
 		return nil
-	})
+	}, after)
 }
 
-func (s *BoltStore) Delete(ids []string) error {
+// recordKey is created(8 bytes, big-endian Unix ns) || id: records sort by
+// creation, so new ones append at the end of the B+tree instead of dirtying
+// a random leaf page each (request ids are client-chosen), and retention
+// compaction deletes from the front (CS-197). Records written before this
+// are keyed by id alone; Load reads both, and Put and Delete remove the old
+// key.
+func recordKey(r Record) []byte {
+	k := binary.BigEndian.AppendUint64(make([]byte, 0, 8+len(r.ID)), uint64(r.Created.UnixNano()))
+	return append(k, r.ID...)
+}
+
+func (s *BoltStore) DeleteCtx(ctx context.Context, recs []Record) {
+	_ = s.db.Write(ctx, func(tx *bolt.Tx) error {
+		bk := tx.Bucket(boltBucket)
+		for _, r := range recs {
+			_ = bk.Delete(recordKey(r))
+			_ = bk.Delete([]byte(r.ID))
+		}
+		return nil
+	}, nil)
+}
+
+func (s *BoltStore) Delete(recs []Record) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bk := tx.Bucket(boltBucket)
-		for _, id := range ids {
-			if err := bk.Delete([]byte(id)); err != nil {
+		for _, r := range recs {
+			if err := bk.Delete(recordKey(r)); err != nil {
+				return err
+			}
+			if err := bk.Delete([]byte(r.ID)); err != nil {
 				return err
 			}
 		}

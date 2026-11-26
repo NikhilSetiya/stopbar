@@ -122,6 +122,7 @@ func (r *Registry) Request(tenant, addr, label string, by auth.Identity, now tim
 	c := model.Contact{ID: id, Tenant: tenant, Address: a, Label: label, Status: model.ContactPendingApproval,
 		RequestedBy: by.KeyID, RequestedByAgent: by.AgentID, RequestedAt: now.UTC(), Quorum: r.Quorum, SimilarTo: []model.SimilarContact{}}
 	err = r.db.Update(func(tx *bolt.Tx) error {
+		c.SimilarTo = []model.SimilarContact{} // the store may run this more than once
 		b := tx.Bucket(registryBucket)
 		if b.Get(contactKey(tenant, a)) != nil {
 			return model.ErrContactExists
@@ -252,6 +253,7 @@ func (r *Registry) Seed(tenant, addr string, now time.Time) (bool, error) {
 		RequestedAt: at, ApprovedBy: "dev-world", ApprovedAt: &at, ActiveFrom: &at, SimilarTo: []model.SimilarContact{}}
 	added := false
 	err = r.db.Update(func(tx *bolt.Tx) error {
+		added = false // the store may run this more than once
 		if tx.Bucket(registryBucket).Get(contactKey(tenant, a)) != nil {
 			return nil
 		}

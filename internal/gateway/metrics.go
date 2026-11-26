@@ -18,6 +18,7 @@ type metrics struct {
 	requests   map[[2]string]uint64 // {route, status}
 	rejections map[string]uint64    // code
 	decisions  map[string]uint64    // outcome
+	unwrittenN uint64               // evaluations whose state unit failed to commit (answered 500)
 }
 
 func newMetrics() *metrics {
@@ -33,6 +34,12 @@ func (m *metrics) request(route string, status int) {
 func (m *metrics) rejection(c Code) {
 	m.mu.Lock()
 	m.rejections[string(c)]++
+	m.mu.Unlock()
+}
+
+func (m *metrics) unwritten() {
+	m.mu.Lock()
+	m.unwrittenN++
 	m.mu.Unlock()
 }
 
@@ -65,6 +72,7 @@ func (m *metrics) render() string {
 	}
 	writeCounter(&w, "stopbar_gateway_rejections_total", "Requests rejected by the gateway, by error code.", "code", m.rejections)
 	writeCounter(&w, "stopbar_decisions_total", "Decisions returned, by outcome.", "outcome", m.decisions)
+	fmt.Fprintf(&w, "# HELP stopbar_state_write_failures_total Evaluations whose state transaction failed: nothing recorded, answered 500.\n# TYPE stopbar_state_write_failures_total counter\nstopbar_state_write_failures_total %d\n", m.unwrittenN)
 	return w.String()
 }
 
