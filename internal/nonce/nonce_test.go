@@ -1,17 +1,73 @@
 package nonce
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"path/filepath"
-
-	"github.com/NikhilSetiya/stopbar/internal/audit"
-	"github.com/NikhilSetiya/stopbar/internal/model"
-	"github.com/NikhilSetiya/stopbar/internal/store"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
+
+	"github.com/NikhilSetiya/stopbar/internal/audit"
+	"github.com/NikhilSetiya/stopbar/internal/model"
+	"github.com/NikhilSetiya/stopbar/internal/store"
 )
+
+// TestLegacyEntriesMigrateAndKeysSortByExpiry (CS-197): entries written
+// before the ordered layout (key: nonce key, value: expiry) are loaded and
+// rewritten once by Open, so an upgrade never reopens a replay; new entries
+// sort by expiry on disk.
+func TestLegacyEntriesMigrateAndKeysSortByExpiry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	c := newClock()
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	old := Key("acme", "agent", "legacy")
+	if err := db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte("nonces"))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(old), binary.BigEndian.AppendUint64(nil, uint64(c.Now().Add(time.Hour).UnixNano())))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(db, "nonces", nil, c.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh, _ := s.Consume(old, c.Now().Add(time.Hour)); fresh {
+		t.Fatal("legacy nonce lost on upgrade: replay reopened")
+	}
+	for _, n := range []string{"b", "a"} { // name order is the reverse of expiry order
+		if fresh, err := s.Consume(Key("acme", "agent", n), c.Now().Add(time.Minute)); !fresh || err != nil {
+			t.Fatal(n, fresh, err)
+		}
+		c.Advance(time.Second)
+	}
+	var keys [][]byte
+	_ = db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte("nonces")).ForEach(func(k, v []byte) error {
+			if len(v) != 1 {
+				t.Errorf("entry %q still in the legacy layout", k)
+			}
+			keys = append(keys, append([]byte(nil), k...))
+			return nil
+		})
+	})
+	if len(keys) != 3 || !bytes.Contains(keys[0], []byte(`"b"`)) || !bytes.Contains(keys[1], []byte(`"a"`)) ||
+		!slices.IsSortedFunc(keys, func(a, b []byte) int { return bytes.Compare(a[:8], b[:8]) }) {
+		t.Fatalf("keys not sorted by expiry: %q", keys)
+	}
+}
 
 type clock struct{ ns atomic.Int64 }
 

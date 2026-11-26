@@ -2,6 +2,7 @@ package limiter
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,7 +72,7 @@ func fromRecord(r Record) (*entry, error) {
 // returns every open breaker.
 type Store interface {
 	Put(r Record, entry *model.AuditEntry) error
-	Delete(ids []string) error
+	Delete(recs []Record) error
 	Load() ([]Record, error)
 	PutBreaker(b model.BreakerStatus, entries ...*model.AuditEntry) error
 	LoadBreakers() ([]model.BreakerStatus, error)
@@ -88,7 +89,7 @@ func (MemStore) Put(_ Record, entry *model.AuditEntry) error {
 	}
 	return nil
 }
-func (MemStore) Delete([]string) error   { return nil }
+func (MemStore) Delete([]Record) error   { return nil }
 func (MemStore) Load() ([]Record, error) { return nil, nil }
 
 // PutBreaker refuses: every breaker change is audited, and MemStore cannot
@@ -169,7 +170,7 @@ func (s *BoltStore) LoadBreakers() ([]model.BreakerStatus, error) {
 // after(err) runs once the write has landed or failed.
 type UnitStore interface {
 	PutCtx(ctx context.Context, r Record, entry *model.AuditEntry, after func(error)) error
-	DeleteCtx(ctx context.Context, ids []string) // best effort compaction; never fails the unit
+	DeleteCtx(ctx context.Context, recs []Record) // best effort compaction; never fails the unit
 }
 
 func (s *BoltStore) Put(r Record, entry *model.AuditEntry) error {
@@ -189,7 +190,9 @@ func (s *BoltStore) PutCtx(ctx context.Context, r Record, entry *model.AuditEntr
 		return err
 	}
 	return s.db.Write(ctx, func(tx *bolt.Tx) error {
-		if err := tx.Bucket(boltBucket).Put([]byte(r.ID), b); err != nil {
+		bk := tx.Bucket(boltBucket)
+		_ = bk.Delete([]byte(r.ID)) // the pre-CS-197 key, if this record has one (a no-op otherwise)
+		if err := bk.Put(recordKey(r), b); err != nil {
 			return err
 		}
 		if entry != nil {
@@ -199,21 +202,36 @@ func (s *BoltStore) PutCtx(ctx context.Context, r Record, entry *model.AuditEntr
 	}, after)
 }
 
-func (s *BoltStore) DeleteCtx(ctx context.Context, ids []string) {
+// recordKey is created(8 bytes, big-endian Unix ns) || id: records sort by
+// creation, so new ones append at the end of the B+tree instead of dirtying
+// a random leaf page each (request ids are client-chosen), and retention
+// compaction deletes from the front (CS-197). Records written before this
+// are keyed by id alone; Load reads both, and Put and Delete remove the old
+// key.
+func recordKey(r Record) []byte {
+	k := binary.BigEndian.AppendUint64(make([]byte, 0, 8+len(r.ID)), uint64(r.Created.UnixNano()))
+	return append(k, r.ID...)
+}
+
+func (s *BoltStore) DeleteCtx(ctx context.Context, recs []Record) {
 	_ = s.db.Write(ctx, func(tx *bolt.Tx) error {
 		bk := tx.Bucket(boltBucket)
-		for _, id := range ids {
-			_ = bk.Delete([]byte(id))
+		for _, r := range recs {
+			_ = bk.Delete(recordKey(r))
+			_ = bk.Delete([]byte(r.ID))
 		}
 		return nil
 	}, nil)
 }
 
-func (s *BoltStore) Delete(ids []string) error {
+func (s *BoltStore) Delete(recs []Record) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bk := tx.Bucket(boltBucket)
-		for _, id := range ids {
-			if err := bk.Delete([]byte(id)); err != nil {
+		for _, r := range recs {
+			if err := bk.Delete(recordKey(r)); err != nil {
+				return err
+			}
+			if err := bk.Delete([]byte(r.ID)); err != nil {
 				return err
 			}
 		}

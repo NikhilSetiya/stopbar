@@ -56,6 +56,18 @@ func NewMemory(clock func() time.Time) *Store {
 	return &Store{clock: clock, until: map[string]time.Time{}, pending: map[string]bool{}}
 }
 
+// On disk a nonce is the key until(8 bytes, big-endian Unix ns) || nonce key,
+// with value v2Mark. Keys therefore sort by expiry, so inserts append at the
+// end of the B+tree (no random leaf page per insert, CS-197) and expired
+// entries are deleted from the front. Entries written before that (key: the
+// nonce key, value: until) are rewritten once by Open.
+var v2Mark = []byte{2}
+
+func diskKey(key string, until time.Time) []byte {
+	k := binary.BigEndian.AppendUint64(make([]byte, 0, 8+len(key)), uint64(until.UnixNano()))
+	return append(k, key...)
+}
+
 // Open uses bucket in the shared state file and loads unexpired nonces. With
 // a log, ConsumeWith writes its audit entry in the same transaction as the
 // nonce: an accepted request is recorded if and only if its nonce is spent.
@@ -75,16 +87,28 @@ func Open(db *store.DB, bucket string, log *audit.Log, clock func() time.Time) (
 		if err != nil {
 			return err
 		}
+		var legacy []live
 		if err := b.ForEach(func(k, v []byte) error {
-			if len(v) != 8 {
+			var key string
+			var until time.Time
+			switch {
+			case len(v) == 1 && v[0] == v2Mark[0] && len(k) > 8:
+				key, until = string(k[8:]), time.Unix(0, int64(binary.BigEndian.Uint64(k[:8])))
+			case len(v) == 8: // written before CS-197: rewrite in the ordered form
+				key, until = string(k), time.Unix(0, int64(binary.BigEndian.Uint64(v)))
+				expired = append(expired, append([]byte(nil), k...))
+				if now.Before(until) {
+					legacy = append(legacy, live{key, until})
+				}
+				return nil
+			default:
 				return fmt.Errorf("nonce: corrupt entry %q", k)
 			}
-			until := time.Unix(0, int64(binary.BigEndian.Uint64(v)))
 			if !now.Before(until) {
 				expired = append(expired, append([]byte(nil), k...))
 				return nil
 			}
-			keep = append(keep, live{string(k), until})
+			keep = append(keep, live{key, until})
 			return nil
 		}); err != nil {
 			return err
@@ -94,6 +118,12 @@ func Open(db *store.DB, bucket string, log *audit.Log, clock func() time.Time) (
 				return err
 			}
 		}
+		for _, l := range legacy {
+			if err := b.Put(diskKey(l.key, l.until), v2Mark); err != nil {
+				return err
+			}
+		}
+		keep = append(keep, legacy...)
 		return nil
 	})
 	if err != nil {
@@ -149,10 +179,8 @@ func (s *Store) ConsumeWith(ctx context.Context, key string, until time.Time, en
 	s.mu.Unlock()
 	s.forget(ctx, gone)
 
-	v := make([]byte, 8)
-	binary.BigEndian.PutUint64(v, uint64(until.UnixNano()))
 	err = s.db.Write(ctx, func(tx *bolt.Tx) error {
-		if err := tx.Bucket(s.bucket).Put([]byte(key), v); err != nil {
+		if err := tx.Bucket(s.bucket).Put(diskKey(key, until), v2Mark); err != nil {
 			return err
 		}
 		if entry != nil {
@@ -190,31 +218,27 @@ func (s *Store) insert(key string, until time.Time) {
 
 // prune drops expired keys from memory (s.mu held) and returns them for
 // forget, which deletes them from the file after the lock is released.
-func (s *Store) prune(now time.Time) []string {
-	var gone []string
+func (s *Store) prune(now time.Time) []item {
+	var gone []item
 	for len(s.exp) > 0 && !now.Before(s.exp[0].until) {
 		it := heap.Pop(&s.exp).(item)
 		delete(s.until, it.key)
-		gone = append(gone, it.key)
+		gone = append(gone, it)
 	}
 	return gone
 }
 
 // forget compacts expired keys out of the file, in the caller's unit when
 // there is one (no fsync of its own). Best effort, so it never fails the
-// unit: Open drops expired entries on load as well. A key consumed again
-// meanwhile is not deleted.
-func (s *Store) forget(ctx context.Context, gone []string) {
+// unit: Open drops expired entries on load as well. The on-disk key includes
+// the expiry, so a key consumed again meanwhile (a later expiry) is a
+// different entry and is never deleted here.
+func (s *Store) forget(ctx context.Context, gone []item) {
 	if s.db != nil && len(gone) > 0 {
 		_ = s.db.Write(ctx, func(tx *bolt.Tx) error {
 			b := tx.Bucket(s.bucket)
-			now := s.clock()
-			for _, k := range gone {
-				v := b.Get([]byte(k))
-				if len(v) != 8 || now.Before(time.Unix(0, int64(binary.BigEndian.Uint64(v)))) {
-					continue // consumed again since it expired: keep it
-				}
-				_ = b.Delete([]byte(k))
+			for _, it := range gone {
+				_ = b.Delete(diskKey(it.key, it.until))
 			}
 			return nil
 		}, nil)

@@ -159,7 +159,7 @@ type Limiter struct {
 	// queue by creation time (retention pruning).
 	expiry  expiryHeap
 	byTime  []*entry
-	forgetQ []string // records past retention, to compact out of the store (see compact)
+	forgetQ []Record // records past retention, to compact out of the store (see compact)
 	// afterChange, when set (tests only), runs with the lock held after every
 	// change to usage, so an invariant can be checked in every state the
 	// limiter ever passes through.
@@ -527,15 +527,15 @@ func (l *Limiter) Reserve(ctx context.Context, id string, er model.EnrichedReque
 // unit when there is one (no fsync of its own), best effort, never failing
 // it (Load prunes past retention too). Only state is compacted, never the
 // audit log.
-func (l *Limiter) compact(ctx context.Context, ids []string) {
-	if len(ids) == 0 {
+func (l *Limiter) compact(ctx context.Context, recs []Record) {
+	if len(recs) == 0 {
 		return
 	}
 	if us, ok := l.store.(UnitStore); ok {
-		us.DeleteCtx(ctx, ids)
+		us.DeleteCtx(ctx, recs)
 		return
 	}
-	_ = l.store.Delete(ids)
+	_ = l.store.Delete(recs)
 }
 
 // begin marks a write for e in flight (l.mu held).
@@ -887,7 +887,7 @@ func (l *Limiter) sweep(now time.Time) {
 			l.subtract(e)
 		}
 	}
-	var forget []string
+	var forget []Record
 	n := 0
 	for n < len(l.byTime) && now.Sub(l.byTime[n].Created) > retention {
 		e := l.byTime[n]
@@ -896,7 +896,7 @@ func (l *Limiter) sweep(now time.Time) {
 		}
 		if l.recs[e.ID] == e { // not a failed write whose ID was reserved again
 			delete(l.recs, e.ID)
-			forget = append(forget, e.ID)
+			forget = append(forget, e.Record)
 		}
 		n++
 	}
