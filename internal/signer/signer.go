@@ -126,7 +126,9 @@ type boundSpent struct {
 	s   ctxSpent
 }
 
-func (b boundSpent) Consume(key string, until time.Time) (bool, error) { return b.s.ConsumeCtx(b.ctx, key, until) }
+func (b boundSpent) Consume(key string, until time.Time) (bool, error) {
+	return b.s.ConsumeCtx(b.ctx, key, until)
+}
 
 // SignTx returns the raw signed transaction and its hash. requester is the
 // authenticated identity of the request act came from (the zero Identity
