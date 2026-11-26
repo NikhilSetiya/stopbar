@@ -191,8 +191,10 @@ func (s *BoltStore) PutCtx(ctx context.Context, r Record, entry *model.AuditEntr
 	}
 	return s.db.Write(ctx, func(tx *bolt.Tx) error {
 		bk := tx.Bucket(boltBucket)
-		_ = bk.Delete([]byte(r.ID)) // the pre-CS-197 key, if this record has one (a no-op otherwise)
-		bk.FillPercent = 0.9 // keys sort by creation: inserts append; headroom for the commit rewrite (CS-197)
+		// The pre-CS-197 key, if this record has one (a no-op otherwise).
+		_ = bk.Delete([]byte(r.ID))
+		// Keys sort by creation, so inserts append; 0.9 leaves headroom for the commit rewrite.
+		bk.FillPercent = 0.9
 		if err := bk.Put(recordKey(r), b); err != nil {
 			return err
 		}
