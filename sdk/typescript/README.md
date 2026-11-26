@@ -78,7 +78,10 @@ await sb.reject(requestId, approverKey1);   // one valid reject denies outright,
 Refusals (unknown id, CONFLICT, RESERVATION_EXPIRED, ALREADY_RESOLVED,
 DUPLICATE_VOTE…) reject with `StopbarRequestError` (`.status`, `.code`). The
 CLI equivalents are `stopbar approve <id> --approver-key FILE` and
-`stopbar reject <id> --approver-key FILE`.
+`stopbar reject <id> --approver-key FILE`: they print the rendered intent
+(every address with its 6-word checksum phrase) and the payload hash, then ask
+for confirmation. From a script, add `--yes`; without it a non-terminal stdin
+is refused.
 
 ### Provenance labels (taint)
 

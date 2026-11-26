@@ -166,6 +166,19 @@ type EnrichedRequest struct {
 	Destination            DestinationInfo     `json:"destination"`
 	Taint                  []string            `json:"taint"`
 	MinutesSinceCodeChange *int                `json:"minutes_since_code_change"`
+	// Tokens is display metadata for every token the intent references, at
+	// any depth (assets, swap in/out tokens), keyed by lowercase address
+	// (CS-143). For the approver's rendering only: policy never reads it.
+	Tokens map[string]TokenInfo `json:"tokens,omitempty"`
+}
+
+// TokenInfo is a token's on-chain decimals() and symbol() (CS-143). Decimals
+// is nil when it could not be read: the rendering then shows raw base units
+// and "decimals unavailable", never a guess. Symbol is sanitized
+// (render.SanitizeSymbol) and may be empty.
+type TokenInfo struct {
+	Symbol   string `json:"symbol,omitempty"`
+	Decimals *int   `json:"decimals"`
 }
 
 // Velocity is spend in a window.

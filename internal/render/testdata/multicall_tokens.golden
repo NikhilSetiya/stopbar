@@ -1,0 +1,13 @@
+Swap 1,000 USDC 0x8335…2913 [goose oil advice umbrella door duty] for at least 0.25 WETH 0x4200…0006 [raw awesome traffic length input fantasy], to 0x2222…2222 [until bag chicken judge canoe wolf]
+Value: $1,000.00
+Max network fee: $0.30
+From: 0x2222…2222 [until bag chicken judge canoe wolf] on base (chain 8453)
+Flags: none
+Calls:
+  - Swap 1,000 USDC 0x8335…2913 [goose oil advice umbrella door duty] for at least 0.25 WETH 0x4200…0006 [raw awesome traffic length input fantasy], to 0x2222…2222 [until bag chicken judge canoe wolf]
+  - Allow 0x2626…e481 [humble long culture valve seminar dry] to spend 5,000 base units of token 0x1111…1111 [organ check sample fresh salt flight] (decimals unavailable)
+  - safe_exec 0x9f3a…7c21 [worry work baby rebel fog filter], 2 call(s):
+    - Send 1.5 WETH 0x4200…0006 [raw awesome traffic length input fantasy] to 0x9f3a…7c21 [brick any mango spray unknown wealth]
+    - Call contract 0x9f3a…7c21 [brick any mango spray unknown wealth] with undecoded calldata
+Decoder: multicall of 3 call(s): …
+Payload hash: sha256:115a07fa95f9351e06647d316e88a53bbdbdd1928cf495214742e519fd8fc601

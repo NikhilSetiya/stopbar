@@ -50,5 +50,5 @@
     "issued_at": "2026-11-02T10:03:10Z",
     "expires_at": "2026-11-02T10:04:10Z"
   },
-  "rendered": "Send 3,000,000,000,000,000,000,000,000 base units of token 0x3333…3333 [door scatter thumb comfort bamboo glory] to 0x9f30…0c21 [quality warrior impose six whisper blame]\nValue: price unavailable\nMax network fee: price unavailable\nFrom: 0x2222…2222 [until bag chicken judge canoe wolf] on base (chain 8453)\nFlags: none\nDetails: Transfer 3000000000000000000000000 units of token 0x3333…3333 [door scatter thumb comfort bamboo glory] to 0x9f30…0c21 [quality warrior impose six whisper blame]\nPayload hash: sha256:115a07fa95f9351e06647d316e88a53bbdbdd1928cf495214742e519fd8fc601\n"
+  "rendered": "Send 3,000,000 TKN 0x3333…3333 [door scatter thumb comfort bamboo glory] to 0x9f30…0c21 [quality warrior impose six whisper blame]\nValue: price unavailable\nMax network fee: price unavailable\nFrom: 0x2222…2222 [until bag chicken judge canoe wolf] on base (chain 8453)\nFlags: none\nDecoder: Transfer 3000000000000000000000000 units of token 0x3333…3333 [door scatter thumb comfort bamboo glory] to 0x9f30…0c21 [quality warrior impose six whisper blame]\nPayload hash: sha256:115a07fa95f9351e06647d316e88a53bbdbdd1928cf495214742e519fd8fc601\n"
 }

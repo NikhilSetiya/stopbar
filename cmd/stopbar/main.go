@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -12,6 +13,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -40,12 +42,14 @@ const usage = `usage:
       generate an Ed25519 approver key (mode 0600): the private key never
       leaves this machine; give stopbard its public half via the approver
       config (spec/approval-signature-v1.md §5)
-  stopbar approve <id> --approver-key FILE --url URL [--key API_KEY]
-      fetch what to sign from stopbard, sign it locally with the approver
-      key, and submit the signature (CS-151); on quorum, stopbard
-      re-evaluates against current state and, if it now allows, returns
-      the signed transaction
-  stopbar reject <id> --approver-key FILE --url URL [--key API_KEY]
+  stopbar approve <id> --approver-key FILE --url URL [--key API_KEY] [--yes]
+      fetch what to sign from stopbard, show the rendered intent and payload
+      hash, ask for confirmation, sign it locally with the approver key, and
+      submit the signature (CS-151/143); on quorum, stopbard re-evaluates
+      against current state and, if it now allows, returns the signed
+      transaction. --yes skips the prompt (scripts); without it a non-terminal
+      stdin is refused
+  stopbar reject <id> --approver-key FILE --url URL [--key API_KEY] [--yes]
       sign and submit a reject (CS-151): one valid reject denies outright
   stopbar breaker status --tenant T [--url URL] [--key API_KEY]
       show the tenant's circuit breaker (open/closed, trip, reset votes, quorum)
@@ -330,7 +334,7 @@ type httpResult struct {
 // caller for audit and rate limiting only; the signature is what
 // authorizes the approve/reject, never the API key (CS-151).
 func signedApprovalCall(verb string, args []string, dec, suffix string) (httpResult, error) {
-	usage := "usage: stopbar " + verb + " <id> --approver-key FILE --url URL [--key API_KEY]"
+	usage := "usage: stopbar " + verb + " <id> --approver-key FILE --url URL [--key API_KEY] [--yes]"
 	// The id is the first argument, before the flags. Go's flag package stops at
 	// the first non-flag token, so parse it out before the flags rather than
 	// after (otherwise `approve <id> --url ... --key ...` leaves them unparsed).
@@ -342,6 +346,7 @@ func signedApprovalCall(verb string, args []string, dec, suffix string) (httpRes
 	url := fs.String("url", "http://127.0.0.1:7777", "stopbard base URL")
 	key := fs.String("key", "", "API key for the HTTP call itself (optional; never what authorizes the "+verb+")")
 	approverKeyFile := fs.String("approver-key", "", "local approver private key file (required; signs the "+verb+")")
+	yes := fs.Bool("yes", false, "sign without the confirmation prompt (for scripts; the rendering is still printed)")
 	useTLS := mtlsFlags(fs)
 	if err := fs.Parse(args[1:]); err != nil {
 		return httpResult{}, err
@@ -365,9 +370,14 @@ func signedApprovalCall(verb string, args []string, dec, suffix string) (httpRes
 		return httpResult{}, err
 	}
 	// Show what is being signed (CS-143, FR-IR-3): the rendered intent and
-	// the payload hash the signature covers. Check every checksum word. It goes
-	// to stderr: stdout carries only the server's response.
+	// the payload hash the signature covers, then ask. It goes to stderr:
+	// stdout carries only the server's response.
 	fmt.Fprintf(os.Stderr, "You are signing %q over payload_hash %s for escalation %s:\n%s\n", dec, toSign.PayloadHash, toSign.EscalationID, toSign.Rendered)
+	if !*yes {
+		if err := confirm(verb); err != nil {
+			return httpResult{}, err
+		}
+	}
 	sig, err := approval.SignEscalation(priv, approval.EscalationObject{
 		EscalationID: toSign.EscalationID, PayloadHash: toSign.PayloadHash, Decision: dec,
 		Expiry: time.Now().Add(50 * time.Minute).Unix(), // comfortably under the 1h bound, clock skew included
@@ -385,6 +395,31 @@ func signedApprovalCall(verb string, args []string, dec, suffix string) (httpRes
 	}
 	fmt.Printf("HTTP %d\n%s\n", status, pretty.String())
 	return httpResult{status, body}, nil
+}
+
+// stdin and stdinIsTerminal are the confirmation prompt's input; tests swap them.
+var (
+	stdin           io.Reader = os.Stdin
+	stdinIsTerminal           = func() bool {
+		fi, err := os.Stdin.Stat()
+		return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	}
+)
+
+// confirm asks the approver to confirm the rendering they were just shown
+// (CS-143). Only "y" or "yes" signs. A non-terminal stdin is refused rather
+// than read: a script must say --yes explicitly, and a pipe must never
+// auto-confirm or hang.
+func confirm(verb string) error {
+	if !stdinIsTerminal() {
+		return fmt.Errorf("%s: stdin is not a terminal; check the rendering above and pass --yes to sign from a script", verb)
+	}
+	fmt.Fprintf(os.Stderr, "Check every checksum word. Sign this %s? [y/N] ", verb)
+	line, _ := bufio.NewReader(stdin).ReadString('\n')
+	if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
+		return fmt.Errorf("%s: not confirmed; nothing was signed", verb)
+	}
+	return nil
 }
 
 // fetchEscalationToSign GETs /v1/approvals/<id> (CS-151): stopbard's

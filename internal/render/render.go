@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/NikhilSetiya/stopbar/internal/model"
 )
@@ -86,67 +87,99 @@ var addrInText = regexp.MustCompile(`\b0x[0-9a-fA-F]{40}\b`)
 // the decoded intent and the enrichment, never from the requester's claims:
 //
 //	headline (what moves where), value in USD, max network fee in USD,
-//	sender and chain, flags, the decoder's full description, payload hash.
+//	sender and chain, flags, every inner call (batches, Safe, multicall),
+//	the decoder's raw description, payload hash.
 //
-// A missing price reads "price unavailable", never $0 (LLD §3, CS-131).
+// A missing price reads "price unavailable", never $0 (LLD §3, CS-131). A
+// token whose decimals could not be read shows raw base units and says
+// "decimals unavailable", never a guessed number.
 func Intent(er model.EnrichedRequest) string {
 	in, a := er.Intent, er.Request.Action
+	r := renderer{to: a.To, tokens: er.Tokens}
+	if a.ChainID != nil {
+		r.chain = *a.ChainID
+	}
 	var b strings.Builder
 	line := func(format string, args ...any) { _, _ = fmt.Fprintf(&b, format+"\n", args...) }
 
 	if a.Kind == model.KindToolCall {
 		line("%s", clean(in.Human))
 	} else {
-		line("%s", headline(in, a))
+		line("%s", r.headline(in))
 		if v := value(er); v != "" {
 			line("Value: %s", v)
 		}
 		line("Max network fee: %s", usd(er.MaxFeeUSD))
-		chain := ""
-		if a.ChainID != nil {
-			chain = chainName(*a.ChainID)
-		}
-		line("From: %s on %s", a.From, chain)
+		line("From: %s on %s", a.From, chainName(r.chain))
 	}
 	flags := "none"
 	if len(in.Flags) > 0 {
 		flags = strings.Join(in.Flags, ", ")
 	}
 	line("Flags: %s", flags)
+	if len(in.Calls) > 0 {
+		line("Calls:")
+		r.calls(&b, in.Calls, "  ")
+	}
 	if a.Kind != model.KindToolCall {
-		line("Details: %s", clean(in.Human))
+		line("Decoder: %s", clean(in.Human))
 	}
 	line("Payload hash: %s", in.PayloadHash)
 	return addrInText.ReplaceAllStringFunc(b.String(), Address)
 }
 
+type renderer struct {
+	chain  uint64
+	to     string                     // the transaction's target
+	tokens map[string]model.TokenInfo // enrichment, keyed by lowercase address
+}
+
+// calls writes one line per inner call, nested batches indented.
+func (r renderer) calls(b *strings.Builder, cs []model.IntentSummary, indent string) {
+	for _, c := range cs {
+		if len(c.Calls) > 0 {
+			_, _ = fmt.Fprintf(b, "%s- %s %s, %d call(s):\n", indent, c.Op, c.Target, len(c.Calls))
+			r.calls(b, c.Calls, indent+"  ")
+			continue
+		}
+		s := clean(c.Human) // contract calls: the decoder's description
+		switch {
+		case c.Swap != nil:
+			s = r.swapLine(*c.Swap, c.Destination)
+		case c.Kind == "transfer" || c.Kind == "approve":
+			s = r.headline(c)
+		}
+		_, _ = fmt.Fprintf(b, "%s- %s\n", indent, s)
+	}
+}
+
 // headline is the one-line summary, by policy action (kind).
-func headline(in model.IntentSummary, a model.Action) string {
-	chain := uint64(0)
-	if a.ChainID != nil {
-		chain = *a.ChainID
+func (r renderer) headline(in model.IntentSummary) string {
+	token := ""
+	if in.Asset != nil {
+		token = in.Asset.Address
 	}
 	switch in.Kind {
 	case "transfer":
 		if s := onlySwap(in); s != nil {
-			return swapLine(*s, in, chain)
+			return r.swapLine(*s, in.Destination)
 		}
 		if in.Amount == "" {
-			return fmt.Sprintf("Move several tokens of %s to %s", tokenAddr(in.Asset), in.Destination)
+			return fmt.Sprintf("Move several tokens of %s to %s", r.tokenName(token), in.Destination)
 		}
-		return fmt.Sprintf("Send %s to %s", amount(in.Amount, in.Asset, chain), in.Destination)
+		return fmt.Sprintf("Send %s to %s", r.amount(in.Amount, token), in.Destination)
 	case "approve":
 		switch {
 		case in.Op == "set_approval_for_all":
-			return fmt.Sprintf("Let %s move EVERY token in %s", in.Destination, tokenAddr(in.Asset))
+			return fmt.Sprintf("Let %s move EVERY token in %s", in.Destination, r.tokenName(token))
 		case in.Op == "revoke_approval_for_all":
-			return fmt.Sprintf("Revoke %s as operator of every token in %s", in.Destination, tokenAddr(in.Asset))
+			return fmt.Sprintf("Revoke %s as operator of every token in %s", in.Destination, r.tokenName(token))
 		case slices.Contains(in.Flags, "unlimited_approval"):
-			return fmt.Sprintf("Allow %s to spend an UNLIMITED amount of %s", in.Destination, tokenName(in.Asset, chain))
+			return fmt.Sprintf("Allow %s to spend an UNLIMITED amount of %s", in.Destination, r.tokenName(token))
 		}
-		return fmt.Sprintf("Allow %s to spend %s", in.Destination, amount(in.Amount, in.Asset, chain))
+		return fmt.Sprintf("Allow %s to spend %s", in.Destination, r.amount(in.Amount, token))
 	}
-	return fmt.Sprintf("Call contract %s (%s)", a.To, in.Op)
+	return fmt.Sprintf("Call contract %s (%s)", r.to, in.Op)
 }
 
 // onlySwap returns the swap a transfer intent is, directly or as the single
@@ -169,24 +202,15 @@ func onlySwap(in model.IntentSummary) *model.Swap {
 	return found[0]
 }
 
-func swapLine(s model.Swap, in model.IntentSummary, chain uint64) string {
-	assetFor := func(token string) *model.Asset {
-		if token == "" {
-			return nil
-		}
-		if in.Asset != nil && strings.EqualFold(in.Asset.Address, token) {
-			return in.Asset // enriched: has decimals and symbol
-		}
-		return &model.Asset{ChainID: chain, Address: token}
-	}
-	give, get := amount(s.AmountIn, assetFor(s.TokenIn), chain), amount(s.AmountOut, assetFor(s.TokenOut), chain)
+func (r renderer) swapLine(s model.Swap, recipient string) string {
+	give, get := r.amount(s.AmountIn, s.TokenIn), r.amount(s.AmountOut, s.TokenOut)
 	if s.ExactIn {
 		if s.AmountOut == "0" {
-			return fmt.Sprintf("Swap %s for ANY amount of %s (no minimum: accepts nothing back), to %s", give, tokenName(assetFor(s.TokenOut), chain), in.Destination)
+			return fmt.Sprintf("Swap %s for ANY amount of %s (no minimum: accepts nothing back), to %s", give, r.tokenName(s.TokenOut), recipient)
 		}
-		return fmt.Sprintf("Swap %s for at least %s, to %s", give, get, in.Destination)
+		return fmt.Sprintf("Swap %s for at least %s, to %s", give, get, recipient)
 	}
-	return fmt.Sprintf("Swap at most %s for %s, to %s", give, get, in.Destination)
+	return fmt.Sprintf("Swap at most %s for %s, to %s", give, get, recipient)
 }
 
 // value is the line an approver reads as "how much is at stake".
@@ -222,21 +246,25 @@ func usd(s *string) string {
 	return "$" + group(f[:i]) + f[i:]
 }
 
-// amount formats raw base units of asset (nil: native) with its decimals and
-// symbol when the enricher supplied them, and as raw base units otherwise.
-func amount(raw string, asset *model.Asset, chain uint64) string {
+// MaxDecimals bounds the decimals a token may claim. ERC-20 decimals() is a
+// uint8; anything larger is a broken or hostile token and is not used.
+const MaxDecimals = 255
+
+// amount formats raw base units of token ("" = native) with its decimals and
+// symbol from the enrichment, or as raw base units with "decimals
+// unavailable" when the decimals could not be read.
+func (r renderer) amount(raw, token string) string {
 	n, ok := new(big.Int).SetString(raw, 10)
 	if !ok || n.Sign() < 0 {
 		return raw + " (unparsable amount)"
 	}
-	decimals := 18
-	if asset != nil {
-		decimals = asset.Decimals
-		if asset.Symbol == "" && decimals == 0 {
-			return group(n.String()) + " base units of " + tokenName(asset, chain)
-		}
+	if token == "" {
+		return units(n, 18) + " " + nativeSymbol(r.chain)
 	}
-	return units(n, decimals) + " " + tokenName(asset, chain)
+	if t, ok := r.tokens[strings.ToLower(token)]; ok && t.Decimals != nil && *t.Decimals >= 0 && *t.Decimals <= MaxDecimals {
+		return units(n, *t.Decimals) + " " + r.tokenName(token)
+	}
+	return group(n.String()) + " base units of " + r.tokenName(token) + " (decimals unavailable)"
 }
 
 // units is n / 10^decimals as an exact decimal, grouped, trailing zeros cut.
@@ -252,21 +280,38 @@ func units(n *big.Int, decimals int) string {
 	return s
 }
 
-func tokenName(asset *model.Asset, chain uint64) string {
-	if asset == nil {
-		return nativeSymbol(chain)
+// tokenName is "SYMBOL 0x…" when the symbol is known, else "token 0x…"; ""
+// is the chain's native asset.
+func (r renderer) tokenName(token string) string {
+	if token == "" {
+		return nativeSymbol(r.chain)
 	}
-	if asset.Symbol != "" {
-		return clean(asset.Symbol) + " " + asset.Address
+	if sym := SanitizeSymbol(r.tokens[strings.ToLower(token)].Symbol); sym != "" {
+		return sym + " " + token
 	}
-	return "token " + asset.Address
+	return "token " + token
 }
 
-func tokenAddr(asset *model.Asset) string {
-	if asset == nil {
-		return "the native asset"
+// MaxSymbolRunes caps a displayed token symbol. symbol() is whatever the
+// token contract returns (attacker-controlled); the cap also keeps it far
+// shorter than an address, so it cannot carry a fake one.
+const MaxSymbolRunes = 16
+
+// SanitizeSymbol makes an on-chain symbol() safe to show: invalid UTF-8,
+// control, format (bidi overrides, zero-width) and separator characters
+// are dropped, surrounding space trimmed, and the result capped at
+// MaxSymbolRunes.
+func SanitizeSymbol(s string) string {
+	s = strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r == utf8.RuneError || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(s, "")))
+	if rs := []rune(s); len(rs) > MaxSymbolRunes {
+		s = string(rs[:MaxSymbolRunes]) + "…"
 	}
-	return tokenName(asset, asset.ChainID)
+	return s
 }
 
 // group inserts thousands separators into a run of digits.

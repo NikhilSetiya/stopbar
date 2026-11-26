@@ -137,6 +137,8 @@ const (
 	dest    = "0x9f3a5c7e1b2d4f6a8c0e2b4d6f8a0c2e4b6d7c21"
 	poison  = "0x9f3a000000000000000000000000000000007c21"
 	router  = "0x2626664c2603336e57b271c5c0b26f421741e481"
+	weth    = "0x4200000000000000000000000000000000000006"
+	nope    = "0x1111111111111111111111111111111111111111"
 	hashHex = "sha256:115a07fa95f9351e06647d316e88a53bbdbdd1928cf495214742e519fd8fc601"
 )
 
@@ -144,9 +146,16 @@ func evm(to string) model.ActionRequest {
 	return model.ActionRequest{Action: model.Action{Kind: model.KindEVMTx, ChainID: u64(8453), From: from, To: to}}
 }
 
-func usdcAsset() *model.Asset {
-	return &model.Asset{ChainID: 8453, Address: usdc, Symbol: "USDC", Decimals: 6}
-}
+func usdcAsset() *model.Asset { return &model.Asset{ChainID: 8453, Address: usdc} }
+
+func dec(d int) *int { return &d }
+
+// usdcTok is the enrichment for usdc; weth and "nope" cover a known output
+// token and one whose decimals() could not be read.
+var (
+	usdcTok = map[string]model.TokenInfo{usdc: {Symbol: "USDC", Decimals: dec(6)}}
+	allToks = map[string]model.TokenInfo{usdc: {Symbol: "USDC", Decimals: dec(6)}, weth: {Symbol: "WETH", Decimals: dec(18)}, nope: {}}
+)
 
 // TestIntentGolden snapshots the rendering per kind. Run with -update to
 // rewrite testdata/*.golden, then review the diff.
@@ -156,34 +165,47 @@ func TestIntentGolden(t *testing.T) {
 		"native_transfer": {Request: evm(dest), AmountUSD: ptr("3125.5"), MaxFeeUSD: ptr("0.004"),
 			Intent: model.IntentSummary{Kind: "transfer", Op: "native_transfer", Amount: "1250000000000000000", Destination: dest, Flags: []string{},
 				Human: "Send 1250000000000000000 wei (native) to " + dest, PayloadHash: hashHex}},
-		"erc20_transfer": {Request: evm(usdc), AmountUSD: ptr("1500250.249"), MaxFeeUSD: ptr("0.42"),
+		"erc20_transfer": {Request: evm(usdc), Tokens: usdcTok, AmountUSD: ptr("1500250.249"), MaxFeeUSD: ptr("0.42"),
 			Intent: model.IntentSummary{Kind: "transfer", Op: "erc20_transfer", Asset: usdcAsset(), Amount: "1500250249000", Destination: dest,
 				Flags: []string{"new_destination"}, Human: "Transfer 1500250249000 units of token " + usdc + " to " + dest, PayloadHash: hashHex}},
-		"erc20_transfer_poisoned": {Request: evm(usdc), AmountUSD: ptr("1500.25"), MaxFeeUSD: ptr("0.42"),
+		"erc20_transfer_poisoned": {Request: evm(usdc), Tokens: usdcTok, AmountUSD: ptr("1500.25"), MaxFeeUSD: ptr("0.42"),
 			Intent: model.IntentSummary{Kind: "transfer", Op: "erc20_transfer", Asset: usdcAsset(), Amount: "1500250000", Destination: poison,
 				Flags: []string{"new_destination", "similar_destination"}, Human: "Transfer 1500250000 units of token " + usdc + " to " + poison, PayloadHash: hashHex}},
-		"price_unavailable": {Request: evm(usdc), PriceStale: true,
-			Intent: model.IntentSummary{Kind: "transfer", Op: "erc20_transfer", Asset: &model.Asset{ChainID: 8453, Address: usdc, Decimals: 6}, Amount: "2000000",
+		"price_unavailable": {Request: evm(usdc), PriceStale: true, Tokens: map[string]model.TokenInfo{usdc: {Decimals: dec(6)}},
+			Intent: model.IntentSummary{Kind: "transfer", Op: "erc20_transfer", Asset: usdcAsset(), Amount: "2000000",
 				Destination: dest, Flags: []string{}, Human: "Transfer 2000000 units of token " + usdc + " to " + dest, PayloadHash: hashHex}},
 		"unknown_decimals": {Request: evm(usdc), PriceStale: true,
 			Intent: model.IntentSummary{Kind: "transfer", Op: "erc20_transfer", Asset: &model.Asset{ChainID: 8453, Address: usdc}, Amount: "2000000",
 				Destination: dest, Flags: []string{}, Human: "Transfer 2000000 units of token " + usdc + " to " + dest, PayloadHash: hashHex}},
-		"unlimited_approval": {Request: evm(usdc), AmountUSD: ptr("0"), MaxFeeUSD: ptr("0.1"),
+		"unlimited_approval": {Request: evm(usdc), Tokens: usdcTok, AmountUSD: ptr("0"), MaxFeeUSD: ptr("0.1"),
 			Intent: model.IntentSummary{Kind: "approve", Op: "erc20_approve", Asset: usdcAsset(), Amount: "115792089237316195423570985008687907853269984665640564039457584007913129639935",
 				Destination: dest, Flags: []string{"unlimited_approval"}, Human: "Allow " + dest + " to spend 1157…935 units of token " + usdc, PayloadHash: hashHex}},
-		"bounded_approval": {Request: evm(usdc), AmountUSD: ptr("0"), ApprovalUSD: ptr("50"), MaxFeeUSD: ptr("0.1"),
+		"bounded_approval": {Request: evm(usdc), Tokens: usdcTok, AmountUSD: ptr("0"), ApprovalUSD: ptr("50"), MaxFeeUSD: ptr("0.1"),
 			Intent: model.IntentSummary{Kind: "approve", Op: "erc20_approve", Asset: usdcAsset(), Amount: "50000000",
 				Destination: router, Flags: []string{}, Human: "Allow " + router + " to spend 50000000 units of token " + usdc, PayloadHash: hashHex}},
 		"set_approval_for_all": {Request: evm(usdc), AmountUSD: ptr("0"), MaxFeeUSD: ptr("0.1"),
 			Intent: model.IntentSummary{Kind: "approve", Op: "set_approval_for_all", Asset: &model.Asset{ChainID: 8453, Address: usdc}, Destination: dest,
 				Flags: []string{"unlimited_approval"}, Human: "Let " + dest + " move every token in " + usdc, PayloadHash: hashHex}},
-		"swap_min_out_zero": {Request: evm(router), AmountUSD: ptr("1000"), MaxFeeUSD: ptr("0.2"),
+		"swap_min_out_zero": {Request: evm(router), Tokens: usdcTok, AmountUSD: ptr("1000"), MaxFeeUSD: ptr("0.2"),
 			Intent: model.IntentSummary{Kind: "transfer", Op: "swap_exact_in", Asset: usdcAsset(), Amount: "1000000000", Destination: from,
 				Flags: []string{"min_out_zero"}, Swap: &model.Swap{ExactIn: true, TokenIn: usdc, AmountIn: "1000000000", TokenOut: "", AmountOut: "0"},
 				Human: "Swap 1000000000 units of token " + usdc + " for token  (min out 0), sent to " + from + " — accepts ANY output (no slippage protection)", PayloadHash: hashHex}},
 		"safe_delegatecall": {Request: evm(dest), MaxFeeUSD: ptr("1.5"),
 			Intent: model.IntentSummary{Kind: "contract_call", Op: "safe_exec", Flags: []string{"delegatecall"},
 				Human: "Safe " + dest + " executes: DELEGATECALL (runs foreign code as the Safe): Call contract " + poison + " with undecoded calldata", PayloadHash: hashHex}},
+		// Every token inside a batch is shown with its decimals and symbol;
+		// one whose decimals() failed says so and shows raw base units.
+		"multicall_tokens": {Request: evm(router), Tokens: allToks, AmountUSD: ptr("1000"), MaxFeeUSD: ptr("0.3"),
+			Intent: model.IntentSummary{Kind: "transfer", Op: "multicall", Target: router, Asset: usdcAsset(), Amount: "1000000000", Destination: from,
+				Flags: []string{}, Human: "multicall of 3 call(s): …", PayloadHash: hashHex, Calls: []model.IntentSummary{
+					{Kind: "transfer", Op: "swap_exact_in", Asset: usdcAsset(), Amount: "1000000000", Destination: from, Flags: []string{},
+						Swap: &model.Swap{ExactIn: true, TokenIn: usdc, AmountIn: "1000000000", TokenOut: weth, AmountOut: "250000000000000000"}},
+					{Kind: "approve", Op: "erc20_approve", Asset: &model.Asset{ChainID: 8453, Address: nope}, Amount: "5000", Destination: router, Flags: []string{}},
+					{Kind: "contract_call", Op: "safe_exec", Target: dest, Flags: []string{}, Calls: []model.IntentSummary{
+						{Kind: "transfer", Op: "erc20_transfer", Asset: &model.Asset{ChainID: 8453, Address: weth}, Amount: "1500000000000000000", Destination: poison, Flags: []string{}},
+						{Kind: "contract_call", Op: "unknown", Target: poison, Flags: []string{"unknown_call"}, Human: "Call contract " + poison + " with undecoded calldata"},
+					}},
+				}}},
 		"tool_call_injection": {Request: model.ActionRequest{Action: model.Action{Kind: model.KindToolCall, Tool: &tool}},
 			Intent: model.IntentSummary{Kind: "tool_call", Flags: []string{"untrusted_web"}, Human: "Call tool " + tool + "\u202e with 1 argument(s)", PayloadHash: hashHex}},
 	}
@@ -233,11 +255,20 @@ func TestFormatting(t *testing.T) {
 		{usd(ptr("0.001")), "< $0.01"},
 		{usd(ptr("-1")), "price unavailable"},
 		{usd(nil), "price unavailable"},
-		{amount("1000000000000000001", nil, 1), "1.000000000000000001 ETH"},
-		{amount("5", nil, 137), "0.000000000000000005 POL"},
-		{amount("1500000", usdcAsset(), 8453), "1.5 USDC " + usdc},
-		{amount("1500000", &model.Asset{Address: usdc}, 8453), "1,500,000 base units of token " + usdc},
-		{amount("-1", nil, 1), "-1 (unparsable amount)"},
+		{renderer{chain: 1}.amount("1000000000000000001", ""), "1.000000000000000001 ETH"},
+		{renderer{chain: 137}.amount("5", ""), "0.000000000000000005 POL"},
+		{renderer{chain: 8453, tokens: usdcTok}.amount("1500000", usdc), "1.5 USDC " + usdc},
+		{renderer{chain: 8453, tokens: usdcTok}.amount("1500000", strings.ToUpper(usdc[:2])+usdc[2:]), "1.5 USDC 0X" + usdc[2:]},
+		{renderer{chain: 8453}.amount("1500000", usdc), "1,500,000 base units of token " + usdc + " (decimals unavailable)"},
+		{renderer{chain: 8453, tokens: map[string]model.TokenInfo{usdc: {Symbol: "USDC"}}}.amount("15", usdc), "15 base units of USDC " + usdc + " (decimals unavailable)"},
+		{renderer{chain: 8453, tokens: map[string]model.TokenInfo{usdc: {Decimals: dec(256)}}}.amount("15", usdc), "15 base units of token " + usdc + " (decimals unavailable)"},
+		{renderer{chain: 8453, tokens: map[string]model.TokenInfo{usdc: {Decimals: dec(0)}}}.amount("15", usdc), "15 token " + usdc},
+		{renderer{chain: 1}.amount("-1", ""), "-1 (unparsable amount)"},
+		{SanitizeSymbol("US\u202eDC\n\x00"), "USDC"},
+		{SanitizeSymbol("  ok  "), "ok"},
+		{SanitizeSymbol("\xff\xfeUSD"), "USD"},
+		{SanitizeSymbol(strings.Repeat("A", 40)), strings.Repeat("A", 16) + "…"},
+		{SanitizeSymbol("0x9f3a5c7e1b2d4f6a8c0e2b4d6f8a0c2e4b6d7c21"), "0x9f3a5c7e1b2d4f…"},
 		{group("1234"), "1,234"},
 		{group("123"), "123"},
 	} {

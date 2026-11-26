@@ -205,7 +205,7 @@ for entry, step, approve in cases:
             status, d = post(addr, body, bearer=secret)
             if approve and status == 202:
                 for _, kf in approvers:  # `stopbar approve` signs locally; the second vote reaches quorum
-                    run = subprocess.run([stopbar_cli, "approve", body["id"], "--url", f"http://{addr}", "--approver-key", kf, "--key", approver],
+                    run = subprocess.run([stopbar_cli, "approve", body["id"], "--url", f"http://{addr}", "--approver-key", kf, "--key", approver, "--yes"],
                                          capture_output=True, text=True)
                     out = run.stdout
                     status, d = (int(out.split()[1]), json.loads(out.split("\n", 1)[1])) if out.startswith("HTTP ") else (0, {})

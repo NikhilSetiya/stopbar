@@ -19,6 +19,7 @@ import (
 	"github.com/NikhilSetiya/stopbar/internal/enrich"
 	"github.com/NikhilSetiya/stopbar/internal/limiter"
 	"github.com/NikhilSetiya/stopbar/internal/model"
+	"github.com/NikhilSetiya/stopbar/internal/render"
 )
 
 // MaxFeeWei is gas_limit × max_fee_per_gas: the most the tx can pay in fees.
@@ -133,9 +134,19 @@ func (w *World) Enrich(ctx context.Context, er *model.EnrichedRequest) error {
 			return fmt.Errorf("devstub: unknown token %s", er.Intent.Asset.Address)
 		}
 		symbol, decimals = t.Symbol, t.Decimals
-		a := *er.Intent.Asset                       // a copy: the decoder's intent stays as decoded
-		a.Symbol, a.Decimals = t.Symbol, t.Decimals // for the approver's rendering (CS-143)
-		er.Intent.Asset = &a
+	}
+	// Display metadata for every token the intent references (CS-143), from
+	// the world's tokens; one it does not list renders "decimals unavailable".
+	for _, a := range enrich.TokenAddrs(er.Intent) {
+		if er.Tokens == nil {
+			er.Tokens = map[string]model.TokenInfo{}
+		}
+		info := model.TokenInfo{}
+		if t, ok := w.Tokens[a]; ok {
+			d := t.Decimals
+			info = model.TokenInfo{Symbol: render.SanitizeSymbol(t.Symbol), Decimals: &d}
+		}
+		er.Tokens[a] = info
 	}
 	raw, ok := new(big.Rat).SetString(er.Intent.Amount)
 	if !ok || er.Intent.Kind == "approve" {

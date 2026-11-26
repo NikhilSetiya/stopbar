@@ -2,10 +2,13 @@ package enrich
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/NikhilSetiya/stopbar/internal/render"
 )
 
 // BalanceProvider reads native and ERC-20 balances from the chain (CS-132),
@@ -17,8 +20,14 @@ type BalanceProvider struct {
 	ttl   time.Duration
 	clock func() time.Time
 
-	mu    sync.Mutex
-	cache map[string]balanceEntry
+	mu      sync.Mutex
+	cache   map[string]balanceEntry
+	symbols map[string]symbolEntry
+}
+
+type symbolEntry struct {
+	val string
+	at  time.Time
 }
 
 type balanceEntry struct {
@@ -32,7 +41,7 @@ func NewBalanceProvider(rpc *RPC, ttl time.Duration) *BalanceProvider {
 	if ttl <= 0 {
 		ttl = 10 * time.Second
 	}
-	return &BalanceProvider{rpc: rpc, ttl: ttl, clock: time.Now, cache: map[string]balanceEntry{}}
+	return &BalanceProvider{rpc: rpc, ttl: ttl, clock: time.Now, cache: map[string]balanceEntry{}, symbols: map[string]symbolEntry{}}
 }
 
 // Balance returns the raw balance (wei for native, token units for ERC-20) of
@@ -92,8 +101,38 @@ func (b *BalanceProvider) Decimals(ctx context.Context, token string) (int, erro
 	if err != nil {
 		return 0, err
 	}
+	if d.Cmp(big.NewInt(render.MaxDecimals)) > 0 { // decimals() is a uint8: a larger value is a broken or hostile token
+		return 0, fmt.Errorf("decimals() returned %s, want ≤ %d", d, render.MaxDecimals)
+	}
 	b.mu.Lock()
 	b.cache[key] = balanceEntry{val: new(big.Int).Set(d), at: now}
 	b.mu.Unlock()
 	return int(d.Int64()), nil
+}
+
+// Symbol reads a token's symbol() from the chain, cached under the token
+// address like Decimals. The value is attacker-controlled: callers sanitize
+// it (render.SanitizeSymbol) before showing it.
+func (b *BalanceProvider) Symbol(ctx context.Context, token string) (string, error) {
+	key := strings.ToLower(token)
+	now := b.clock()
+	b.mu.Lock()
+	if e, ok := b.symbols[key]; ok && now.Sub(e.at) < b.ttl {
+		b.mu.Unlock()
+		return e.val, nil
+	}
+	b.mu.Unlock()
+
+	ret, err := b.rpc.Call(ctx, token, encodeCall(selSymbol))
+	if err != nil {
+		return "", err
+	}
+	s, err := decodeString(ret)
+	if err != nil {
+		return "", err
+	}
+	b.mu.Lock()
+	b.symbols[key] = symbolEntry{val: s, at: now}
+	b.mu.Unlock()
+	return s, nil
 }
