@@ -1,0 +1,67 @@
+# Release build (CS-196, FR-DX-2, NFR-7). Run by .github/workflows/release.yml on
+# a v* tag; CI dry-runs it on every PR (goreleaser check + snapshot build).
+# Verifying a release: docs/releasing.md.
+version: 2
+project_name: stopbar
+
+builds:
+  # Reproducible: static (no cgo), -trimpath, mtime from the commit, version
+  # from the tag via the same variable `stopbar version` / `stopbard -version` print.
+  - &build
+    id: stopbard
+    main: ./cmd/stopbard
+    binary: stopbard
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X github.com/NikhilSetiya/stopbar/internal/version.Version={{ .Version }}"]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+  - <<: *build
+    id: stopbar
+    main: ./cmd/stopbar
+    binary: stopbar
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE, README.md, SECURITY.md]
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# One SPDX SBOM per archive, by syft.
+sboms:
+  - artifacts: archive
+
+# Keyless (GitHub OIDC): signing checksums.txt covers every archive and SBOM
+# listed in it. The bundle carries the signature, certificate and Rekor entry.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args: [sign-blob, "--bundle=${signature}", "${artifact}", --yes]
+
+dockers_v2:
+  - ids: [stopbard]
+    images: [ghcr.io/nikhilsetiya/stopbar]
+    tags: ["{{ .Version }}"]
+    platforms: [linux/amd64, linux/arm64]
+    labels:
+      org.opencontainers.image.source: https://github.com/NikhilSetiya/stopbar
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: Apache-2.0
+
+# Signs the pushed multi-arch image by digest (keyless, same identity).
+docker_signs:
+  - cmd: cosign
+    args: [sign, "${artifact}@${digest}", --yes]
+
+release:
+  prerelease: auto
+  draft: false
+
+changelog:
+  use: github
