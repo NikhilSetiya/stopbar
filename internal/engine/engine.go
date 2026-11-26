@@ -832,7 +832,9 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 	// limiter: reserve + audit the allow, atomically.
 	rec := &model.AuditEntry{Type: model.AuditDecision, Body: addIdentity(ctx, map[string]any{"decision": d, "context": auditContext(er)})}
 	erReserve := cloneEnriched(er)
-	if err := e.call(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Reserve(ctx, id, erReserve, e.cfg.DecisionTTL, rec) }); err != nil {
+	if err := e.call(ctx, func(ctx context.Context) error {
+		return e.cfg.Limiter.Reserve(ctx, id, erReserve, e.cfg.DecisionTTL, rec)
+	}); err != nil {
 		e.release(ctx, id, "reserve failed or timed out") // a timed-out Reserve may still land
 		if errors.Is(err, ErrAuditUnavailable) {
 			e.unaudited(req.ID, err)
