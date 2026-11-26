@@ -1,6 +1,7 @@
 package limiter
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -164,15 +165,30 @@ func (s *BoltStore) LoadBreakers() ([]model.BreakerStatus, error) {
 	return out, err
 }
 
+// UnitStore is a Store whose writes can join the store.Unit in ctx (CS-197).
+// after(err) runs once the write has landed or failed.
+type UnitStore interface {
+	PutCtx(ctx context.Context, r Record, entry *model.AuditEntry, after func(error)) error
+	DeleteCtx(ctx context.Context, ids []string) // best effort compaction; never fails the unit
+}
+
 func (s *BoltStore) Put(r Record, entry *model.AuditEntry) error {
+	return s.PutCtx(context.Background(), r, entry, nil)
+}
+
+// PutCtx is Put joining the unit in ctx, if any (store.DB.Write).
+func (s *BoltStore) PutCtx(ctx context.Context, r Record, entry *model.AuditEntry, after func(error)) error {
 	b, err := json.Marshal(r)
+	if err == nil && entry != nil && s.log == nil {
+		err = errors.New("limiter: no audit log configured")
+	}
 	if err != nil {
+		if after != nil {
+			after(err)
+		}
 		return err
 	}
-	if entry != nil && s.log == nil {
-		return errors.New("limiter: no audit log configured")
-	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.db.Write(ctx, func(tx *bolt.Tx) error {
 		if err := tx.Bucket(boltBucket).Put([]byte(r.ID), b); err != nil {
 			return err
 		}
@@ -180,7 +196,17 @@ func (s *BoltStore) Put(r Record, entry *model.AuditEntry) error {
 			return s.log.AppendTx(tx, *entry)
 		}
 		return nil
-	})
+	}, after)
+}
+
+func (s *BoltStore) DeleteCtx(ctx context.Context, ids []string) {
+	_ = s.db.Write(ctx, func(tx *bolt.Tx) error {
+		bk := tx.Bucket(boltBucket)
+		for _, id := range ids {
+			_ = bk.Delete([]byte(id))
+		}
+		return nil
+	}, nil)
 }
 
 func (s *BoltStore) Delete(ids []string) error {

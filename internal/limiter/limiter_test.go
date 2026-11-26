@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	bolt "go.etcd.io/bbolt"
+
 	"github.com/NikhilSetiya/stopbar/internal/audit"
 	"github.com/NikhilSetiya/stopbar/internal/engine"
 	"github.com/NikhilSetiya/stopbar/internal/model"
@@ -763,4 +765,113 @@ func mustUSD(s string) *big.Int {
 		panic(err)
 	}
 	return v
+}
+
+// TestReserveAndCommitInOneUnit: within one evaluation's store.Unit
+// (CS-197), reserve then commit do not wait on each other, hold capacity
+// until the unit settles, and are undone together if the unit fails: no
+// capacity held, no record in memory or on disk. When the unit commits,
+// both land.
+func TestReserveAndCommitInOneUnit(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	lg, err := audit.New(audit.Config{DB: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewBoltStore(db, lg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newClock()
+	l, err := New(Config{Rules: []Rule{{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"}}, Store: s, Clock: c.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := req(walletA, dest, "", "", true)
+	run := func(id string, fail bool) error {
+		u := db.NewUnit()
+		ctx := store.WithUnit(bg, u)
+		if err := l.Reserve(ctx, id, req(walletA, dest, "60", "1", true), time.Minute, &model.AuditEntry{Type: model.AuditDecision, Body: map[string]any{"request_id": id}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Commit(ctx, id, "0x"+id, &model.AuditEntry{Type: model.AuditCommit, Body: map[string]any{"request_id": id}}); err != nil {
+			t.Fatal(err)
+		}
+		if got := usd(t, l, probe, ScopeWallet); got != "60" {
+			t.Fatalf("%s: usage %s while the unit is open, want 60 (held)", id, got)
+		}
+		if fail {
+			_ = db.Write(ctx, func(*bolt.Tx) error { return errors.New("disk full") }, nil)
+		}
+		return u.Commit()
+	}
+	if err := run("r1", true); err == nil {
+		t.Fatal("unit with a failing write committed")
+	}
+	if got := usd(t, l, probe, ScopeWallet); got != "0" {
+		t.Fatalf("usage %s after a failed unit, want 0", got)
+	}
+	if recs, _ := s.Load(); len(recs) != 0 {
+		t.Fatalf("%d records on disk after a failed unit", len(recs))
+	}
+	if err := l.Commit(bg, "r1", "0xr1", nil); !errors.Is(err, ErrUnknownReservation) {
+		t.Fatalf("r1 after failed unit: %v", err)
+	}
+	if err := run("r2", false); err != nil {
+		t.Fatal(err)
+	}
+	if recs, _ := s.Load(); len(recs) != 1 || recs[0].State != StateCommitted {
+		t.Fatalf("records after a committed unit: %+v", recs)
+	}
+	if got := usd(t, l, probe, ScopeWallet); got != "60" {
+		t.Fatalf("usage %s after commit, want 60", got)
+	}
+}
+
+// TestRecordsPastRetentionAreCompacted: a record past retention is deleted
+// from the store by the next reservation, in that reservation's own unit (no
+// extra fsync), and only state is touched: the audit log keeps every record.
+func TestRecordsPastRetentionAreCompacted(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	lg, err := audit.New(audit.Config{DB: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewBoltStore(db, lg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newClock()
+	l, err := New(Config{Rules: []Rule{{Scope: ScopeWallet, Window: "1h", MaxUSD: "100"}}, Store: s, Clock: c.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserve := func(id string) {
+		u := db.NewUnit()
+		if err := l.Reserve(store.WithUnit(bg, u), id, req(walletA, dest, "1", "1", true), time.Minute,
+			&model.AuditEntry{Type: model.AuditDecision, Body: map[string]any{"request_id": id}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := u.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reserve("old")
+	c.Advance(retention + time.Minute)
+	reserve("new")
+	recs, _ := s.Load()
+	if len(recs) != 1 || recs[0].ID != "new" {
+		t.Fatalf("records %+v, want only the new one", recs)
+	}
+	if a, _ := audit.Records(db, 0, 0); len(a) != 2 {
+		t.Fatalf("%d audit records, want 2 (the log is never compacted)", len(a))
+	}
 }

@@ -5,6 +5,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -198,6 +199,92 @@ func (d *DB) Close() error {
 	err := d.bolt.Close()
 	if d.temp != "" {
 		_ = os.RemoveAll(d.temp)
+	}
+	return err
+}
+
+// Unit collects the writes of one evaluation so they commit in ONE
+// transaction with one fsync (CS-197, ADR 0009): the consumed nonce and its
+// request record, the reservation and its decision record, the spent token,
+// the commit record. Each write still carries its own audit record, so every
+// record stays in the same transaction as the state change it describes.
+//
+// Nothing a unit holds is acknowledged until Commit returns nil: the caller
+// (the gateway) answers only after that, and answers fail-closed otherwise.
+type Unit struct {
+	db    *DB
+	mu    sync.Mutex
+	ops   []Op
+	after []func(error)
+	done  bool
+}
+
+type unitKey struct{}
+
+// NewUnit starts a unit on d. Bind it to a context with WithUnit.
+func (d *DB) NewUnit() *Unit { return &Unit{db: d} }
+
+// WithUnit returns ctx carrying u: Write calls under it join u.
+func WithUnit(ctx context.Context, u *Unit) context.Context {
+	return context.WithValue(ctx, unitKey{}, u)
+}
+
+// UnitFrom returns the unit ctx carries, or nil.
+func UnitFrom(ctx context.Context) *Unit {
+	u, _ := ctx.Value(unitKey{}).(*Unit)
+	return u
+}
+
+// Write runs op durably. Under a context carrying an open unit on d, op joins
+// the unit and Write returns nil at once; after(err) runs when the unit
+// commits or fails. Otherwise op runs in its own transaction now (Update) and
+// after(err) runs before Write returns its error. A write that arrives after
+// its unit committed (a component that outlived its stage timeout) also runs
+// on its own, so nothing is ever dropped. after may be nil.
+func (d *DB) Write(ctx context.Context, op Op, after func(error)) error {
+	if u := UnitFrom(ctx); u != nil && u.db == d {
+		u.mu.Lock()
+		if !u.done {
+			u.ops = append(u.ops, op)
+			if after != nil {
+				u.after = append(u.after, after)
+			}
+			u.mu.Unlock()
+			return nil
+		}
+		u.mu.Unlock()
+	}
+	err := d.Update(op)
+	if after != nil {
+		after(err)
+	}
+	return err
+}
+
+// Commit writes every queued op in one transaction (group-committed with
+// other writers, Update), then runs the after callbacks, last first, with
+// the result: on failure nothing in the unit is written and each component
+// rolls back what it held in memory. It returns once the transaction is
+// fsynced, or failed.
+func (u *Unit) Commit() error {
+	u.mu.Lock()
+	u.done = true
+	ops, after := u.ops, u.after
+	u.ops, u.after = nil, nil // a second Commit is a no-op
+	u.mu.Unlock()
+	var err error
+	if len(ops) > 0 {
+		err = u.db.Update(func(tx *bolt.Tx) error {
+			for _, op := range ops {
+				if err := op(tx); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+	for i := len(after) - 1; i >= 0; i-- {
+		after[i](err)
 	}
 	return err
 }

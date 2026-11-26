@@ -1,6 +1,7 @@
 package nonce
 
 import (
+	"context"
 	"path/filepath"
 
 	"github.com/NikhilSetiya/stopbar/internal/audit"
@@ -121,10 +122,10 @@ func TestConsumeWithAuditsAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := &model.AuditEntry{Type: model.AuditRequest, Body: map[string]any{"request_id": "r1"}}
-	if fresh, err := s.ConsumeWith(Key("t", "a", "n"), time.Now().Add(time.Minute), e); !fresh || err != nil {
+	if fresh, err := s.ConsumeWith(context.Background(), Key("t", "a", "n"), time.Now().Add(time.Minute), e); !fresh || err != nil {
 		t.Fatal(fresh, err)
 	}
-	if fresh, _ := s.ConsumeWith(Key("t", "a", "n"), time.Now().Add(time.Minute), e); fresh {
+	if fresh, _ := s.ConsumeWith(context.Background(), Key("t", "a", "n"), time.Now().Add(time.Minute), e); fresh {
 		t.Fatal("replay")
 	}
 	if recs, _ := audit.Records(db, 1, 0); len(recs) != 1 || recs[0].Type != model.AuditRequest {
@@ -134,7 +135,7 @@ func TestConsumeWithAuditsAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := unaudited.ConsumeWith(Key("t", "a", "x"), time.Now().Add(time.Minute), e); err == nil {
+	if _, err := unaudited.ConsumeWith(context.Background(), Key("t", "a", "x"), time.Now().Add(time.Minute), e); err == nil {
 		t.Fatal("an audited consume on a store without a log must fail closed")
 	}
 }

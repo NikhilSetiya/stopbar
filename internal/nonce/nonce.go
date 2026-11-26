@@ -11,6 +11,7 @@ package nonce
 
 import (
 	"container/heap"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -107,17 +108,27 @@ func Open(db *store.DB, bucket string, log *audit.Log, clock func() time.Time) (
 // Consume records key until `until` and reports whether it was unseen. An
 // error means the nonce state is unknown, and the caller must fail closed.
 func (s *Store) Consume(key string, until time.Time) (fresh bool, err error) {
-	return s.ConsumeWith(key, until, nil)
+	return s.ConsumeWith(context.Background(), key, until, nil)
+}
+
+// ConsumeCtx is Consume under ctx: with a store.Unit in ctx the write joins
+// that unit (the signer adapter's spent-token check, CS-197).
+func (s *Store) ConsumeCtx(ctx context.Context, key string, until time.Time) (fresh bool, err error) {
+	return s.ConsumeWith(ctx, key, until, nil)
 }
 
 // ConsumeWith is Consume plus an audit entry written in the same
 // transaction as the nonce (when the store has a log).
 //
-// The store lock is not held across the durable write, so concurrent
-// consumes of different keys share one fsync (store.DB.Update). The key is
-// marked pending first: a concurrent consume of the same key sees it as
-// seen, and it is reported fresh only once its write is durable.
-func (s *Store) ConsumeWith(key string, until time.Time, entry *model.AuditEntry) (fresh bool, err error) {
+// The key is marked pending first and the store lock is not held across the
+// durable write: a concurrent consume of the same key sees it as seen
+// (refused), and other keys share the fsync (store.DB.Update). Without a
+// unit in ctx it returns fresh only once the write is durable. With one
+// (store.Unit, the gateway's evaluation) the write joins the unit and fresh
+// is provisional: the key stays pending until the unit commits, and the
+// gateway answers nothing before that. If the write fails the key is
+// released again.
+func (s *Store) ConsumeWith(ctx context.Context, key string, until time.Time, entry *model.AuditEntry) (fresh bool, err error) {
 	if s.db != nil && entry != nil && s.log == nil {
 		return false, errors.New("nonce: no audit log configured for an audited consume")
 	}
@@ -126,7 +137,7 @@ func (s *Store) ConsumeWith(key string, until time.Time, entry *model.AuditEntry
 	_, seen := s.until[key]
 	if seen || s.pending[key] {
 		s.mu.Unlock()
-		s.forget(gone)
+		s.forget(ctx, gone)
 		return false, nil
 	}
 	if s.db == nil {
@@ -136,11 +147,11 @@ func (s *Store) ConsumeWith(key string, until time.Time, entry *model.AuditEntry
 	}
 	s.pending[key] = true
 	s.mu.Unlock()
-	s.forget(gone)
+	s.forget(ctx, gone)
 
 	v := make([]byte, 8)
 	binary.BigEndian.PutUint64(v, uint64(until.UnixNano()))
-	err = s.db.Update(func(tx *bolt.Tx) error {
+	err = s.db.Write(ctx, func(tx *bolt.Tx) error {
 		if err := tx.Bucket(s.bucket).Put([]byte(key), v); err != nil {
 			return err
 		}
@@ -148,14 +159,17 @@ func (s *Store) ConsumeWith(key string, until time.Time, entry *model.AuditEntry
 			return s.log.AppendTx(tx, *entry)
 		}
 		return nil
+	}, func(err error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		delete(s.pending, key)
+		if err == nil {
+			s.insert(key, until)
+		}
 	})
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.pending, key)
 	if err != nil {
 		return false, fmt.Errorf("nonce: persist: %w", err)
 	}
-	s.insert(key, until)
 	return true, nil
 }
 
@@ -165,7 +179,7 @@ func (s *Store) Len() int {
 	gone := s.prune(s.clock())
 	n := len(s.until)
 	s.mu.Unlock()
-	s.forget(gone)
+	s.forget(context.Background(), gone)
 	return n
 }
 
@@ -186,11 +200,13 @@ func (s *Store) prune(now time.Time) []string {
 	return gone
 }
 
-// forget deletes expired keys from the file. Best effort: Open drops expired
-// entries on load as well. A key consumed again meanwhile is not deleted.
-func (s *Store) forget(gone []string) {
+// forget compacts expired keys out of the file, in the caller's unit when
+// there is one (no fsync of its own). Best effort, so it never fails the
+// unit: Open drops expired entries on load as well. A key consumed again
+// meanwhile is not deleted.
+func (s *Store) forget(ctx context.Context, gone []string) {
 	if s.db != nil && len(gone) > 0 {
-		_ = s.db.Update(func(tx *bolt.Tx) error {
+		_ = s.db.Write(ctx, func(tx *bolt.Tx) error {
 			b := tx.Bucket(s.bucket)
 			now := s.clock()
 			for _, k := range gone {
@@ -198,12 +214,10 @@ func (s *Store) forget(gone []string) {
 				if len(v) != 8 || now.Before(time.Unix(0, int64(binary.BigEndian.Uint64(v)))) {
 					continue // consumed again since it expired: keep it
 				}
-				if err := b.Delete([]byte(k)); err != nil {
-					return err
-				}
+				_ = b.Delete([]byte(k))
 			}
 			return nil
-		})
+		}, nil)
 	}
 }
 

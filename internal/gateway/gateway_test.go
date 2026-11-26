@@ -34,7 +34,9 @@ func newGW(cfg Config) *Gateway {
 // alwaysFresh lets the fuzzer reach the evaluator with repeated nonces.
 type alwaysFresh struct{}
 
-func (alwaysFresh) ConsumeWith(string, time.Time, *model.AuditEntry) (bool, error) { return true, nil }
+func (alwaysFresh) ConsumeWith(context.Context, string, time.Time, *model.AuditEntry) (bool, error) {
+	return true, nil
+}
 
 func fixture(t testing.TB, name string) []byte {
 	t.Helper()
@@ -423,7 +425,7 @@ func TestConcurrentReplayExactlyOneWins(t *testing.T) {
 
 type brokenNonces struct{}
 
-func (brokenNonces) ConsumeWith(string, time.Time, *model.AuditEntry) (bool, error) {
+func (brokenNonces) ConsumeWith(context.Context, string, time.Time, *model.AuditEntry) (bool, error) {
 	return false, errors.New("disk full")
 }
 

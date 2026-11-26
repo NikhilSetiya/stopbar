@@ -143,8 +143,11 @@ func (l *Log) Op(e model.AuditEntry) store.Op {
 // It takes no lock of its own: the chain head is read inside the write
 // transaction, so concurrent appends (group-committed by the store) chain in
 // commit order.
-func (l *Log) Append(_ context.Context, typ model.AuditRecordType, body any) error {
-	if err := l.db.Update(l.Op(model.AuditEntry{Type: typ, Body: body})); err != nil {
+//
+// Under a context carrying a store.Unit it joins that unit (CS-197): the
+// record is written with the evaluation's other state, in one transaction.
+func (l *Log) Append(ctx context.Context, typ model.AuditRecordType, body any) error {
+	if err := l.db.Write(ctx, l.Op(model.AuditEntry{Type: typ, Body: body}), nil); err != nil {
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	return nil
