@@ -11,6 +11,7 @@ import base64
 import datetime
 import json
 import os
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -95,6 +96,11 @@ class Client:
     ``stopbar keygen api-key`` (None only for loopback dev with auth off).
     tenant/agent_id must match the key's identity — Stopbar derives identity
     from the key, and a mismatched body is rejected.
+
+    mTLS (a stopbard serving https with client-certificate auth, CS-103):
+    pass client_cert and client_key (PEM paths) instead of api_key; the
+    certificate's SPIFFE ID is the identity. ca_cert is the PEM that issued
+    stopbard's server certificate (default: system roots).
     """
 
     base_url: str
@@ -103,9 +109,21 @@ class Client:
     agent_id: str = "agent"
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     timeout: float = 15.0
+    client_cert: str | None = None
+    client_key: str | None = None
+    ca_cert: str | None = None
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
+        self._ssl: ssl.SSLContext | None = None
+        if self.client_cert or self.client_key or self.ca_cert:
+            if bool(self.client_cert) != bool(self.client_key):
+                raise ValueError("client_cert and client_key go together")
+            ctx = ssl.create_default_context(cafile=self.ca_cert)
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+            if self.client_cert:
+                ctx.load_cert_chain(self.client_cert, self.client_key)
+            self._ssl = ctx
 
     # ---- context ----
 
@@ -274,7 +292,7 @@ class Client:
             headers["Authorization"] = "Bearer " + self.api_key
         req = urllib.request.Request(self.base_url + path, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            with urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl) as r:
                 return r.status, _json(r.read())
         except urllib.error.HTTPError as e:
             return e.code, _json(e.read())
