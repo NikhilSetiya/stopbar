@@ -166,6 +166,19 @@ type EnrichedRequest struct {
 	Destination            DestinationInfo     `json:"destination"`
 	Taint                  []string            `json:"taint"`
 	MinutesSinceCodeChange *int                `json:"minutes_since_code_change"`
+	// Tokens is display metadata for every token the intent references, at
+	// any depth (assets, swap in/out tokens), keyed by lowercase address
+	// (CS-143). For the approver's rendering only: policy never reads it.
+	Tokens map[string]TokenInfo `json:"tokens,omitempty"`
+}
+
+// TokenInfo is a token's on-chain decimals() and symbol() (CS-143). Decimals
+// is nil when it could not be read: the rendering then shows raw base units
+// and "decimals unavailable", never a guess. Symbol is sanitized
+// (render.SanitizeSymbol) and may be empty.
+type TokenInfo struct {
+	Symbol   string `json:"symbol,omitempty"`
+	Decimals *int   `json:"decimals"`
 }
 
 // Velocity is spend in a window.
@@ -274,6 +287,11 @@ type EscalationStatus struct {
 	ResolvedBy string          `json:"resolved_by,omitempty"`
 	ResolvedAt *time.Time      `json:"resolved_at,omitempty"`
 	Decision   *Decision       `json:"decision,omitempty"`
+	// Rendered is the plain-language intent an approver reads before signing
+	// over decision.payload_hash (CS-143, LLD §6.3): amounts with decimals and
+	// USD ("price unavailable" when there is no price, never $0), and every
+	// address shortened with its 6-word checksum phrase.
+	Rendered string `json:"rendered,omitempty"`
 }
 
 // ErrBreakerNotOpen means a reset was asked for a tenant whose circuit breaker

@@ -98,6 +98,18 @@ func (m *mockNode) handle(w http.ResponseWriter, r *http.Request) {
 			return new(big.Int).Mul(big.NewInt(dollars), pow10big(int(m.feedDec)))
 		}
 		switch {
+		case to == brokenToken: // CS-143: every read fails
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": 3, "message": "execution reverted"}})
+		case sel == selSymbol && to == usdc: // ABI string
+			reply("0x" + abiString("USDC"))
+		case sel == selSymbol && to == wethToken: // old-style bytes32
+			reply("0x" + hex.EncodeToString(append([]byte("WETH"), make([]byte, 28)...)))
+		case sel == selSymbol && to == hostileToken:
+			reply("0x" + abiString("US\u202eDC\n"+strings.Repeat("X", 300)))
+		case sel == selDecimals && to == wethToken:
+			reply("0x" + word32(big.NewInt(18)))
+		case sel == selDecimals && to == hostileToken: // not a uint8
+			reply("0x" + word32(new(big.Int).Lsh(big.NewInt(1), 200)))
 		case sel == selDecimals && to == usdc:
 			reply("0x" + word32(big.NewInt(6)))
 		case sel == selDecimals: // the feed's own decimals()

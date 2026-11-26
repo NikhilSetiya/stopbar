@@ -15,6 +15,7 @@ import (
 const (
 	selBalanceOf       = "70a08231" // balanceOf(address) -> uint256
 	selDecimals        = "313ce567" // decimals() -> uint8
+	selSymbol          = "95d89b41" // symbol() -> string (some old tokens: bytes32)
 	selLatestRoundData = "feaf968c" // latestRoundData() -> (uint80,int256,uint256,uint256,uint80)
 )
 
@@ -23,6 +24,7 @@ const (
 var Signatures = map[string]string{
 	selBalanceOf:       "balanceOf(address)",
 	selDecimals:        "decimals()",
+	selSymbol:          "symbol()",
 	selLatestRoundData: "latestRoundData()",
 }
 
@@ -61,6 +63,35 @@ func decodeUint(ret []byte) (*big.Int, error) {
 		return nil, fmt.Errorf("return is %d bytes, want ≥32", len(ret))
 	}
 	return new(big.Int).SetBytes(ret[:32]), nil
+}
+
+// maxSymbolBytes bounds the symbol() return we decode; anything longer is
+// cut (the rendering caps it far shorter anyway).
+const maxSymbolBytes = 256
+
+// decodeString reads an ABI-encoded string return (offset, length, bytes),
+// or, for old tokens that return bytes32 (e.g. MKR), the zero-padded bytes.
+func decodeString(ret []byte) (string, error) {
+	if len(ret) == 32 {
+		return strings.TrimRight(string(ret), "\x00"), nil
+	}
+	off, err := word(ret, 0)
+	if err != nil {
+		return "", err
+	}
+	if !off.IsInt64() || off.Int64() > int64(len(ret)-32) || off.Int64() < 0 {
+		return "", fmt.Errorf("string offset %s out of range", off)
+	}
+	o := int(off.Int64())
+	n := new(big.Int).SetBytes(ret[o : o+32])
+	if !n.IsInt64() || n.Int64() > int64(len(ret)-o-32) {
+		return "", fmt.Errorf("string length %s out of range", n)
+	}
+	b := ret[o+32 : o+32+int(n.Int64())]
+	if len(b) > maxSymbolBytes {
+		b = b[:maxSymbolBytes]
+	}
+	return string(b), nil
 }
 
 // word returns the i-th 32-byte word of a return value as an unsigned integer.

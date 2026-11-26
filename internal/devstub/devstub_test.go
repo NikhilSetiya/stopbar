@@ -90,6 +90,14 @@ func TestWorldSlippage(t *testing.T) {
 			if got := slices.Contains(er.Intent.Flags, "excessive_slippage"); got != tt.flagged || er.PriceStale != tt.stale {
 				t.Fatalf("flagged=%v stale=%v, want %v %v (flags %v)", got, er.PriceStale, tt.flagged, tt.stale, er.Intent.Flags)
 			}
+			// CS-143: display metadata for both swap tokens from the world;
+			// a token the world does not list has no decimals.
+			if in := er.Tokens[usdc]; in.Symbol != "USDC" || in.Decimals == nil || *in.Decimals != 6 {
+				t.Fatalf("Tokens[usdc] = %+v", in)
+			}
+			if out, ok := er.Tokens[tt.out]; !ok || out.Decimals != nil {
+				t.Fatalf("Tokens[%s] = %+v, %v; want present with no decimals", tt.out, out, ok)
+			}
 		})
 	}
 }

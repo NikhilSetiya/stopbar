@@ -115,7 +115,7 @@ func (f *fakeApprover) Status(ctx context.Context, id string) (model.EscalationS
 	if f.err != nil {
 		return model.EscalationStatus{}, f.err
 	}
-	return model.EscalationStatus{RequestID: id, State: f.state, Decision: f.decision,
+	return model.EscalationStatus{RequestID: id, State: f.state, Decision: f.decision, Rendered: "Send 1 ETH to 0x9f3a…7c21 [worry work baby rebel fog filter]",
 		Request: model.ActionRequest{ID: id, Tenant: "acme", Actor: model.Actor{AgentID: "bot"}}}, nil
 }
 
@@ -382,7 +382,7 @@ func TestApprovalEnvelopeFailures(t *testing.T) {
 			}
 			if status == 200 {
 				maxExp, _ := got["max_expiry"].(float64)
-				if got["escalation_id"] != "e1" || got["payload_hash"] != ph || got["tenant"] != "acme" ||
+				if got["escalation_id"] != "e1" || got["payload_hash"] != ph || got["tenant"] != "acme" || got["rendered"] != "Send 1 ETH to 0x9f3a…7c21 [worry work baby rebel fog filter]" ||
 					int64(maxExp) > time.Now().Add(approval.MaxExpiryAhead).Unix()+1 {
 					t.Fatalf("to-sign %v", got)
 				}

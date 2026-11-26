@@ -141,7 +141,7 @@ IDs are referenced from the [task backlog](TASKS.md).
 
 - FR-IR-1: Decode EVM transactions (native transfer, ERC-20 transfer/approve, ERC-721/1155, Safe txs, multicall) into an `IntentSummary`.
 - FR-IR-2: Risk flags: unlimited approval, `delegatecall`, proxy upgrade, new destination, first-time contract, address similarity to known destinations (address poisoning), swaps with zero or excessive-slippage minimum output (allowed-but-destructive actions).
-- FR-IR-3: Render summaries out of band (Slack, Telegram, email, CLI) with the payload hash, so approvers see what will be signed.
+- FR-IR-3: Render summaries out of band (Slack, Telegram, email, CLI) with the payload hash, so approvers see what will be signed. Every address carries a 6-word checksum phrase so a look-alike address reads differently, and a missing price reads "price unavailable", never $0. (CS-143: `internal/render`, served as `rendered` on the escalation and shown by `stopbar approve`; LLD §6.3.)
 
 ### 7.6 Escalation (FR-ESC)
 

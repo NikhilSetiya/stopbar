@@ -131,7 +131,7 @@ def signed_approve(cli, url, esc_id, approver_keys, api_key):
     response body (the quorum-reaching one) as a dict."""
     ad = {}
     for kf in approver_keys:
-        r = subprocess.run([str(cli), "approve", esc_id, "--url", url, "--approver-key", str(kf), "--key", api_key],
+        r = subprocess.run([str(cli), "approve", esc_id, "--url", url, "--approver-key", str(kf), "--key", api_key, "--yes"],
                            capture_output=True, text=True)
         body = r.stdout.split("\n", 1)[1] if "\n" in r.stdout else "{}"
         try:

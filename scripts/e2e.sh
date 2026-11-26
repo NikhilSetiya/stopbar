@@ -35,8 +35,8 @@ go test -count=1 -run 'TestDecisionTokenVectors|TestFrozenV1VectorsRejected|Test
 step "engine: fail-closed matrix, invariants, gateway wiring (CS-104)"
 go test -race -count=1 ./internal/engine/
 
-step "trusted core is stdlib-only (canon, decision, model)"
-bad="$(go list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./internal/canon ./internal/decision ./internal/model | grep -v '^github.com/NikhilSetiya/stopbar/' || true)"
+step "trusted core is stdlib-only (canon, decision, model, render)"
+bad="$(go list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./internal/canon ./internal/decision ./internal/model ./internal/render | grep -v '^github.com/NikhilSetiya/stopbar/' || true)"
 [[ -z "$bad" ]] || { echo "FAIL third-party imports in the trusted core: $bad"; exit 1; }
 echo "ok   no third-party imports"
 

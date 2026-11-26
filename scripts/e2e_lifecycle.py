@@ -89,7 +89,8 @@ def approver_keygen(path):
 
 
 def cli_approve(rid, addr, approver_key, api_key, verb="approve"):
-    return subprocess.run([stopbar_cli, verb, rid, "--url", f"http://{addr}", "--approver-key", approver_key, "--key", api_key],
+    # --yes: a script cannot answer the confirmation prompt (CS-143); the rendering still goes to stderr.
+    return subprocess.run([stopbar_cli, verb, rid, "--url", f"http://{addr}", "--approver-key", approver_key, "--key", api_key, "--yes"],
                           capture_output=True, text=True)
 
 

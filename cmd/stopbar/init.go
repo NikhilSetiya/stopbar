@@ -205,7 +205,8 @@ Next:
        export STOPBAR_URL=%[9]s STOPBAR_KEY=%[8]s STOPBAR_TENANT=%[2]s
        sb = stopbar.Client(os.environ["STOPBAR_URL"], api_key=os.environ["STOPBAR_KEY"], tenant="%[2]s", agent_id="%[3]s")
   3. Approve an escalation (HTTP 202 gives its request_id): each approver signs locally (the
-     signature authorizes; --key only authenticates the HTTP call, since auth is on); the first
+     signature authorizes; --key only authenticates the HTTP call, since auth is on). Each shows
+     the rendered intent and payload hash and asks to confirm (add --yes in scripts); the first
      reports "escalation not executed (HTTP 202)" until the second reaches quorum:
        stopbar approve <request_id> --approver-key %[1]s/approver-1.key --url %[9]s --key "$STOPBAR_KEY"
        stopbar approve <request_id> --approver-key %[1]s/approver-2.key --url %[9]s --key "$STOPBAR_KEY"

@@ -15,7 +15,8 @@
     "expires_at": {"type": "string", "format": "date-time", "description": "Approval deadline (pending TTL, default 15m)."},
     "resolved_by": {"type": "string", "description": "Approver key id; absent for pending and expired."},
     "resolved_at": {"type": "string", "format": "date-time"},
-    "decision": {"type": "object", "description": "The escalate decision while pending, then the final decision."}
+    "decision": {"type": "object", "description": "The escalate decision while pending, then the final decision."},
+    "rendered": {"type": "string", "description": "CS-143, LLD §6.3: the plain-language intent an approver reads before signing over decision.payload_hash. Amounts carry decimals and USD (\"price unavailable\" when there is no price, never $0); every address is shortened and followed by its 6-word checksum phrase. Absent on records created before CS-143."}
   },
   "if": {"properties": {"state": {"enum": ["allowed", "denied", "expired"]}}},
   "then": {"required": ["resolved_at", "decision"]}

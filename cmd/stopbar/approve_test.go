@@ -64,7 +64,7 @@ func TestApproveCmdArgOrder(t *testing.T) {
 	keyFile := testApproverKeyFile(t)
 
 	// id first, then flags — the shape demo-live uses.
-	if err := approveCmd([]string{"req_abc", "--url", srv.URL, "--key", "stopbar_sk_test", "--approver-key", keyFile}); err != nil {
+	if err := approveCmd([]string{"req_abc", "--url", srv.URL, "--key", "stopbar_sk_test", "--approver-key", keyFile, "--yes"}); err != nil {
 		t.Fatalf("approveCmd(id-first): %v", err)
 	}
 	if got.method != http.MethodPost || got.postPath != "/v1/approvals/req_abc" || got.getPath != "/v1/approvals/req_abc" {
@@ -113,7 +113,7 @@ func TestRejectCmd(t *testing.T) {
 	defer srv.Close()
 	keyFile := testApproverKeyFile(t)
 
-	if err := rejectCmd([]string{"req_abc", "--url", srv.URL, "--key", "stopbar_sk_ops", "--approver-key", keyFile}); err != nil {
+	if err := rejectCmd([]string{"req_abc", "--url", srv.URL, "--key", "stopbar_sk_ops", "--approver-key", keyFile, "--yes"}); err != nil {
 		t.Fatalf("rejectCmd: %v", err)
 	}
 	for _, c := range []struct {
@@ -126,7 +126,7 @@ func TestRejectCmd(t *testing.T) {
 		{http.StatusConflict, `{"code":"DUPLICATE_VOTE"}`},
 	} {
 		status, body = c.status, c.body
-		if err := rejectCmd([]string{"req_abc", "--url", srv.URL, "--approver-key", keyFile}); err == nil {
+		if err := rejectCmd([]string{"req_abc", "--url", srv.URL, "--approver-key", keyFile, "--yes"}); err == nil {
 			t.Fatalf("rejectCmd accepted HTTP %d %s", c.status, c.body)
 		}
 	}
@@ -148,4 +148,56 @@ func TestApproverKeygen(t *testing.T) {
 		t.Fatal("approver keygen overwrote an existing key")
 	}
 	_ = priv
+}
+
+// TestApproveConfirmation (CS-143): approve and reject sign only once the
+// approver confirms the rendering at a terminal, or with --yes. A decline,
+// or a non-terminal stdin without --yes, signs and posts nothing.
+func TestApproveConfirmation(t *testing.T) {
+	keyFile := testApproverKeyFile(t)
+	oldIn, oldTTY := stdin, stdinIsTerminal
+	t.Cleanup(func() { stdin, stdinIsTerminal = oldIn, oldTTY })
+	for _, verb := range []string{"approve", "reject"} {
+		for _, c := range []struct {
+			name, input string
+			tty, yes    bool
+			signs       bool
+			errHas      string
+		}{
+			{"confirm y", "y\n", true, false, true, ""},
+			{"confirm YES", "YES\n", true, false, true, ""},
+			{"decline", "n\n", true, false, false, "not confirmed"},
+			{"empty answer declines", "\n", true, false, false, "not confirmed"},
+			{"EOF declines", "", true, false, false, "not confirmed"},
+			{"non-terminal without --yes refused", "y\n", false, false, false, "not a terminal"},
+			{"--yes from a script", "", false, true, true, ""},
+		} {
+			t.Run(verb+" "+c.name, func(t *testing.T) {
+				srv, got := fakeApprovalServer(t, http.StatusOK, `{"request_id":"req_abc","outcome":"allow"}`)
+				defer srv.Close()
+				stdin, stdinIsTerminal = strings.NewReader(c.input), func() bool { return c.tty }
+				args := []string{"req_abc", "--url", srv.URL, "--approver-key", keyFile}
+				if c.yes {
+					args = append(args, "--yes")
+				}
+				dec, suffix := approval.Approve, ""
+				if verb == "reject" {
+					dec, suffix = approval.Reject, "/reject"
+				}
+				_, err := signedApprovalCall(verb, args, dec, suffix)
+				if c.signs {
+					if err != nil || got.posted.Sig == "" || got.posted.Decision != dec {
+						t.Fatalf("err %v, posted %+v; want a signed %s", err, got.posted, dec)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), c.errHas) {
+					t.Fatalf("err %v, want one containing %q", err, c.errHas)
+				}
+				if got.postPath != "" {
+					t.Fatalf("posted to %s without confirmation", got.postPath)
+				}
+			})
+		}
+	}
 }

@@ -129,6 +129,7 @@ func (e *ChainEnricher) Enrich(ctx context.Context, er *model.EnrichedRequest) e
 		er.PctOfBalance = decimalString(new(big.Rat).Quo(tokens, balTokens))
 	}
 
+	er.Tokens = e.tokenInfo(ctx, er.Intent)
 	return CheckSlippage(ctx, er, e.maxSlippage, e.quote)
 }
 

@@ -87,8 +87,8 @@ with tempfile.TemporaryDirectory() as tmp:
         rid = dd.get("request_id", "")
         pids = [x.get("policy_id") for x in dd.get("reasons", [])]
         expect(st == 202 and "large-share-of-balance" in pids and rid, f"0.5 ETH (50% of balance) escalates: HTTP {st} {pids}")
-        approve = lambda n: subprocess.run([cli, "approve", rid, "--approver-key", os.path.join(d, f"approver-{n}.key"), "--url", url, "--key", secret],
-                                           capture_output=True, text=True)
+        approve = lambda n: subprocess.run([cli, "approve", rid, "--approver-key", os.path.join(d, f"approver-{n}.key"), "--url", url, "--key", secret, "--yes"],
+                                           capture_output=True, text=True)  # --yes: no terminal to confirm at (CS-143)
         a1 = approve(1)
         expect(a1.returncode != 0 and "HTTP 202" in a1.stdout, "approver-1 signs: 1 of 2, still pending (HTTP 202)")
         a2 = approve(2)

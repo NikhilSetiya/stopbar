@@ -92,7 +92,10 @@ sb.reject(request_id, approver_key_1)   # one valid reject denies outright, rega
 Refusals raise `StopbarRequestError` with `.code` (`NOT_FOUND`, `CONFLICT`,
 `ALREADY_RESOLVED`, `RESERVATION_EXPIRED`, `DUPLICATE_VOTE`, …). The CLI
 equivalents are `stopbar approve <id> --approver-key FILE` and
-`stopbar reject <id> --approver-key FILE`.
+`stopbar reject <id> --approver-key FILE`: they print the rendered intent
+(every address with its 6-word checksum phrase) and the payload hash, then ask
+for confirmation. From a script, add `--yes`; without it a non-terminal stdin
+is refused.
 
 ### Provenance labels (taint)
 

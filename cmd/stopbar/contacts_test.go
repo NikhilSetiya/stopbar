@@ -17,6 +17,7 @@ import (
 	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/enrich"
 	"github.com/NikhilSetiya/stopbar/internal/gateway"
+	"github.com/NikhilSetiya/stopbar/internal/render"
 	"github.com/NikhilSetiya/stopbar/internal/store"
 )
 
@@ -92,6 +93,8 @@ func TestContactsCLIOverAPI(t *testing.T) {
 		want string // substring of the output, or of the error if it starts with "ERR "
 	}{
 		{"look-alike request warns", []string{"add", lookalike, "--url", srv.URL, "--key", "sk-ops"}, "WARNING: looks like existing entry " + payee + ` "vendor"`},
+		{"look-alike shows the existing entry's checksum phrase", []string{"list", "--url", srv.URL, "--key", "sk-ops"}, "existing checksum: " + render.Address(payee)},
+		{"every entry shows its own checksum phrase", []string{"list", "--url", srv.URL, "--key", "sk-ops"}, "checksum: " + render.Address(lookalike)},
 		{"exact duplicate refused", []string{"add", payee, "--url", srv.URL, "--key", "sk-ops"}, "ERR HTTP 409"},
 		{"evaluate-only key cannot request", []string{"add", "0x9999999999999999999999999999999999999999", "--url", srv.URL, "--key", "sk-bot"}, "ERR HTTP 403"},
 		{"bad key", []string{"list", "--url", srv.URL, "--key", "nope"}, "ERR HTTP 401"},
