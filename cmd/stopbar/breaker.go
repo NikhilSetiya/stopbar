@@ -42,7 +42,11 @@ func breakerCmd(args []string) error {
 	key := fs.String("key", "", "API key for the HTTP call itself (optional)")
 	var approverKeys keyList
 	fs.Var(&approverKeys, "approver-key", "local approver private key file; repeat once per approver, for a reset")
+	useTLS := mtlsFlags(fs)
 	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if err := useTLS(); err != nil {
 		return err
 	}
 	if *tenant == "" || fs.NArg() != 0 || (args[0] == "reset" && len(approverKeys) == 0) || (args[0] == "status" && len(approverKeys) > 0) {
@@ -114,7 +118,7 @@ func breakerCall(method, u string, body []byte, key string) (model.BreakerStatus
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := apiClient.Do(req)
 	if err != nil {
 		return st, 0, err
 	}

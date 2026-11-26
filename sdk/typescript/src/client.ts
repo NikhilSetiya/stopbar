@@ -4,9 +4,10 @@
 // /v1/evaluate and resolves with the signed decision only on an allow,
 // rejecting with a typed error on a deny or escalate. Provenance labels (the
 // agent's taint for the current context) ride on every request. Zero runtime
-// dependencies: global fetch (Node >= 20).
+// dependencies: global fetch (Node >= 20), or node:https for mTLS.
 
 import { randomBytes, randomUUID } from "node:crypto";
+import { request as httpsRequest } from "node:https";
 import { APPROVE, REJECT, loadKeyFile, signEscalation } from "./approval.js";
 import { detectEncodings } from "./encoding.js";
 import { StopbarAuthError, StopbarDenied, StopbarEscalated, StopbarRequestError, StopbarUnavailable, reasonIds } from "./errors.js";
@@ -54,6 +55,10 @@ export interface ClientOptions {
   agentId?: string;
   sessionId?: string;
   timeoutMs?: number;
+  /** mTLS (CS-103): a stopbard serving https with client-certificate auth. The
+   * certificate's SPIFFE ID is the identity, so omit apiKey. PEM contents;
+   * `ca` is the CA that issued stopbard's server certificate (default: system roots). */
+  tls?: { cert: string | Buffer; key: string | Buffer; ca?: string | Buffer };
 }
 
 export interface EvaluateOptions {
@@ -84,6 +89,7 @@ export class Client {
   readonly agentId: string;
   readonly sessionId: string;
   readonly timeoutMs: number;
+  readonly #tls?: ClientOptions["tls"];
 
   constructor(baseUrl: string, opts: ClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -92,6 +98,8 @@ export class Client {
     this.agentId = opts.agentId ?? "agent";
     this.sessionId = opts.sessionId ?? randomUUID();
     this.timeoutMs = opts.timeoutMs ?? 15_000;
+    if (opts.tls && !(opts.tls.cert && opts.tls.key)) throw new Error("tls needs both cert and key");
+    this.#tls = opts.tls;
   }
 
   /** A Session accumulates provenance labels (monotonic taint) that ride on
@@ -218,19 +226,37 @@ export class Client {
   private async request(method: string, path: string, body?: unknown): Promise<[number, Record<string, unknown>]> {
     const headers: Record<string, string> = body === undefined ? {} : { "Content-Type": "application/json" };
     if (this.apiKey) headers.Authorization = "Bearer " + this.apiKey;
-    let res: Response;
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    let status: number;
     let text: string;
     try {
-      res = await fetch(this.baseUrl + path, {
-        method, headers, body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-      text = await res.text();
+      if (this.#tls) {
+        [status, text] = await this.mtlsRequest(method, path, headers, payload);
+      } else {
+        const res = await fetch(this.baseUrl + path, { method, headers, body: payload, signal: AbortSignal.timeout(this.timeoutMs) });
+        [status, text] = [res.status, await res.text()];
+      }
     } catch (err) {
-      // unreachable, reset or timed out: fail closed
+      // unreachable, reset, refused handshake or timed out: fail closed
       throw new StopbarUnavailable(`Stopbar unreachable at ${this.baseUrl}: ${(err as Error).message}`, { cause: err });
     }
-    return [res.status, parse(text)];
+    return [status, parse(text)];
+  }
+
+  // Global fetch cannot present a client certificate, so mTLS uses node:https.
+  private mtlsRequest(method: string, path: string, headers: Record<string, string>, payload?: string): Promise<[number, string]> {
+    const { cert, key, ca } = this.#tls!;
+    return new Promise((resolve, reject) => {
+      const req = httpsRequest(this.baseUrl + path, { method, headers, cert, key, ca, minVersion: "TLSv1.3", timeout: this.timeoutMs }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => resolve([res.statusCode ?? 0, Buffer.concat(chunks).toString("utf8")]));
+        res.on("error", reject);
+      });
+      req.on("timeout", () => req.destroy(new Error("timed out")));
+      req.on("error", reject);
+      req.end(payload);
+    });
   }
 }
 

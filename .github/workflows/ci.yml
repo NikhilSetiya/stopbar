@@ -53,6 +53,10 @@ jobs:
         with: {node-version: "20"}
       - name: SDKs (TypeScript, Python) vs live stopbard
         run: ./scripts/e2e_sdk.sh "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
+      # mTLS / SPIFFE client identity (CS-103): runtime-minted certs, both SDKs
+      # and the CLI over https; needs the TypeScript dist the SDK step built.
+      - name: mTLS over HTTPS
+        run: python3 scripts/e2e_mtls.py "$RUNNER_TEMP/stopbard" "$RUNNER_TEMP/stopbar"
       # The README's end-to-end quickstart block, verbatim (CS-198): init, Anvil,
       # the sample agent, 2-of-2 approval, corpus attacks, T3, audit verify.
       # Foundry is a pinned release, checksum-verified.

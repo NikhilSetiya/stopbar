@@ -1,6 +1,7 @@
 // Command stopbard is the Stopbar policy service / sidecar.
 //
-// Until authentication lands (CS-103) it only listens on loopback. Without
+// Without authentication (CS-103: -auth-keys, or mTLS with -tls-cert,
+// -tls-key, -tls-client-ca and -mtls-identities) it only listens on loopback. Without
 // -dev-world it runs no engine and /v1/evaluate answers ENGINE_UNAVAILABLE.
 // With -dev-world it runs the real engine and policy bundle on stub
 // components (internal/devstub) with the real limiter and decision signer.
@@ -12,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -48,7 +50,7 @@ import (
 )
 
 func main() {
-	listen := flag.String("listen", "127.0.0.1:7777", "address to listen on (loopback only until CS-103 adds auth)")
+	listen := flag.String("listen", "127.0.0.1:7777", "address to listen on (loopback only without -auth-keys or mTLS)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	devWorld := flag.String("dev-world", "", "DEV ONLY: run the engine on stub components seeded from this world JSON (corpus setup shape)")
 	policies := flag.String("policies", "examples/policies", "policy bundle directory (with -dev-world)")
@@ -64,6 +66,10 @@ func main() {
 	breakerQuorum := flag.Int("breaker-quorum", limiter.DefaultBreakerQuorum, "distinct approver OWNERS needed (M of N, CS-124/151) to reset a tripped circuit breaker; always at least 2, with no -dev-world exception (internal/limiter.New enforces this unconditionally)")
 	approvalQuorum := flag.Int("approval-quorum", limiter.DefaultBreakerQuorum, "distinct approver OWNERS needed (M of N, CS-151) to approve an escalation or a destination-registry addition; at least 2 unless -dev-world")
 	approversFile := flag.String("approvers", "", "CS-151: approver public-key config (JSON, internal/approval.LoadConfigFile), shared by escalation approve/reject, breaker reset and contact approval — required for each; without it all three are disabled")
+	tlsCert := flag.String("tls-cert", "", "mTLS service mode (CS-103): server certificate PEM; needs -tls-key, -tls-client-ca and -mtls-identities")
+	tlsKey := flag.String("tls-key", "", "mTLS: server private key PEM, mode 0600")
+	tlsClientCA := flag.String("tls-client-ca", "", "mTLS: PEM CA certificate(s) that issue client certificates; enables authentication by client certificate and non-loopback listening")
+	mtlsIdentities := flag.String("mtls-identities", "", "mTLS: JSON array of {spiffe_id, tenant, agent_id, scopes}; a client certificate's SPIFFE ID URI SAN must be listed")
 	configPath := flag.String("config", "", "config file (JSON); its fields set any flag not also given on the command line")
 	flag.Parse()
 	if *showVersion {
@@ -75,7 +81,7 @@ func main() {
 		if err := applyConfigFile(*configPath, map[string]*string{
 			"listen": listen, "dev-world": devWorld, "policies": policies, "state-dir": stateDir,
 			"decision-key": decisionKey, "dev-wallet": devWallet, "tenant": tenant, "auth-keys": authKeys,
-			"approvers": approversFile,
+			"approvers": approversFile, "tls-cert": tlsCert, "tls-key": tlsKey, "tls-client-ca": tlsClientCA, "mtls-identities": mtlsIdentities,
 		}, checkpointEvery, map[string]*int{"rate-per-min": ratePerMin, "breaker-quorum": breakerQuorum, "approval-quorum": approvalQuorum},
 			map[string]*time.Duration{"pending-ttl": pendingTTL, "contact-cooling-off": coolingOff}); err != nil {
 			log.Error("stopbard config", "err", err)
@@ -98,7 +104,8 @@ func main() {
 	}
 	if err := serve(*listen, *stateDir, devOpts{world: *devWorld, policies: *policies, decisionKey: *decisionKey,
 		wallet: *devWallet, tenant: *tenant, checkpointEvery: *checkpointEvery, authKeys: *authKeys, ratePerMin: *ratePerMin,
-		breakerQuorum: *breakerQuorum, approvalQuorum: *approvalQuorum, pendingTTL: *pendingTTL, coolingOff: *coolingOff, approversFile: *approversFile}, log); err != nil {
+		breakerQuorum: *breakerQuorum, approvalQuorum: *approvalQuorum, pendingTTL: *pendingTTL, coolingOff: *coolingOff, approversFile: *approversFile,
+		tls: tlsOpts{cert: *tlsCert, key: *tlsKey, clientCA: *tlsClientCA, identities: *mtlsIdentities}}, log); err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
 	}
@@ -127,6 +134,10 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 		Tenant               string `json:"tenant"`
 		AuthKeys             string `json:"auth_keys"`
 		Approvers            string `json:"approvers"`
+		TLSCert              string `json:"tls_cert"`
+		TLSKey               string `json:"tls_key"`
+		TLSClientCA          string `json:"tls_client_ca"`
+		MTLSIdentities       string `json:"mtls_identities"`
 		AuditCheckpointEvery uint64 `json:"audit_checkpoint_every"`
 		RatePerMin           int    `json:"rate_per_min"`
 		PendingTTL           string `json:"pending_ttl"`
@@ -141,7 +152,8 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 	}
 	for name, val := range map[string]string{"listen": c.Listen, "policies": c.Policies, "state-dir": c.StateDir,
 		"dev-world": c.DevWorld, "dev-wallet": c.DevWallet, "decision-key": c.DecisionKey, "tenant": c.Tenant, "auth-keys": c.AuthKeys,
-		"approvers": c.Approvers} {
+		"approvers": c.Approvers, "tls-cert": c.TLSCert, "tls-key": c.TLSKey, "tls-client-ca": c.TLSClientCA,
+		"mtls-identities": c.MTLSIdentities} {
 		if val != "" && !set[name] {
 			*strs[name] = val
 		}
@@ -197,7 +209,14 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	var authn gateway.Authenticator
+	tlsCfg, authn, err := loadMTLS(o.tls, o.authKeys != "", time.Now())
+	if err != nil {
+		return err
+	}
+	if authn != nil {
+		log.Info("authentication enabled: mTLS client certificates (SPIFFE ID)", "client_ca", o.tls.clientCA,
+			"identities", o.tls.identities, "rate_per_min", o.ratePerMin)
+	}
 	if o.authKeys != "" {
 		ks, err := auth.LoadKeyStore(o.authKeys)
 		if err != nil {
@@ -207,11 +226,11 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 		log.Info("authentication enabled", "auth_keys", o.authKeys, "rate_per_min", o.ratePerMin)
 	}
 	if rt.contacts != nil && authn == nil {
-		log.Warn("contacts API disabled: it needs -auth-keys (approval is separated by API key)")
+		log.Warn("contacts API disabled: it needs authentication (-auth-keys or mTLS)")
 	}
 	runErr := run(addr, gateway.Config{Evaluator: rt.eval, Nonces: nonces, Keys: rt.keys, Counters: rt.counters, Logger: log,
 		Authenticator: authn, Audit: rt.audit, RatePerMin: o.ratePerMin, Approver: rt.approver, Breaker: rt.breaker, Actions: rt.actions,
-		Contacts: rt.contacts}, log)
+		Contacts: rt.contacts}, tlsCfg, log)
 	if rt.signed {
 		if err := rt.audit.Checkpoint(); err != nil {
 			log.Error("final audit checkpoint failed", "severity", "high", "err", err)
@@ -224,6 +243,7 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 
 type devOpts struct {
 	authKeys                                     string
+	tls                                          tlsOpts
 	approversFile                                string
 	ratePerMin, breakerQuorum, approvalQuorum    int
 	pendingTTL, coolingOff                       time.Duration
@@ -429,13 +449,17 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 	return runtime{eval: eval, approver: approver, actions: e, breaker: lim, contacts: reg, keys: ring.JWKS, counters: counters, audit: lg, signed: true}, nil
 }
 
-func run(addr string, gc gateway.Config, log *slog.Logger) error {
+func run(addr string, gc gateway.Config, tlsCfg *tls.Config, log *slog.Logger) error {
 	if err := requireLoopbackUnlessAuth(addr, gc.Authenticator != nil); err != nil {
 		return err
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
+	}
+	scheme := "http"
+	if tlsCfg != nil {
+		ln, scheme = tls.NewListener(ln, tlsCfg), "https"
 	}
 	srv := &http.Server{
 		Handler:           gateway.New(gc),
@@ -448,7 +472,7 @@ func run(addr string, gc gateway.Config, log *slog.Logger) error {
 	}
 	// The resolved address goes to stdout so callers using :0 can find it.
 	fmt.Printf("stopbard %s listening on %s\n", version.Version, ln.Addr())
-	log.Info("listening", "addr", ln.Addr().String(), "version", version.Version, "engine", gc.Evaluator != nil)
+	log.Info("listening", "addr", ln.Addr().String(), "scheme", scheme, "version", version.Version, "engine", gc.Evaluator != nil)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -522,7 +546,7 @@ func (p *pendingStore) Get(_ context.Context, id string) (engine.PendingEscalati
 
 // requireLoopbackUnlessAuth refuses to serve an unauthenticated API beyond this
 // host (CS-103): a non-loopback address is allowed only when authentication is
-// configured (-auth-keys), so an agent/tenant identity can never be spoofed
+// configured (-auth-keys or mTLS), so an agent/tenant identity can never be spoofed
 // over the network.
 func requireLoopbackUnlessAuth(addr string, authEnabled bool) error {
 	host, _, err := net.SplitHostPort(addr)
@@ -535,7 +559,7 @@ func requireLoopbackUnlessAuth(addr string, authEnabled bool) error {
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
 		if !authEnabled {
-			return fmt.Errorf("refusing to listen on %q without authentication: set -auth-keys to serve a non-loopback address", addr)
+			return fmt.Errorf("refusing to listen on %q without authentication: set -auth-keys or mTLS (-tls-client-ca) to serve a non-loopback address", addr)
 		}
 	}
 	return nil

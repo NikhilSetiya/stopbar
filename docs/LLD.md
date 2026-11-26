@@ -217,7 +217,8 @@ Canonicalisation: RFC 8785 (JCS).
 ## 4. Gateway
 
 - Transport: HTTP/1.1 + JSON v1; gRPC later.
-- AuthN: mTLS (service mode) with SPIFFE IDs; API key (sidecar/dev only).
+- AuthN: mTLS (service mode) with SPIFFE IDs; API key (sidecar/dev only). One per deployment: stopbard refuses `-auth-keys` together with mTLS.
+  - **mTLS (CS-103 increment 3, [ADR 0006](adr/0006-mtls-spiffe-identity.md))**: `-tls-cert`, `-tls-key` (mode 0600), `-tls-client-ca` and `-mtls-identities` (config `tls_cert`, `tls_key`, `tls_client_ca`, `mtls_identities`) are all-or-nothing, so there is no TLS without a client CA. A missing, unreadable, malformed or expired file refuses startup. The listener is TLS 1.3 with `VerifyClientCertIfGiven`: a certificate that is expired or from another CA fails the handshake. With no certificate the handshake completes (`/healthz`, `/metrics` and `/v1/keys` stay open) and authenticated routes answer `401`. `auth.CertMap.Identify` re-verifies the chain (client-auth EKU) and requires a non-CA leaf with **exactly one** URI SAN, a canonical SPIFFE ID, listed in `-mtls-identities` (`[{spiffe_id, tenant, agent_id, scopes}]`). Anything else is `401`. The identity is `{method: mtls, tenant, agent_id, scopes, key_id: <SPIFFE ID>}`: audited, rate-limited by SPIFFE ID, and bound by the decision token (`auth_method` `mtls`). Under mTLS a body `actor.workload_identity` must equal the SPIFFE ID if set (`IDENTITY_MISMATCH`). mTLS satisfies the non-loopback listen gate. Clients: `stopbar … --cert --cert-key --cacert`, Python `Client(client_cert=, client_key=, ca_cert=)`, TypeScript `new Client(url, {tls: {cert, key, ca}})`.
 - Checks in order. Each one rejects with the typed code shown in §4.2. Body size comes first so oversized input is never parsed.
   1. method → `Content-Type: application/json` → body ≤ 64 KB
   2. auth (CS-103)
