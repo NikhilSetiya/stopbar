@@ -141,3 +141,12 @@ Everything in v1 §5, plus:
 ## 6. Versioning
 
 Any change to the header, the claims, the canonical action or the verification order bumps `v` and the `typ`. Verifiers reject versions they don't know. The production verifier accepts v2 only.
+
+Before the freeze (§ "Freeze rule"), a new action kind is added without a bump. Its binding is new, every existing binding stays byte-for-byte the same, and a verifier that predates the kind refuses it (`ErrNoBinding`: no token can be verified for it). Once v2 is frozen, a new kind bumps `v` like any other change to the canonical action.
+
+## 7. Changelog
+
+| Date | Change | Version |
+|---|---|---|
+| 2026-11-25 | Draft: v2 binds the authenticated requester identity (CS-103 increment 2, ADR 0003). | v2 |
+| 2026-11-26 | Added the off-chain signature kinds `evm_typed_data` (§2.4) and `evm_personal_sign` (§2.5) (CS-514, ADR 0007). The change is additive and needs no version bump: the `evm_tx` and `tool_call` bindings and their vectors are unchanged, and older verifiers refuse the new kinds. New vectors: `typed_data*`, `personal_sign*`. | v2 (unchanged) |
