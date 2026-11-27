@@ -16,6 +16,8 @@ jobs:
         with: {go-version-file: go.mod}
       - name: gofmt
         run: test -z "$(gofmt -l . | tee /dev/stderr)"
+      - name: cheap-guard script (its own workflow runs on pull_request_target)
+        run: ./scripts/test_cheap_guard.sh
       - run: go vet ./...
       - run: go build ./...
       - name: test (race)
