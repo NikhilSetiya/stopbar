@@ -1,0 +1,41 @@
+name: cheap-guard
+# A PR from a branch starting cheap/ (work done by the cheapest model tier) may
+# not change the trusted core, the spec, the attack corpus, the starter policies
+# or CI itself. pull_request_target runs main's copy of this file, so a cheap/
+# PR cannot edit the guard away; it never checks out or runs PR code, it only
+# reads the PR's file list through the API. Required in branch protection.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  cheap-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: cheap/ branches may not touch protected paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          CHANGED: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set -euo pipefail
+          shopt -s nocasematch
+          if [[ "$HEAD_REF" != cheap/* ]]; then echo "branch '$HEAD_REF' is not cheap/: no path restriction"; exit 0; fi
+          gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[] | [.filename, (.previous_filename // "")] | @tsv' > files.tsv
+          listed=$(wc -l < files.tsv | tr -d ' ')
+          # The files API stops at 3,000 entries: an incomplete list fails closed.
+          if [[ "$listed" -lt "$CHANGED" ]]; then echo "::error::only $listed of $CHANGED changed files listed; refusing to guess"; exit 1; fi
+          bad=0
+          while IFS=$'\t' read -r name prev; do
+            for f in "$name" "$prev"; do
+              case "$f" in
+                internal/*|spec/*|corpus/*|examples/policies/*|.github/workflows/*) echo "::error file=$f::cheap/ branches may not change $f"; bad=1 ;;
+              esac
+            done
+          done < files.tsv
+          if [[ "$bad" -ne 0 ]]; then echo "cheap/ PR touches protected paths (internal/, spec/, corpus/, examples/policies/, .github/workflows/)"; exit 1; fi
+          echo "ok: $listed files, none under a protected path"

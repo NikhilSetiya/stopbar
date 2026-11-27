@@ -151,6 +151,9 @@ if ! golangci-lint --version 2>/dev/null | grep -q "version ${GOLANGCI_LINT#v} "
   echo "  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT}"
   exit 1
 fi
+step "cheap-guard: cheap/ branches cannot touch internal/, spec/, corpus/, examples/policies/, .github/workflows/"
+./scripts/test_cheap_guard.sh
+
 step golangci-lint; golangci-lint run
 if [[ "${OFFLINE:-0}" != 1 ]]; then
   step govulncheck; go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK}" ./...
