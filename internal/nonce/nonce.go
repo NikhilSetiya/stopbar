@@ -162,6 +162,9 @@ func (s *Store) ConsumeWith(ctx context.Context, key string, until time.Time, en
 	if s.db != nil && entry != nil && s.log == nil {
 		return false, errors.New("nonce: no audit log configured for an audited consume")
 	}
+	if entry, err = audit.Prepare(entry); err != nil { // the body as it is now, not at unit commit
+		return false, fmt.Errorf("nonce: audit entry: %w", err)
+	}
 	s.mu.Lock()
 	gone := s.prune(s.clock())
 	_, seen := s.until[key]

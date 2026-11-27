@@ -580,6 +580,9 @@ func (p *pendingStore) Put(ctx context.Context, e engine.PendingEscalation, rec 
 	if err != nil {
 		return err
 	}
+	if rec, err = audit.Prepare(rec); err != nil { // the body as it is now, not at unit commit
+		return err
+	}
 	return p.db.Write(ctx, func(tx *bolt.Tx) error {
 		if rec != nil {
 			if err := p.log.AppendTx(tx, *rec); err != nil {

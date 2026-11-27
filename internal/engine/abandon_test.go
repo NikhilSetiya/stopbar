@@ -46,15 +46,31 @@ func TestAbandonedStagesShareNothing(t *testing.T) {
 		return model.IntentSummary{Kind: string(a.Kind), Human: "fake", Flags: make([]string, 1, 8)}, nil // spare capacity invites a shared append
 	}}
 
+	argsEnrich := enrichFunc(func(ctx context.Context, er *model.EnrichedRequest) error {
+		wg.Add(1)
+		defer wg.Done()
+		<-ctx.Done()
+		for range 50 { // review finding 4: Action.Args reached the caller's request through a shallow copy
+			er.Request.Action.Args["limit"] = 1
+			er.Request.Action.Args["late"] = []any{"x"}
+			time.Sleep(time.Millisecond)
+		}
+		return nil
+	})
+
 	for _, tc := range []struct {
-		name string
-		set  func(*rig)
-		code string
+		name    string
+		fixture string
+		set     func(*rig)
+		code    string
 	}{
-		{"signer times out", func(r *rig) { r.cfg.Signer = slowSign }, CodeSigner},
-		{"enricher times out", func(r *rig) {
+		{"signer times out", "action_request.evm_tx.json", func(r *rig) { r.cfg.Signer = slowSign }, CodeSigner},
+		{"enricher times out", "action_request.evm_tx.json", func(r *rig) {
 			r.cfg.Decoders = []Decoder{flagged}
 			r.cfg.Enrichers = []Enricher{slowEnrich}
+		}, CodeEnrich},
+		{"enricher mutating Action.Args times out", "action_request.tool_call.json", func(r *rig) {
+			r.cfg.Enrichers = []Enricher{argsEnrich}
 		}, CodeEnrich},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,9 +79,13 @@ func TestAbandonedStagesShareNothing(t *testing.T) {
 			tc.set(r)
 			e := r.engine(t)
 			for i := range 4 {
-				req := fixtureRequest(t, "action_request.evm_tx.json")
+				req := fixtureRequest(t, tc.fixture)
 				req.ID = req.ID + string(rune('a'+i))
 				d := evaluate(t, e, req)
+				for range 20 { // the caller (the gateway's request record) reads its request after the answer
+					_, _ = json.Marshal(req)
+					time.Sleep(time.Millisecond)
+				}
 				if d.Outcome != model.Deny || d.Token != "" || !hasCode(d, tc.code) {
 					t.Fatalf("got %s %v token=%q, want deny %s with no token", d.Outcome, d.Reasons, d.Token, tc.code)
 				}

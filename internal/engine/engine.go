@@ -824,8 +824,8 @@ func (e *Engine) evaluate(ctx context.Context, req model.ActionRequest, now time
 	// decision's audit record. If that fails, the token never leaves.
 	id := req.ID
 	d.ReservationID = &id
-	signReq, signD := req, d
-	signD.Reasons = slices.Clone(d.Reasons)
+	signReq, signD := req.Clone(), d
+	signD.Reasons, signD.Approvals = slices.Clone(d.Reasons), slices.Clone(d.Approvals)
 	token, err := stage(ctx, e.cfg.StageTimeout, func(ctx context.Context) (string, error) { return e.cfg.Signer.Sign(ctx, requester, signReq, signD) })
 	if err != nil || token == "" {
 		if err == nil {
@@ -864,7 +864,8 @@ func (e *Engine) decode(ctx context.Context, a model.Action, payloadHash string)
 	if dec == nil {
 		return model.IntentSummary{}, failed(CodeDecoder, fmt.Errorf("no decoder for action kind %q", a.Kind))
 	}
-	intent, err := stage(ctx, e.cfg.StageTimeout, func(ctx context.Context) (model.IntentSummary, error) { return dec.Decode(ctx, a) })
+	ac := a.Clone()
+	intent, err := stage(ctx, e.cfg.StageTimeout, func(ctx context.Context) (model.IntentSummary, error) { return dec.Decode(ctx, ac) })
 	if err != nil {
 		return model.IntentSummary{}, failed(CodeDecoder, err)
 	}
@@ -884,12 +885,11 @@ func (e *Engine) decode(ctx context.Context, a model.Action, payloadHash string)
 // so on failure the partially enriched request is dropped, never read.
 func (e *Engine) enrich(ctx context.Context, req model.ActionRequest, intent model.IntentSummary, payloadHash string) (model.EnrichedRequest, *stageError) {
 	er := &model.EnrichedRequest{
-		Request:  req,
+		Request:  req.Clone(), // deep: an enricher never reaches the caller's Action.Args
 		Intent:   intent,
 		Taint:    slices.Clone(req.Provenance.Labels),
 		Velocity: map[string]model.Velocity{},
 	}
-	er.Request.Provenance.Labels = slices.Clone(req.Provenance.Labels)
 	er.Intent.Flags = slices.Clone(intent.Flags) // enrichers append; never into the caller's backing array
 	for i, en := range e.cfg.Enrichers {
 		// Each enricher works on its own copy, and its copy becomes the
@@ -920,9 +920,9 @@ func (e *Engine) enrich(ctx context.Context, req model.ActionRequest, intent mod
 // shares no slice or map the engine writes: taint, flags, labels, velocity.
 func cloneEnriched(er model.EnrichedRequest) model.EnrichedRequest {
 	c := er
+	c.Request = er.Request.Clone()
 	c.Taint = slices.Clone(er.Taint)
 	c.Intent.Flags = slices.Clone(er.Intent.Flags)
-	c.Request.Provenance.Labels = slices.Clone(er.Request.Provenance.Labels)
 	c.Velocity = maps.Clone(er.Velocity)
 	return c
 }
