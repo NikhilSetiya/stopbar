@@ -21,6 +21,12 @@ const (
 	KindEVMTx      ActionKind = "evm_tx"
 	KindToolCall   ActionKind = "tool_call"
 	KindWithdrawal ActionKind = "withdrawal"
+	// Off-chain signature requests (CS-514): an EIP-712 typed-data signature
+	// (eth_signTypedData_v4) and an EIP-191 personal_sign message. A signed
+	// Permit2 or Seaport message is as good as an on-chain approval or
+	// transfer, so it is decoded and gated like one.
+	KindEVMTypedData    ActionKind = "evm_typed_data"
+	KindEVMPersonalSign ActionKind = "evm_personal_sign"
 )
 
 // Outcome is the policy decision.
@@ -74,6 +80,11 @@ type Action struct {
 	MaxPriorityFeePerGas string         `json:"max_priority_fee_per_gas,omitempty"`
 	Tool                 *string        `json:"tool"`
 	Args                 map[string]any `json:"args"`
+	// TypedData is the EIP-712 payload of an evm_typed_data request, exactly
+	// as eth_signTypedData_v4 takes it. Message is the 0x-hex bytes of an
+	// evm_personal_sign request. Both are bound by payload_hash.
+	TypedData *TypedData `json:"typed_data,omitempty"`
+	Message   string     `json:"message,omitempty"`
 }
 
 // Provenance carries taint: where the inputs that led to this action came from.
@@ -115,6 +126,10 @@ type IntentSummary struct {
 	Flags       []string        `json:"flags"`
 	Human       string          `json:"human"`
 	Calls       []IntentSummary `json:"calls,omitempty"`
+	// Expiry is when a signed off-chain grant stops being usable (Unix
+	// seconds): a permit's deadline or allowance expiration, an order's end
+	// time. Set only on evm_typed_data intents.
+	Expiry string `json:"expiry,omitempty"`
 	// Swap holds a swap's terms, so an enricher can check them against a
 	// price quote (excessive_slippage). Set only on swap intents.
 	Swap        *Swap  `json:"swap,omitempty"`
@@ -207,6 +222,12 @@ type Decision struct {
 	// transaction, ready to broadcast, and its hash. Allow only.
 	SignedTx string `json:"signed_tx,omitempty"`
 	TxHash   string `json:"tx_hash,omitempty"`
+	// Signature and SigningHash are the gatekeeper's answer to an off-chain
+	// signature request (evm_typed_data, evm_personal_sign): the 65-byte
+	// secp256k1 signature (r‖s‖v, v = 27/28) and the digest it signs (the
+	// EIP-712 or EIP-191 hash). Allow only.
+	Signature   string `json:"signature,omitempty"`
+	SigningHash string `json:"signing_hash,omitempty"`
 }
 
 // Approval is a human (or second-agent) countersignature on an escalation.
@@ -482,8 +503,40 @@ func (r ActionRequest) Validate() error {
 		if a.To == "" {
 			add("action.to is required for withdrawal")
 		}
+	case KindEVMTypedData, KindEVMPersonalSign:
+		if a.ChainID == nil || *a.ChainID == 0 || *a.ChainID >= maxSafeInt {
+			add("action.chain_id is required for %s and must be below 2^53", a.Kind)
+		}
+		if !reHexAddr.MatchString(a.From) {
+			add("action.from must be a 0x-prefixed 20-byte address")
+		}
+		if a.To != "" || a.ValueWei != "" || a.Data != "" || a.TxType != nil || a.TxNonce != "" || a.GasLimit != "" ||
+			a.MaxFeePerGas != "" || a.MaxPriorityFeePerGas != "" || a.Tool != nil || a.Args != nil {
+			add("action: %s carries no transaction or tool fields", a.Kind)
+		}
+		if a.Kind == KindEVMTypedData {
+			if a.Message != "" {
+				add("action.message is for evm_personal_sign only")
+			}
+			if a.TypedData == nil {
+				add("action.typed_data is required for evm_typed_data")
+			} else {
+				var chain uint64
+				if a.ChainID != nil {
+					chain = *a.ChainID
+				}
+				p = append(p, a.TypedData.Problems(chain)...)
+			}
+		} else {
+			if a.TypedData != nil {
+				add("action.typed_data is for evm_typed_data only")
+			}
+			if !reMessage.MatchString(a.Message) {
+				add("action.message must be 0x-prefixed even-length hex of at least one byte")
+			}
+		}
 	default:
-		add("action.kind must be one of evm_tx, tool_call, withdrawal")
+		add("action.kind must be one of evm_tx, tool_call, withdrawal, evm_typed_data, evm_personal_sign")
 	}
 
 	if len(p) > 0 {
@@ -514,8 +567,8 @@ func (d Decision) Validate() error {
 	if d.Outcome != Allow && len(d.Reasons) == 0 {
 		return errors.New("model: deny/escalate decisions must carry at least one reason")
 	}
-	if d.Outcome != Allow && (d.Token != "" || d.SignedTx != "" || d.TxHash != "") {
-		return errors.New("model: only allow decisions may carry a token or signed transaction")
+	if d.Outcome != Allow && (d.Token != "" || d.SignedTx != "" || d.TxHash != "" || d.Signature != "" || d.SigningHash != "") {
+		return errors.New("model: only allow decisions may carry a token, signed transaction or signature")
 	}
 	if d.Outcome == Allow && (d.PolicyBundleHash == "" || d.PayloadHash == "") {
 		return errors.New("model: allow decisions must bind policy_bundle_hash and payload_hash")

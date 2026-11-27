@@ -140,6 +140,7 @@ IDs are referenced from the [task backlog](TASKS.md).
 ### 7.5 Intent rendering (FR-IR)
 
 - FR-IR-1: Decode EVM transactions (native transfer, ERC-20 transfer/approve, ERC-721/1155, Safe txs, multicall) into an `IntentSummary`.
+- FR-IR-1a: Decode off-chain signature requests into the same intents and flags as their on-chain equivalents: EIP-712 Permit, Permit2 PermitSingle/PermitBatch and Seaport orders, plus `personal_sign`. A signed permit is an approval. Unknown typed data and unreadable bytes are flagged, never signed blind (CS-514).
 - FR-IR-2: Risk flags: unlimited approval, `delegatecall`, proxy upgrade, new destination, first-time contract, address similarity to known destinations (address poisoning), swaps with zero or excessive-slippage minimum output (allowed-but-destructive actions).
 - FR-IR-3: Render summaries out of band (Slack, Telegram, email, CLI) with the payload hash, so approvers see what will be signed.
 

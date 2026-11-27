@@ -1,0 +1,18 @@
+{
+  "id": "req_01JD0000000000000000000004",
+  "tenant": "acme",
+  "nonce": "Zml4dHVyZS1ub25jZS0wMDA0",
+  "issued_at": "2026-11-02T10:00:00Z",
+  "ttl_seconds": 60,
+  "actor": {"agent_id": "trading-bot-1"},
+  "action": {
+    "kind": "evm_personal_sign",
+    "chain_id": 8453,
+    "from": "0x2222222222222222222222222222222222222222",
+    "tool": null,
+    "args": null,
+    "message": "0x5369676e20696e20746f206578616d706c652e636f6d"
+  },
+  "provenance": {"labels": []},
+  "parent_request_id": null
+}

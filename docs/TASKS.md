@@ -9,7 +9,7 @@ Estimates are focused build days for one engineer. IDs are stable; reference the
 | Phase | Tasks | Est. days |
 |---|---|---|
 | Phase 0 - Foundations (weeks 0-2) | 9 | 9 |
-| Phase 1 - Agent-wallet MVP (weeks 2-8) | 46 | 80 |
+| Phase 1 - Agent-wallet MVP (weeks 2-8) | 47 | 82 |
 | Phase 1R - Research track (parallel, weeks 4-10) | 13 | 25.5 |
 | Phase 2 - Corpus & community (weeks 8-12) | 6 | 12.5 |
 | Phase 3 - Code-mode agents (months 3-9) | 7 | 35 |
@@ -92,6 +92,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 | CS-146 | EIP-7702 / type-4 defense | Deny type-4 (EIP-7702 SetCode) by default (tx_type is const 2 at the wire; add tests). Gatekeeper refuses to sign for a `from` wallet carrying delegation code (0xef0100||addr) unless the target is operator-vetted (signer.DelegatedTo + Adapter.CodeAt/ExpectedDelegates; wire CodeAt in stopbard once it has a chain RPC). Add a corpus entry for the delegation-code refusal once CodeAt is wired. | type-4 rejected at the gateway; adapter refuses an unexpected-delegation wallet and fails closed on a code-read error; corpus entry blocks. | 2d | CS-162 | HLD §4 |
 | CS-144 | Decoder fuzzing | Go native fuzz targets on calldata. | 24h fuzz run with no panics. | 1d | CS-141 |  |
 | CS-514 | Off-chain signature requests | eth_signTypedData / personal_sign as an action kind: decode EIP-712 (Permit, Permit2 PermitSingle/Batch, Seaport) into intents with the same flags (unlimited_approval etc.). Until then wallet providers must refuse off-chain signing. | Permit2 PermitSingle with max amount denied; benign typed data renders. | 3d | CS-141 | LLD §6 |
+| CS-515 | More off-chain typed data + NFT pricing | Decode Permit2 SignatureTransfer (PermitTransferFrom / PermitBatchTransferFrom, incl. witness variants) and Seaport BulkOrder (Merkle tree of OrderComponents) into intents (today: unknown_call -> escalate); price NFT offers in the chain enricher (today an ERC-721 offer fails closed: no decimals()). | Max PermitTransferFrom denied; a BulkOrder containing a zero-consideration order denied; a priced NFT listing allowed under caps. | 2d | CS-514 | LLD §6.1a |
 
 ### E6 Escalation
 

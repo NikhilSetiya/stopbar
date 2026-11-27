@@ -9,7 +9,7 @@
 
 `stopbard` holds the wallet key (`-dev-wallet`), so an injected or compromised agent can't sign around the policy.
 
-Off-chain signing (`sign_message`, `sign_typed_data`) is refused. Stopbar doesn't gate EIP-712 or Permit2 signatures yet (CS-514), and a signed Permit2 message is as good as an approval.
+Off-chain signing (`sign_message`, `sign_typed_data`) is refused by this frozen research provider. The product provider (`sdk/python/stopbar/wallet.py`) routes it through Stopbar, which gates EIP-712 and personal_sign requests since CS-514.
 
 ```bash
 python3 -m venv research/walletagent/.venv && research/walletagent/.venv/bin/pip install -r research/walletagent/requirements.lock

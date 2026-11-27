@@ -130,7 +130,13 @@ provider = StopbarWalletProvider(
 ```
 
 The provider holds no key: stopbard signs (gatekeeper mode), so an injected or
-compromised agent can't sign around the policy. Off-chain signatures are refused.
+compromised agent can't sign around the policy. Off-chain signatures
+(`sign_message`, `sign_typed_data`) go through Stopbar as `evm_personal_sign` /
+`evm_typed_data` requests (CS-514): a Permit, Permit2 permit or Seaport order is
+decoded and gated like the approval or transfer it authorises, and the
+signature comes back only on an allow. Build them directly with
+`Client.evm_typed_data(...)` and `Client.evm_personal_sign(...)`; the decision
+carries `signature` and `signing_hash`.
 
 **AgentKit telemetry is off.** AgentKit posts the wallet address, network and
 every action name to Coinbase analytics and has no opt-out. Importing
