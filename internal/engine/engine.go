@@ -65,6 +65,9 @@ type Limiter interface {
 	Reserve(ctx context.Context, id string, req model.EnrichedRequest, ttl time.Duration, rec *model.AuditEntry) error
 	Commit(ctx context.Context, id, txRef string, rec *model.AuditEntry) error
 	Release(ctx context.Context, id string, rec *model.AuditEntry) error
+	// Void releases a reservation even if committed: only for an evaluation
+	// whose answer never left stopbard (Engine.Abandon, CS-197).
+	Void(ctx context.Context, id string, rec *model.AuditEntry) error
 	// Owner reports the tenant and agent a reservation was made for, so
 	// commit/release over HTTP (CS-105) can be scoped to the requester.
 	Owner(id string) (tenant, agent string, ok bool)
@@ -110,14 +113,18 @@ type AuditLog interface {
 
 // Reason codes (LLD §12).
 const (
-	CodePolicy          = "POLICY"
-	CodeNormalize       = "FAIL_CLOSED_NORMALIZE"
-	CodeDecoder         = "FAIL_CLOSED_DECODER"
-	CodeEnrich          = "FAIL_CLOSED_ENRICH"
-	CodePolicyFail      = "FAIL_CLOSED_POLICY"
-	CodeLimiter         = "FAIL_CLOSED_LIMITER"
-	CodeSigner          = "FAIL_CLOSED_SIGNER"
-	CodeAudit           = "FAIL_CLOSED_AUDIT"
+	CodePolicy     = "POLICY"
+	CodeNormalize  = "FAIL_CLOSED_NORMALIZE"
+	CodeDecoder    = "FAIL_CLOSED_DECODER"
+	CodeEnrich     = "FAIL_CLOSED_ENRICH"
+	CodePolicyFail = "FAIL_CLOSED_POLICY"
+	CodeLimiter    = "FAIL_CLOSED_LIMITER"
+	CodeSigner     = "FAIL_CLOSED_SIGNER"
+	CodeAudit      = "FAIL_CLOSED_AUDIT"
+	// CodeStore: the evaluation's state transaction did not become durable
+	// within the gateway's store timeout (CS-197, LLD §12). The gateway answers
+	// it; Abandon resolves an escalation that landed late with it.
+	CodeStore           = "FAIL_CLOSED_STORE"
 	CodeEngine          = "FAIL_CLOSED_ENGINE"
 	CodeCapExceeded     = "CAP_EXCEEDED"
 	CodeCircuitOpen     = "CIRCUIT_OPEN"
@@ -1012,6 +1019,42 @@ func (e *Engine) Commit(ctx context.Context, requestID, txRef string) error {
 		return failed(CodeLimiter, err)
 	}
 	return nil
+}
+
+// Abandon undoes what an evaluation left in state when its transaction landed
+// after the gateway had already answered FAIL_CLOSED_STORE (CS-197, LLD §12).
+// The caller never saw that answer's token or signed tx, so nothing was
+// broadcast: the reservation is voided (released even if the gatekeeper
+// committed it, audited as a release with event "void"), and an escalation
+// still pending is resolved as a deny with FAIL_CLOSED_STORE, so no approver
+// can act on a request whose requester was told no. Each step is a durable
+// write of its own; if the store is still down it fails, and what remains is
+// conservative (capacity held, counted as spent) and is logged.
+func (e *Engine) Abandon(ctx context.Context, requestID string) {
+	ctx = context.WithoutCancel(ctx)
+	rec := &model.AuditEntry{Type: model.AuditRelease, Body: map[string]any{"request_id": requestID, "event": "void",
+		"reason": "state landed after the gateway answered " + CodeStore + "; nothing left stopbard"}}
+	if err := e.record(ctx, func(ctx context.Context) error { return e.cfg.Limiter.Void(ctx, requestID, rec) }); err != nil {
+		e.cfg.Logger.Error("abandon: could not void the reservation; it stays counted until it lapses or past its window",
+			"severity", "high", "request_id", requestID, "err", err)
+	}
+	if e.cfg.Pending == nil {
+		return
+	}
+	e.escMu.Lock()
+	defer e.escMu.Unlock()
+	pe, ok, err := e.cfg.Pending.Get(ctx, requestID)
+	if err != nil || !ok || (pe.State != "" && pe.State != model.EscalationPending) {
+		if err != nil {
+			e.cfg.Logger.Error("abandon: could not read the escalation", "severity", "high", "request_id", requestID, "err", err)
+		}
+		return
+	}
+	now := e.cfg.Clock()
+	d := e.deny(requestID, now, pe.payloadHash(), failed(CodeStore, errors.New("escalation recorded after the requester was answered FAIL_CLOSED_STORE")))
+	if err := e.resolve(ctx, &pe, model.EscalationDenied, d, "", now, model.AuditDecision, map[string]any{"decision": d}); err != nil {
+		e.unaudited(requestID, err)
+	}
 }
 
 // Release abandons an allowed action and frees its reservation. The reason

@@ -637,17 +637,32 @@ func (l *Limiter) Commit(ctx context.Context, id, txRef string, ae *model.AuditE
 // Release frees a live reservation. Releasing one already released is a
 // no-op (nothing changes, so nothing is written or audited): retries are safe.
 func (l *Limiter) Release(ctx context.Context, id string, ae *model.AuditEntry) error {
+	return l.release(ctx, id, ae, false)
+}
+
+// Void implements engine.Limiter: it releases a reservation even if it was
+// committed, for an evaluation whose answer never left stopbard (it landed
+// after the gateway had answered FAIL_CLOSED_STORE, so the signed tx was
+// discarded and nothing was broadcast; CS-197). Unknown, released or lapsed
+// records are a no-op. Never reachable over HTTP.
+func (l *Limiter) Void(ctx context.Context, id string, ae *model.AuditEntry) error {
+	return l.release(ctx, id, ae, true)
+}
+
+func (l *Limiter) release(ctx context.Context, id string, ae *model.AuditEntry, void bool) error {
 	l.lockSettled(ctx, id)
 	defer l.mu.Unlock() // re-taken after each durable write
 	now := l.clock()
 	l.sweep(now)
 	e, ok := l.recs[id]
 	switch {
+	case void && (!ok || e.State == StateReleased || !e.counted):
+		return nil
 	case !ok:
 		return fmt.Errorf("%w: %s", ErrUnknownReservation, id)
 	case e.State == StateReleased:
 		return nil
-	case e.State == StateCommitted:
+	case e.State == StateCommitted && !void:
 		return fmt.Errorf("%w: %s", ErrAlreadyCommitted, id)
 	case !e.counted:
 		return fmt.Errorf("%w: %s", ErrReservationExpired, id)

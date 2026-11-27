@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -62,6 +63,8 @@ func main() {
 	authKeys := flag.String("auth-keys", "", "API key store (JSON array of `stopbar keygen api-key` records); enables authentication and non-loopback listening")
 	ratePerMin := flag.Int("rate-per-min", 0, "per-identity request cap per minute (0: no gateway cap)")
 	pendingTTL := flag.Duration("pending-ttl", engine.DefaultPendingTTL, "how long an escalation waits for approve/reject before it expires (deny)")
+	escalationRetention := flag.Duration("escalation-retention", DefaultEscalationRetention, "how long a resolved (allowed/denied/expired) escalation stays readable before it is compacted from state; 0 keeps them all (the audit log always keeps the history)")
+	storeTimeout := flag.Duration("store-timeout", gateway.DefaultStoreTimeout, "how long an evaluation waits for its state to become durable before it is denied FAIL_CLOSED_STORE")
 	coolingOff := flag.Duration("contact-cooling-off", enrich.DefaultCoolingOff, "how long an approved destination-registry addition waits before it counts as known (CS-134)")
 	breakerQuorum := flag.Int("breaker-quorum", limiter.DefaultBreakerQuorum, "distinct approver OWNERS needed (M of N, CS-124/151) to reset a tripped circuit breaker; always at least 2, with no -dev-world exception (internal/limiter.New enforces this unconditionally)")
 	approvalQuorum := flag.Int("approval-quorum", limiter.DefaultBreakerQuorum, "distinct approver OWNERS needed (M of N, CS-151) to approve an escalation or a destination-registry addition; at least 2 unless -dev-world")
@@ -83,7 +86,8 @@ func main() {
 			"decision-key": decisionKey, "dev-wallet": devWallet, "tenant": tenant, "auth-keys": authKeys,
 			"approvers": approversFile, "tls-cert": tlsCert, "tls-key": tlsKey, "tls-client-ca": tlsClientCA, "mtls-identities": mtlsIdentities,
 		}, checkpointEvery, map[string]*int{"rate-per-min": ratePerMin, "breaker-quorum": breakerQuorum, "approval-quorum": approvalQuorum},
-			map[string]*time.Duration{"pending-ttl": pendingTTL, "contact-cooling-off": coolingOff}); err != nil {
+			map[string]*time.Duration{"pending-ttl": pendingTTL, "contact-cooling-off": coolingOff,
+				"escalation-retention": escalationRetention, "store-timeout": storeTimeout}); err != nil {
 			log.Error("stopbard config", "err", err)
 			os.Exit(1)
 		}
@@ -104,7 +108,7 @@ func main() {
 	}
 	if err := serve(*listen, *stateDir, devOpts{world: *devWorld, policies: *policies, decisionKey: *decisionKey,
 		wallet: *devWallet, tenant: *tenant, checkpointEvery: *checkpointEvery, authKeys: *authKeys, ratePerMin: *ratePerMin,
-		breakerQuorum: *breakerQuorum, approvalQuorum: *approvalQuorum, pendingTTL: *pendingTTL, coolingOff: *coolingOff, approversFile: *approversFile,
+		breakerQuorum: *breakerQuorum, approvalQuorum: *approvalQuorum, pendingTTL: *pendingTTL, coolingOff: *coolingOff, escalationRetention: *escalationRetention, storeTimeout: *storeTimeout, approversFile: *approversFile,
 		tls: tlsOpts{cert: *tlsCert, key: *tlsKey, clientCA: *tlsClientCA, identities: *mtlsIdentities}}, log); err != nil {
 		log.Error("stopbard exiting", "err", err)
 		os.Exit(1)
@@ -141,6 +145,8 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 		AuditCheckpointEvery uint64 `json:"audit_checkpoint_every"`
 		RatePerMin           int    `json:"rate_per_min"`
 		PendingTTL           string `json:"pending_ttl"`
+		EscalationRetention  string `json:"escalation_retention"` // Go duration; "0s" keeps every resolved escalation
+		StoreTimeout         string `json:"store_timeout"`
 		ContactCoolingOff    string `json:"contact_cooling_off"` // Go duration, e.g. "24h"
 		BreakerQuorum        int    `json:"breaker_quorum"`
 		ApprovalQuorum       int    `json:"approval_quorum"`
@@ -166,7 +172,8 @@ func applyConfigFile(path string, strs map[string]*string, checkpointEvery *uint
 			*ints[name] = val
 		}
 	}
-	for name, val := range map[string]string{"pending-ttl": c.PendingTTL, "contact-cooling-off": c.ContactCoolingOff} {
+	for name, val := range map[string]string{"pending-ttl": c.PendingTTL, "contact-cooling-off": c.ContactCoolingOff,
+		"escalation-retention": c.EscalationRetention, "store-timeout": c.StoreTimeout} {
 		if val == "" || set[name] {
 			continue
 		}
@@ -230,7 +237,7 @@ func serve(addr, stateDir string, o devOpts, log *slog.Logger) error {
 	}
 	runErr := run(addr, gateway.Config{Evaluator: rt.eval, Nonces: nonces, Keys: rt.keys, Counters: rt.counters, Logger: log,
 		Authenticator: authn, Audit: rt.audit, RatePerMin: o.ratePerMin, Approver: rt.approver, Breaker: rt.breaker, Actions: rt.actions,
-		Contacts: rt.contacts, State: db}, tlsCfg, log)
+		Contacts: rt.contacts, State: db, StoreTimeout: o.storeTimeout, Abandon: rt.abandon}, tlsCfg, log)
 	if rt.signed {
 		if err := rt.audit.Checkpoint(); err != nil {
 			log.Error("final audit checkpoint failed", "severity", "high", "err", err)
@@ -247,6 +254,7 @@ type devOpts struct {
 	approversFile                                string
 	ratePerMin, breakerQuorum, approvalQuorum    int
 	pendingTTL, coolingOff                       time.Duration
+	escalationRetention, storeTimeout            time.Duration
 	world, policies, decisionKey, wallet, tenant string
 	checkpointEvery                              uint64
 	db                                           *store.DB
@@ -259,6 +267,7 @@ type runtime struct {
 	actions  gateway.Actions
 	breaker  gateway.Breaker
 	contacts gateway.Contacts
+	abandon  func(ctx context.Context, requestID string)
 	keys     func() []decision.JWK
 	counters func() map[string]uint64
 	audit    *audit.Log
@@ -349,7 +358,7 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		stageTimeout = 10 * time.Second
 		log.Info("enricher: reading balances and prices from the chain (CS-131/132)", "rpc", w.ChainRPC, "feeds", len(w.Feeds))
 	}
-	pending, err := newPendingStore(o.db, lg)
+	pending, err := newPendingStore(o.db, lg, o.escalationRetention)
 	if err != nil {
 		return runtime{}, err
 	}
@@ -446,7 +455,7 @@ func devEngine(o devOpts, log *slog.Logger) (runtime, error) {
 		c["stopbar_approval_rejects_total"] = rejects
 		return c
 	}
-	return runtime{eval: eval, approver: approver, actions: e, breaker: lim, contacts: reg, keys: ring.JWKS, counters: counters, audit: lg, signed: true}, nil
+	return runtime{eval: eval, approver: approver, actions: e, breaker: lim, contacts: reg, keys: ring.JWKS, counters: counters, audit: lg, signed: true, abandon: e.Abandon}, nil
 }
 
 func run(addr string, gc gateway.Config, tlsCfg *tls.Config, log *slog.Logger) error {
@@ -498,21 +507,72 @@ func run(addr string, gc gateway.Config, tlsCfg *tls.Config, log *slog.Logger) e
 // pendingStore records escalations and their lifecycle in the state DB
 // (CS-152), as JSON keyed by request id. Each write carries its audit record in
 // the same bbolt transaction. It survives restart with the rest of state.db.
+//
+// Resolved escalations (allowed, denied, expired) are kept for retention
+// after they resolve, then compacted (CS-197): each resolution also writes an
+// index entry resolved_at || id, and every Put deletes, in its own
+// transaction (the evaluation's unit on /v1/evaluate), up to compactBatch
+// index entries older than the retention, with their records. A pending
+// escalation is never in the index, so never compacted. The audit log keeps
+// the whole history and is never compacted. retention <= 0 keeps everything.
 type pendingStore struct {
-	db  *store.DB
-	log *audit.Log
+	db        *store.DB
+	log       *audit.Log
+	retention time.Duration
+	clock     func() time.Time
 }
+
+// DefaultEscalationRetention is how long a resolved escalation stays
+// readable (GET /v1/decisions/{id}) before it is compacted.
+const DefaultEscalationRetention = 30 * 24 * time.Hour
+
+const compactBatch = 64 // bounded work per write
 
 // v2: records carry the requester's full identity, which an approved token
 // binds (decision-token v2). v1 records (key ID only) are never read, so an
 // escalation pending across the upgrade cannot be approved; it lapses.
-var pendingBucket = []byte("pending_escalations_v2")
+var (
+	pendingBucket  = []byte("pending_escalations_v2")
+	resolvedBucket = []byte("pending_escalations_resolved_v1") // resolved_at (8 bytes BE ns) || id -> empty
+)
 
-func newPendingStore(db *store.DB, log *audit.Log) (*pendingStore, error) {
-	if err := db.Bucket(pendingBucket); err != nil {
-		return nil, err
+func newPendingStore(db *store.DB, log *audit.Log, retention time.Duration) (*pendingStore, error) {
+	for _, b := range [][]byte{pendingBucket, resolvedBucket} {
+		if err := db.Bucket(b); err != nil {
+			return nil, err
+		}
 	}
-	return &pendingStore{db, log}, nil
+	return &pendingStore{db: db, log: log, retention: retention, clock: time.Now}, nil
+}
+
+func resolvedKey(at time.Time, id string) []byte {
+	return append(binary.BigEndian.AppendUint64(nil, uint64(at.UnixNano())), id...)
+}
+
+// compactTx deletes up to compactBatch resolved escalations whose retention
+// has passed. Best effort: it never fails the write it rides in.
+func (p *pendingStore) compactTx(tx *bolt.Tx) {
+	if p.retention <= 0 {
+		return
+	}
+	cutoff := uint64(p.clock().Add(-p.retention).UnixNano())
+	idx, recs := tx.Bucket(resolvedBucket), tx.Bucket(pendingBucket)
+	c := idx.Cursor()
+	var gone [][]byte
+	for k, _ := c.First(); k != nil && len(gone) < compactBatch; k, _ = c.Next() {
+		if len(k) < 8 || binary.BigEndian.Uint64(k[:8]) >= cutoff {
+			break
+		}
+		gone = append(gone, append([]byte(nil), k...))
+	}
+	for _, k := range gone {
+		_ = idx.Delete(k)
+		id := k[8:]
+		var e engine.PendingEscalation
+		if v := recs.Get(id); v != nil && json.Unmarshal(v, &e) == nil && e.State != "" && e.State != model.EscalationPending {
+			_ = recs.Delete(id) // never a pending one, even if an index entry were stale
+		}
+	}
 }
 
 func (p *pendingStore) Put(ctx context.Context, e engine.PendingEscalation, rec *model.AuditEntry) error {
@@ -526,7 +586,16 @@ func (p *pendingStore) Put(ctx context.Context, e engine.PendingEscalation, rec 
 				return err
 			}
 		}
-		return tx.Bucket(pendingBucket).Put([]byte(e.Request.ID), b)
+		if err := tx.Bucket(pendingBucket).Put([]byte(e.Request.ID), b); err != nil {
+			return err
+		}
+		if e.State != "" && e.State != model.EscalationPending && e.ResolvedAt != nil {
+			if err := tx.Bucket(resolvedBucket).Put(resolvedKey(*e.ResolvedAt, e.Request.ID), nil); err != nil {
+				return err
+			}
+		}
+		p.compactTx(tx)
+		return nil
 	}, nil)
 }
 
