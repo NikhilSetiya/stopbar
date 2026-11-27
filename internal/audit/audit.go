@@ -135,6 +135,25 @@ func (l *Log) AppendTx(tx *bolt.Tx, e model.AuditEntry) error {
 	return nil
 }
 
+// Prepare snapshots e's body now: it round-trips it through JSON into a
+// fresh value, so a write queued in a store.Unit records the body as it was
+// when the write was made, even if a caller (or a timed-out engine stage)
+// changes the original before the unit commits (CS-197). nil stays nil.
+func Prepare(e *model.AuditEntry) (*model.AuditEntry, error) {
+	if e == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(e.Body)
+	if err != nil {
+		return nil, err
+	}
+	var generic any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return nil, err
+	}
+	return &model.AuditEntry{Type: e.Type, Body: generic}, nil
+}
+
 // Op returns AppendTx as a store.Op.
 func (l *Log) Op(e model.AuditEntry) store.Op {
 	return func(tx *bolt.Tx) error { return l.AppendTx(tx, e) }
@@ -149,7 +168,11 @@ func (l *Log) Op(e model.AuditEntry) store.Op {
 // Under a context carrying a store.Unit it joins that unit (CS-197): the
 // record is written with the evaluation's other state, in one transaction.
 func (l *Log) Append(ctx context.Context, typ model.AuditRecordType, body any) error {
-	if err := l.db.Write(ctx, l.Op(model.AuditEntry{Type: typ, Body: body}), nil); err != nil {
+	e, err := Prepare(&model.AuditEntry{Type: typ, Body: body})
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	if err := l.db.Write(ctx, l.Op(*e), nil); err != nil {
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	return nil

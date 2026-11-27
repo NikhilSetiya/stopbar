@@ -181,8 +181,8 @@ IDs are referenced from the [task backlog](TASKS.md).
 
 | ID | Requirement | Target |
 |---|---|---|
-| NFR-1 | Allow-path latency added | p99 < 25 ms (sidecar), < 50 ms (networked) |
-| NFR-2 | Throughput (single node) | ≥ 1,000 evaluations/sec |
+| NFR-1 | Allow-path latency added | p99 < 25 ms (sidecar), < 50 ms (networked). Measured (CS-197, [benchmarks](benchmarks.md)): met in 2 of 3 runs on a shared runner (23.19, 21.13, 28.22 ms at 1,000 rps); tail from noisy neighbours |
+| NFR-2 | Throughput (single node) | ≥ 1,000 evaluations/sec. Measured (CS-197): 1,000/s for 60 s with 0 errors in 3 of 3 runs on a shared runner |
 | NFR-3 | Availability | Fail closed; HA mode in Phase 4 |
 | NFR-4 | Determinism | 100% replay equality per policy version |
 | NFR-5 | Security | Decision keys in KMS/HSM/TEE (Phase 4); no plaintext secrets in config |

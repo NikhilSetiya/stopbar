@@ -71,10 +71,10 @@ func outcome(o model.Outcome) policyFunc {
 // fakeLimiter models the atomic store: an audit entry is written with the
 // state change, and if the audit write fails, the change does not happen.
 type fakeLimiter struct {
-	mu                          sync.Mutex
-	audit                       *fakeAudit
-	reserveErr                  error
-	reserved, released, commits []string
+	mu                                  sync.Mutex
+	audit                               *fakeAudit
+	reserveErr                          error
+	reserved, released, commits, voided []string
 }
 
 func (l *fakeLimiter) record(rec *model.AuditEntry) error {
@@ -118,6 +118,14 @@ func (l *fakeLimiter) Release(_ context.Context, id string, rec *model.AuditEntr
 	if !slices.Contains(l.reserved, id) {
 		return ErrUnknownReservation
 	}
+	return l.record(rec)
+}
+
+// Void records which reservations were voided (Engine.Abandon).
+func (l *fakeLimiter) Void(_ context.Context, id string, rec *model.AuditEntry) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.voided = append(l.voided, id)
 	return l.record(rec)
 }
 

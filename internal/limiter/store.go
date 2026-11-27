@@ -118,7 +118,45 @@ func NewBoltStore(db *store.DB, log *audit.Log) (*BoltStore, error) {
 			return nil, err
 		}
 	}
+	if err := migrateKeys(db); err != nil {
+		return nil, err
+	}
 	return &BoltStore{db: db, log: log}, nil
+}
+
+// migrateKeys moves records written before the time-ordered layout (keyed
+// by id alone) to recordKey, once, at open. A key is legacy only if its value
+// decodes to a record whose id is exactly that key, so no request id, however
+// crafted, can make a later write delete someone else's record (review
+// finding 5 on #146): writes never delete legacy keys.
+func migrateKeys(db *store.DB) error {
+	return db.Update(func(tx *bolt.Tx) error {
+		bk := tx.Bucket(boltBucket)
+		type move struct {
+			old []byte
+			r   Record
+			v   []byte
+		}
+		var moves []move
+		if err := bk.ForEach(func(k, v []byte) error {
+			var r Record
+			if json.Unmarshal(v, &r) == nil && r.ID != "" && string(k) == r.ID {
+				moves = append(moves, move{append([]byte(nil), k...), r, append([]byte(nil), v...)})
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, m := range moves {
+			if err := bk.Delete(m.old); err != nil {
+				return err
+			}
+			if err := bk.Put(recordKey(m.r), m.v); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *BoltStore) PutBreaker(b model.BreakerStatus, entries ...*model.AuditEntry) error {
@@ -183,6 +221,9 @@ func (s *BoltStore) PutCtx(ctx context.Context, r Record, entry *model.AuditEntr
 	if err == nil && entry != nil && s.log == nil {
 		err = errors.New("limiter: no audit log configured")
 	}
+	if err == nil {
+		entry, err = audit.Prepare(entry) // the body as it is now, not at unit commit
+	}
 	if err != nil {
 		if after != nil {
 			after(err)
@@ -191,8 +232,6 @@ func (s *BoltStore) PutCtx(ctx context.Context, r Record, entry *model.AuditEntr
 	}
 	return s.db.Write(ctx, func(tx *bolt.Tx) error {
 		bk := tx.Bucket(boltBucket)
-		// The pre-CS-197 key, if this record has one (a no-op otherwise).
-		_ = bk.Delete([]byte(r.ID))
 		// Keys sort by creation, so inserts append; 0.9 leaves headroom for the commit rewrite.
 		bk.FillPercent = 0.9
 		if err := bk.Put(recordKey(r), b); err != nil {
@@ -221,7 +260,6 @@ func (s *BoltStore) DeleteCtx(ctx context.Context, recs []Record) {
 		bk := tx.Bucket(boltBucket)
 		for _, r := range recs {
 			_ = bk.Delete(recordKey(r))
-			_ = bk.Delete([]byte(r.ID))
 		}
 		return nil
 	}, nil)
@@ -232,9 +270,6 @@ func (s *BoltStore) Delete(recs []Record) error {
 		bk := tx.Bucket(boltBucket)
 		for _, r := range recs {
 			if err := bk.Delete(recordKey(r)); err != nil {
-				return err
-			}
-			if err := bk.Delete([]byte(r.ID)); err != nil {
 				return err
 			}
 		}

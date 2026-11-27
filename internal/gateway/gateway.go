@@ -296,13 +296,32 @@ type Config struct {
 	// committed in one transaction before the answer is written (CS-197).
 	// nil: each component writes on its own.
 	State *store.DB
+	// StoreTimeout bounds how long an evaluation waits for its state unit to
+	// become durable (CS-197). Past it the answer is a deny with
+	// FAIL_CLOSED_STORE, and the unit is abandoned. 0: DefaultStoreTimeout.
+	StoreTimeout time.Duration
+	// Abandon undoes what a timed-out unit left if it still landed
+	// (engine.Engine.Abandon). nil: nothing to undo (no engine).
+	Abandon func(ctx context.Context, requestID string)
 }
+
+// DefaultStoreTimeout is the store wait when Config.StoreTimeout is 0. It
+// equals the engine's default audit timeout, the existing bound on a durable
+// record (engine.DefaultAuditTimeout; a test pins them together).
+const DefaultStoreTimeout = 5 * time.Second
+
+// CodeStore is the reason code of a deny answered because the evaluation's
+// state was not durable in time (LLD §12). It equals CodeStore (a test
+// pins them together; the engine's tests import this package).
+const CodeStore = "FAIL_CLOSED_STORE"
 
 // Gateway is an http.Handler serving the Stopbar API.
 type Gateway struct {
 	eval     Evaluator
 	nonces   NonceStore
 	state    *store.DB
+	storeTO  time.Duration
+	abandon  func(context.Context, string)
 	keys     func() []decision.JWK
 	extra    func() map[string]uint64
 	clock    func() time.Time
@@ -321,7 +340,7 @@ type Gateway struct {
 
 // New returns a Gateway.
 func New(cfg Config) *Gateway {
-	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, state: cfg.State, keys: cfg.Keys, extra: cfg.Counters, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux(),
+	g := &Gateway{eval: cfg.Evaluator, nonces: cfg.Nonces, state: cfg.State, storeTO: cfg.StoreTimeout, abandon: cfg.Abandon, keys: cfg.Keys, extra: cfg.Counters, clock: cfg.Clock, log: cfg.Logger, metrics: newMetrics(), mux: http.NewServeMux(),
 		auth: cfg.Authenticator, audit: cfg.Audit, rate: newRateLimiter(cfg.RatePerMin), approver: cfg.Approver, actions: cfg.Actions, breaker: cfg.Breaker,
 		contacts: cfg.Contacts, routes: map[string]map[string]func(http.ResponseWriter, *http.Request) error{}}
 	if g.log == nil {
@@ -329,6 +348,9 @@ func New(cfg Config) *Gateway {
 	}
 	if g.clock == nil {
 		g.clock = time.Now
+	}
+	if g.storeTO <= 0 {
+		g.storeTO = DefaultStoreTimeout
 	}
 	if g.nonces == nil {
 		g.nonces = nonce.NewMemory(g.clock)
@@ -465,15 +487,63 @@ func (g *Gateway) evaluate(w http.ResponseWriter, r *http.Request) error {
 		return withID(fail(CodeInternal, "evaluation failed"), req.ID)
 	}
 	if u != nil {
-		if err := u.Commit(); err != nil {
-			g.metrics.unwritten()
-			g.log.Error("state write failed; nothing of this evaluation was recorded, answering 500", "severity", "high",
-				"request_id", req.ID, "outcome", d.Outcome, "err", err)
-			return withID(fail(CodeInternal, "state unavailable"), req.ID)
+		done := make(chan error, 1)
+		go func() { done <- u.Commit() }()
+		timer := time.NewTimer(g.storeTO)
+		defer timer.Stop()
+		select {
+		case err := <-done:
+			if err != nil {
+				g.metrics.unwritten()
+				g.log.Error("state write failed; nothing of this evaluation was recorded, answering 500", "severity", "high",
+					"request_id", req.ID, "outcome", d.Outcome, "err", err)
+				return withID(fail(CodeInternal, "state unavailable"), req.ID)
+			}
+		case <-timer.C:
+			// Not durable in time: answer a deny now, without the token or
+			// signed tx, and abandon the unit. If its transaction has not
+			// committed, it now fails and every hold rolls back. If it was
+			// already committing, it lands; Abandon then voids the reservation
+			// and denies a pending escalation (LLD §12).
+			u.Abandon()
+			g.metrics.storeTimeout()
+			g.log.Error("state not durable within the store timeout; answering "+CodeStore, "severity", "high",
+				"request_id", req.ID, "outcome_withheld", d.Outcome, "timeout", g.storeTO.String())
+			go g.settleAbandoned(req.ID, done)
+			d = storeTimeoutDeny(d, g.storeTO)
 		}
 	}
 	g.metrics.decision(d.Outcome)
 	return g.writeJSON(w, "/v1/evaluate", outcomeStatus[d.Outcome], d)
+}
+
+// settleAbandoned waits for an abandoned unit and, if it landed anyway,
+// undoes what it left.
+func (g *Gateway) settleAbandoned(requestID string, done <-chan error) {
+	err := <-done
+	if err != nil {
+		g.log.Info("abandoned evaluation did not land; nothing recorded", "request_id", requestID, "err", err)
+		return
+	}
+	g.log.Warn("abandoned evaluation landed after its deadline; voiding what it left", "request_id", requestID)
+	if g.abandon != nil {
+		g.abandon(context.Background(), requestID)
+	}
+}
+
+// storeTimeoutDeny replaces the withheld decision with a deny that keeps its
+// bindings and carries no token, reservation or signed tx.
+func storeTimeoutDeny(d model.Decision, timeout time.Duration) model.Decision {
+	out := model.Decision{
+		RequestID: d.RequestID, Outcome: model.Deny,
+		Reasons:          []model.Reason{{Code: CodeStore, Message: "state was not durable within " + timeout.String() + "; failing closed"}},
+		PolicyBundleHash: d.PolicyBundleHash, PayloadHash: d.PayloadHash,
+		Approvals: []model.Approval{}, IssuedAt: d.IssuedAt, ExpiresAt: d.ExpiresAt,
+	}
+	if !out.ExpiresAt.After(out.IssuedAt) {
+		out.ExpiresAt = out.IssuedAt.Add(time.Second)
+	}
+	return out
 }
 
 // authorize authenticates a lifecycle call and checks that the key carries one

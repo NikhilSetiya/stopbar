@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -24,8 +25,31 @@ type DB struct {
 
 	qmu    sync.Mutex // guards queue
 	queue  []*call
-	commit chan struct{} // the commit slot (capacity 1): held while a group commits
-	fault  func() error  // tests only: fails each transaction as a failed commit would
+	commit chan struct{}         // the commit slot (capacity 1): held while a group commits
+	fault  func() error          // tests only: fails each transaction as a failed commit would
+	broken atomic.Pointer[error] // set by the first failed commit: every later write fails (see ErrBroken)
+}
+
+// ErrBroken is returned by every write after a commit (or its fsync) failed.
+// Such a failure is ambiguous: the transaction may or may not be on disk. A
+// retry could append the same audit record twice, and a rollback could undo
+// in memory what is in fact durable. So the store stops taking writes, every
+// caller fails closed, and the state file must be re-opened (restart
+// stopbard), which reads back what is really there.
+var ErrBroken = errors.New("store: a commit failed; the state file must be re-opened (restart stopbard)")
+
+// Err reports whether the store is broken (ErrBroken, wrapping the commit
+// error), or nil.
+func (d *DB) Err() error {
+	if e := d.broken.Load(); e != nil {
+		return fmt.Errorf("%w: %w", ErrBroken, *e)
+	}
+	return nil
+}
+
+func (d *DB) breakOn(err error) error {
+	d.broken.CompareAndSwap(nil, &err)
+	return d.Err()
 }
 
 // Op is a write that joins a caller's transaction (e.g. an audit append).
@@ -98,8 +122,12 @@ func OpenTemp() (*DB, error) {
 // panics, or the commit fails), nothing in it is written and each fn is run
 // again in its own transaction, so one caller's error never becomes
 // another's. A panic is re-raised in the goroutine of the caller whose fn
-// panicked.
+// panicked. A failed commit is different: it breaks the store (ErrBroken),
+// fails every caller in the group, and is never retried.
 func (d *DB) Update(fn Op) error {
+	if err := d.Err(); err != nil {
+		return err
+	}
 	c := &call{fn: fn, done: make(chan result, 1)}
 	d.qmu.Lock()
 	d.queue = append(d.queue, c)
@@ -128,43 +156,75 @@ func (d *DB) Update(fn Op) error {
 }
 
 func (d *DB) run(group []*call) {
+	if err := d.Err(); err != nil {
+		for _, c := range group {
+			c.done <- result{err: err}
+		}
+		return
+	}
 	if len(group) > 1 {
 		var p any
+		member := false // a member erred or panicked (retry alone), as opposed to the commit failing
 		err := d.bolt.Update(func(tx *bolt.Tx) error {
 			for _, c := range group {
 				var err error
 				if p, err = safe(c.fn, tx); err != nil || p != nil {
+					member = true
 					return errors.New("store: group member failed")
 				}
 			}
 			return d.injected()
 		})
-		if err == nil && p == nil {
+		switch {
+		case err == nil:
 			for _, c := range group {
 				c.done <- result{}
+			}
+			return
+		case !member:
+			broken := d.breakOn(err)
+			for _, c := range group {
+				c.done <- result{err: broken}
 			}
 			return
 		}
 	}
 	for _, c := range group {
 		var r result
+		member := false
 		err := d.bolt.Update(func(tx *bolt.Tx) error {
+			if err := d.Err(); err != nil { // an earlier member's commit broke the store
+				member = true
+				return err
+			}
 			var err error
 			r.panic, err = safe(c.fn, tx)
 			if r.panic != nil {
+				member = true
 				return errors.New("store: write panicked")
 			}
 			if err != nil {
+				member = true
 				return err
 			}
 			return d.injected()
 		})
-		if r.panic == nil {
+		switch {
+		case r.panic != nil:
+		case err != nil && !member:
+			r.err = d.breakOn(err)
+		default:
 			r.err = err
 		}
 		c.done <- r
 	}
 }
+
+// SetFaultForTest makes every write transaction call f after its writes and
+// just before bbolt commits it: an error fails the transaction as a failed
+// commit would, and blocking in f stalls it as a stuck fsync would. Tests
+// only; set it before any concurrent writes.
+func (d *DB) SetFaultForTest(f func() error) { d.fault = f }
 
 func (d *DB) injected() error {
 	if d.fault != nil {
@@ -212,12 +272,24 @@ func (d *DB) Close() error {
 // Nothing a unit holds is acknowledged until Commit returns nil: the caller
 // (the gateway) answers only after that, and answers fail-closed otherwise.
 type Unit struct {
-	db    *DB
-	mu    sync.Mutex
-	ops   []Op
-	after []func(error)
-	done  bool
+	db        *DB
+	mu        sync.Mutex
+	ops       []Op
+	after     []func(error)
+	done      bool
+	abandoned atomic.Bool
 }
+
+// ErrAbandoned fails a unit whose caller stopped waiting for it (Abandon).
+var ErrAbandoned = errors.New("store: unit abandoned by its caller (store timeout)")
+
+// Abandon tells a unit its caller stopped waiting and has answered without
+// it (CS-197, FAIL_CLOSED_STORE). If its transaction has not yet passed its
+// last write, the transaction fails with ErrAbandoned: nothing of it lands
+// and every after callback rolls back. If it was already committing (its
+// fsync was in flight), it still lands, and Commit returns nil; the caller
+// must then undo what landed (engine.Abandon).
+func (u *Unit) Abandon() { u.abandoned.Store(true) }
 
 type unitKey struct{}
 
@@ -254,10 +326,23 @@ func (d *DB) Write(ctx context.Context, op Op, after func(error)) error {
 		}
 		u.mu.Unlock()
 	}
-	err := d.Update(op)
-	if after != nil {
-		after(err)
+	if after == nil {
+		return d.Update(op)
 	}
+	// after runs exactly once, even if op panics (then with an error, before
+	// the panic is re-raised), so no component is left holding state.
+	ran := false
+	defer func() {
+		if p := recover(); p != nil {
+			if !ran {
+				after(fmt.Errorf("store: write panicked: %v", p))
+			}
+			panic(p)
+		}
+	}()
+	err := d.Update(op)
+	ran = true
+	after(err)
 	return err
 }
 
@@ -273,6 +358,21 @@ func (u *Unit) Commit() error {
 	u.ops, u.after = nil, nil // a second Commit is a no-op
 	u.mu.Unlock()
 	var err error
+	// The callbacks run exactly once, last first, whatever happens: if an op
+	// panics they get an error (and roll back) before the panic is re-raised,
+	// so no nonce stays pending and no limiter entry stays settling.
+	settled := false
+	defer func() {
+		if p := recover(); p != nil {
+			if !settled {
+				perr := fmt.Errorf("store: unit write panicked: %v", p)
+				for i := len(after) - 1; i >= 0; i-- {
+					after[i](perr)
+				}
+			}
+			panic(p)
+		}
+	}()
 	if len(ops) > 0 {
 		err = u.db.Update(func(tx *bolt.Tx) error {
 			for _, op := range ops {
@@ -280,9 +380,13 @@ func (u *Unit) Commit() error {
 					return err
 				}
 			}
+			if u.abandoned.Load() { // checked last: the latest point before bbolt commits
+				return ErrAbandoned
+			}
 			return nil
 		})
 	}
+	settled = true
 	for i := len(after) - 1; i >= 0; i-- {
 		after[i](err)
 	}

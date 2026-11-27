@@ -40,17 +40,23 @@ const (
 	BreakerReset       = "reset"
 )
 
-// trip opens the tenant's breaker (l.mu held). It opens in memory even if the
-// write fails: refusing the tenant is the safe direction. The failed write is
-// reported as ErrAuditUnavailable, because the trip went unrecorded.
+// trip opens the tenant's breaker (l.mu held on entry and on return). It
+// opens in memory first, so every concurrent request for the tenant is
+// refused at once, then releases l.mu for the durable write (no fsync under
+// the limiter lock, CS-197). It stays open in memory even if the write fails:
+// refusing the tenant is the safe direction. The failed write is reported as
+// ErrAuditUnavailable, because the trip went unrecorded.
 func (l *Limiter) trip(requestID, tenant, reason string, now time.Time) error {
 	at := now
 	b := &model.BreakerStatus{Tenant: tenant, Open: true, TrippedAt: &at, TripRequestID: requestID,
 		Reason: reason, Votes: []model.BreakerVote{}, Quorum: l.quorum}
-	werr := l.store.PutBreaker(*b, &model.AuditEntry{Type: model.AuditBreaker,
-		Body: map[string]any{"event": BreakerTrip, "tenant": tenant, "request_id": requestID, "breaker": *b}})
 	l.breakers[tenant] = b
 	l.trips++
+	snap := *b
+	l.mu.Unlock()
+	werr := l.store.PutBreaker(snap, &model.AuditEntry{Type: model.AuditBreaker,
+		Body: map[string]any{"event": BreakerTrip, "tenant": tenant, "request_id": requestID, "breaker": snap}})
+	l.mu.Lock()
 	l.log.Error("CIRCUIT BREAKER TRIPPED: every request for the tenant is denied until a quorum of approvers resets it",
 		"severity", "high", "alert", "circuit_breaker_open", "metric", "stopbar_circuit_breaker_trips_total",
 		"tenant", tenant, "request_id", requestID, "reason", reason, "quorum", l.quorum, "recorded", werr == nil)

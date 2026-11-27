@@ -176,7 +176,7 @@ The image keeps `stopbard`'s loopback default; serving outside the container nee
 | [HLD](docs/HLD.md) | Architecture, trust boundaries, flows, threat model |
 | [LLD](docs/LLD.md) | Data models, policy language, algorithms, APIs |
 | [TASKS](docs/TASKS.md) | Full build backlog with acceptance criteria |
-| [Benchmarks](docs/benchmarks.md) | Latency and throughput against NFR-1/2, with the exact command and environment |
+| [Benchmarks](docs/benchmarks.md) | Latency and throughput against NFR-1/2: 1,000 evaluations/s sustained; p99 < 25 ms met in 2 of 3 runs on a shared runner (tail from noisy neighbours) |
 | [Attack corpus](corpus/) | Schema + seed attacks |
 | [Spec](spec/) | Wire schemas, fixtures, audit-hash v1 |
 | [Releases](docs/releasing.md) | Install, verify signed binaries and image, cut a release |

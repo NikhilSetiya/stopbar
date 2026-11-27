@@ -129,8 +129,17 @@ func Open(db *store.DB, bucket string, log *audit.Log, clock func() time.Time) (
 	if err != nil {
 		return nil, err
 	}
+	// One entry per key, the latest expiry: a key can be on disk twice (a
+	// best-effort compaction that did not land, then the key consumed again),
+	// and the earlier expiry must not end the later one (review finding 3).
+	latest := map[string]time.Time{}
 	for _, l := range keep {
-		s.insert(l.key, l.until)
+		if u, ok := latest[l.key]; !ok || l.until.After(u) {
+			latest[l.key] = l.until
+		}
+	}
+	for k, u := range latest {
+		s.insert(k, u)
 	}
 	return s, nil
 }
@@ -161,6 +170,9 @@ func (s *Store) ConsumeCtx(ctx context.Context, key string, until time.Time) (fr
 func (s *Store) ConsumeWith(ctx context.Context, key string, until time.Time, entry *model.AuditEntry) (fresh bool, err error) {
 	if s.db != nil && entry != nil && s.log == nil {
 		return false, errors.New("nonce: no audit log configured for an audited consume")
+	}
+	if entry, err = audit.Prepare(entry); err != nil { // the body as it is now, not at unit commit
+		return false, fmt.Errorf("nonce: audit entry: %w", err)
 	}
 	s.mu.Lock()
 	gone := s.prune(s.clock())
@@ -224,8 +236,10 @@ func (s *Store) prune(now time.Time) []item {
 	var gone []item
 	for len(s.exp) > 0 && !now.Before(s.exp[0].until) {
 		it := heap.Pop(&s.exp).(item)
-		delete(s.until, it.key)
-		gone = append(gone, it)
+		if u, ok := s.until[it.key]; ok && u.Equal(it.until) { // a stale heap item never ends a live key
+			delete(s.until, it.key)
+		}
+		gone = append(gone, it) // its on-disk entry (keyed by this expiry) is expired either way
 	}
 	return gone
 }
