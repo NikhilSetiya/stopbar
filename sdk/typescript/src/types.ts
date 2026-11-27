@@ -16,7 +16,7 @@ export type Label =
   | (string & {});
 
 export interface Action {
-  kind: "evm_tx" | "tool_call" | "withdrawal";
+  kind: "evm_tx" | "tool_call" | "withdrawal" | "evm_typed_data" | "evm_personal_sign";
   chain_id?: number;
   from?: string;
   to?: string;
@@ -29,6 +29,18 @@ export interface Action {
   gas_limit?: string;
   max_fee_per_gas?: string;
   max_priority_fee_per_gas?: string;
+  /** evm_typed_data: the EIP-712 payload as eth_signTypedData_v4 takes it (CS-514). */
+  typed_data?: TypedData;
+  /** evm_personal_sign: the bytes to sign, 0x hex. */
+  message?: string;
+}
+
+/** An EIP-712 payload (CS-514). Integers travel as decimal strings. */
+export interface TypedData {
+  types: Record<string, { name: string; type: string }[]>;
+  primaryType: string;
+  domain: Record<string, unknown>;
+  message: Record<string, unknown>;
 }
 
 export interface Source {
@@ -91,6 +103,9 @@ export interface DecisionBody {
   token?: string;
   signed_tx?: string;
   tx_hash?: string;
+  /** Gatekeeper mode, off-chain requests: 65-byte signature (0x hex, v = 27/28) and the digest it signs. */
+  signature?: string;
+  signing_hash?: string;
 }
 
 /** A gateway error body (LLD §4.1). */

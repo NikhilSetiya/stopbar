@@ -97,6 +97,16 @@
       "type": "string",
       "pattern": "^0x[0-9a-f]{64}$",
       "description": "Hash of signed_tx."
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{130}$",
+      "description": "Gatekeeper mode, allow only, off-chain requests (evm_typed_data, evm_personal_sign): 65-byte secp256k1 signature r||s||v, v = 27/28."
+    },
+    "signing_hash": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{64}$",
+      "description": "The EIP-712 or EIP-191 digest that signature signs."
     }
   },
   "if": {

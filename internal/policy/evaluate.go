@@ -81,8 +81,14 @@ func (b *Bundle) reasons(d cedar.Diagnostic) []model.Reason {
 	return out
 }
 
-// evmActions are the Cedar actions a decoded evm_tx may map to.
-var evmActions = map[string]bool{"transfer": true, "approve": true, "contract_call": true}
+// evmActions are the Cedar actions each EVM action kind's decoded intent may
+// map to. An off-chain signature (CS-514) is an approval (Permit, Permit2), a
+// transfer (a Seaport order) or a plain sign_message, never a contract call.
+var evmActions = map[model.ActionKind]map[string]bool{
+	model.KindEVMTx:           {"transfer": true, "approve": true, "contract_call": true},
+	model.KindEVMTypedData:    {"transfer": true, "approve": true, "sign_message": true},
+	model.KindEVMPersonalSign: {"sign_message": true},
+}
 
 // cedarRequest maps the enriched request onto the schema in
 // examples/policies/stopbar.cedarschema. Anything it cannot represent
@@ -92,10 +98,11 @@ func (b *Bundle) cedarRequest(er model.EnrichedRequest) (cedar.Request, cedar.En
 	if a.Kind == model.KindToolCall {
 		return b.toolCallRequest(er)
 	}
-	if a.Kind != model.KindEVMTx {
+	actions, ok := evmActions[a.Kind]
+	if !ok {
 		return cedar.Request{}, nil, fmt.Errorf("policy: no policy context for action kind %q", a.Kind)
 	}
-	if !evmActions[er.Intent.Kind] {
+	if !actions[er.Intent.Kind] {
 		return cedar.Request{}, nil, fmt.Errorf("policy: decoded intent %q is not a policy action", er.Intent.Kind)
 	}
 	var problems []string

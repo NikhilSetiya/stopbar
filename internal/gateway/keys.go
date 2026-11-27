@@ -65,8 +65,17 @@ func walkKeys(v any, t reflect.Type, path string) error {
 				}
 			}
 		}
+	case reflect.Map: // typed_data.types values are structs; args values are any
+		if obj, ok := v.(map[string]any); ok {
+			for k, child := range obj {
+				if err := walkKeys(child, t.Elem(), join(path, k)); err != nil {
+					return err
+				}
+			}
+		}
 	}
-	// Maps (action.args) and scalars: no struct keys to check.
+	// Free-form maps (action.args, typed_data domain/message) and scalars:
+	// no struct keys to check.
 	return nil
 }
 

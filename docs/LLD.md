@@ -124,7 +124,7 @@ Pipeline: **normalize** (bind `payload_hash`, decision-token-v1 §2) → **decod
     "on_behalf_of": "user:123"
   },
   "action": {
-    "kind": "evm_tx",                  // evm_tx | tool_call | withdrawal
+    "kind": "evm_tx",                  // evm_tx | tool_call | withdrawal | evm_typed_data | evm_personal_sign (§6.1a)
     "chain_id": 8453,
     "from": "0x…",
     "to": "0x…",
@@ -303,7 +303,7 @@ namespace Stopbar {
   entity Agent { tenant: String };
   entity Wallet { chain_id: Long, address: String };
   entity Destination { address: String };
-  action "transfer", "approve", "contract_call", "tool_call", "withdraw"
+  action "transfer", "approve", "contract_call", "sign_message", "tool_call", "withdraw"
     appliesTo {
       principal: Agent,
       resource: [Wallet],
@@ -410,6 +410,31 @@ Implemented in `internal/decode/evm` (CS-141/142). It is stdlib-only, like the t
    - An unknown selector is flagged `unknown_call` (the policy decides; the default is escalate).
 5. **Fee terms** are checked against per-chain limits (`evm.Chains`: max fee per gas, gas limit, total max fee). A transaction for an unlisted chain is a decode error, since fee sanity can't be judged without the chain.
 
+### 6.1a Off-chain signature requests (CS-514, [ADR 0007](adr/0007-offchain-signatures.md))
+
+A signed Permit, Permit2 permit or Seaport order is as good as the on-chain approval or transfer it authorises. These requests are therefore decoded by the same stdlib decoder (`evm.Decoder`, `offchain.go`), into the same intent with the same flags.
+
+- **Kinds.** `evm_typed_data` carries `typed_data` `{types, primaryType, domain, message}` exactly as `eth_signTypedData_v4` takes it. `evm_personal_sign` carries `message`, the EIP-191 bytes as 0x hex. Both carry `chain_id` and `from`, and nothing else.
+- **Validation** (`model.TypedData.Problems`, at the gateway and again in the decoder) is structural and strict, so the stdlib decoder and the signer's go-ethereum hasher read one payload one way:
+  - Every value has the one JSON shape its declared type allows. Integers are decimal strings or JSON integers within ±2^53, never hex.
+  - `bytesN` has exactly N bytes. Structs have exactly their declared members.
+  - Bare `uint`/`int` types are refused, and values nest at most 16 deep.
+  - `domain.chainId` is required and must equal `chain_id`. Domain members are declared in standard order and are never empty.
+- **Mapping.** A known primary type's declared definitions (and the types it references) must equal the canonical ones exactly. A look-alike is a decode error, so the engine fails closed (`FAIL_CLOSED_DECODER`).
+
+| Primary type | Cedar action / op | Intent |
+|---|---|---|
+| `Permit` (EIP-2612: owner, spender, value, nonce, deadline) | `approve` / `erc2612_permit_signature` | asset = `verifyingContract`, amount = value, destination = spender, expiry = deadline; `unlimited_approval` at ≥ 2^255; owner must be `from` |
+| `Permit` (DAI: holder, spender, nonce, expiry, allowed) | `approve` / `dai_permit_signature` (`…_revoke_…` when not allowed) | allowed = unlimited (amount 2^256−1); expiry 0 = never; holder must be `from` |
+| `PermitSingle` (Permit2) | `approve` / `permit2_permit_signature` | as on chain (`unlimited_approval` at ≥ 2^159); expiry = `details.expiration`; a `verifyingContract` other than canonical Permit2 is named in `human` |
+| `PermitBatch` (Permit2) | `approve` / `permit2_permit_batch_signature` | one inner approval per detail, flags unioned; no hoisted amount, so `bounded-approval` can't permit it |
+| `OrderComponents` (Seaport 1.5/1.6) | `transfer` / `seaport_order` | a single offer item's asset (none if native) and amount (max of start/end); several offers are `multi_transfer`; offerer must be `from`; no destination (anyone can fill); expiry = `endTime`; `zero_consideration` when no consideration item pays the offerer a non-zero amount |
+| anything else | `sign_message` / `typed_data` | `unknown_call`; `human` renders the domain name and message |
+| personal_sign, printable UTF-8 | `sign_message` / `personal_sign` | `human` quotes the text |
+| personal_sign, any other bytes | `sign_message` / `personal_sign_raw` | `opaque` (a hash or serialized tx: what it authorises can't be known) |
+
+`IntentSummary.expiry` is when the signed grant stops being usable (Unix seconds). The decoder flags `long_expiry` on approvals usable more than 31 days ahead. Its clock is `time.Now`, and `Decoder.Now` is an override for unit tests only. Seaport `BulkOrder` and Permit2 SignatureTransfer (`PermitTransferFrom`) aren't decoded, so they get `unknown_call`. Enrichment is unchanged: approvals count $0 spend plus `approval_usd`, and an order's offer is priced as a transfer. No fee is involved. An unpriceable offer, such as an NFT under the chain enricher, fails closed. Policy context reaches Cedar for these kinds with the wallet resource (`chain_id:from`). A `personal_sign` can only be `sign_message`, and typed data can never be `contract_call`.
+
 ### 6.2 Risk flags
 
 | Flag | Rule |
@@ -422,12 +447,14 @@ Implemented in `internal/decode/evm` (CS-141/142). It is stdlib-only, like the t
 | `multi_transfer` | more than one outflow in one transaction |
 | `new_destination` / `similar_destination` | added by the destination registry enricher (§6.4, CS-133), not the decoder: destination not registered (and not the sender) / not registered but similar to a registered address |
 | `first_time_contract` | needs a per-tenant record of contracts called (CS-142) |
-| `opaque` | nesting > depth, or a Universal Router command that isn't decoded |
+| `opaque` | nesting > depth, or a Universal Router command that isn't decoded, or `personal_sign` bytes that aren't printable text |
 | `min_out_zero` | exact-in swap with minimum output 0 (Uniswap V2/V3 routers, SwapRouter02, Universal Router) |
 | `excessive_slippage` | added by the price enricher (CS-145): for any swap at any depth (`IntentSummary.swap`), the out side is worth less than (1 − tenant max slippage, default 3%) of the in side at oracle prices. Exact-in compares the minimum output with the input; exact-out the output with the maximum input. Wrapped native is priced as native. A swap whose tokens can't both be priced sets `price_stale`, so the starter pack escalates instead of trusting an unchecked limit. |
 | `soft_cap_exceeded` | added by the limiter: the request would cross a soft (`escalate`) cap (§7.3a) |
 | `excessive_fee` | fee terms above the chain's limits (`evm.Chains`) |
-| `unknown_call` | selector unknown |
+| `unknown_call` | selector unknown; or EIP-712 typed data whose primary type isn't decoded (§6.1a) |
+| `long_expiry` | off-chain approval (permit, Permit2) usable more than 31 days ahead, or never expiring (§6.1a). The starter pack escalates |
+| `zero_consideration` | Seaport order whose consideration pays the offerer nothing (§6.1a). The starter pack denies |
 
 ### 6.3 Human rendering
 
@@ -607,6 +634,16 @@ The adapter is edge code: it uses go-ethereum for secp256k1 and EIP-1559, which 
 5. Read the *signed* tx back and require its payload hash to equal the token's.
 
 **Gatekeeper flow:** allow → sign → `Commit(reservation, tx hash)`. `Gatekeeper.Evaluate` passes the adapter the identity the gateway authenticated; `Gatekeeper.Approve` passes the requester that `Engine.Approve` returns from the pending record (pending records keep the full `auth.Identity`, in bucket `pending_escalations_v2`). If the adapter refuses, or the commit can't be recorded, the reservation is released with the reason audited, the signed bytes are discarded, and the caller gets a 403 with `FAIL_CLOSED_ADAPTER`. `stopbar decode-tx` decodes any signed tx independently: recovered sender, every field, and its payload hash.
+
+**Off-chain requests (CS-514).** `SignMessage(ctx, token, action, requester)` serves `evm_typed_data` and `evm_personal_sign`. `SignTx` refuses those kinds and `SignMessage` refuses `evm_tx`, both before reading the token. The steps:
+
+1. Verify the token, the same as `SignTx` step 1. That includes spending it inside the evaluation's state unit (CS-197): the spent token and the commit are one transaction, and the signature is answered only once that transaction is durable. The core binds the payload's bytes (decision-token-v2 §2.4–2.5), never a digest.
+2. Find the key for `from`, refusing a delegated wallet as above.
+3. Compute the digest from the bound action only (`signer.MessageDigest`): EIP-712 via go-ethereum `apitypes` (refused unless `domain.chainId` = `chain_id`), or EIP-191 `TextHash`. No digest from the requester is ever accepted.
+4. Recompute the digest from the canonical bytes `payload_hash` covers, and refuse a mismatch (`DIGEST_MISMATCH`).
+5. Sign, recover, and require the signer to equal `from`. The signature is returned with v = 27/28.
+
+The Gatekeeper commits the reservation with the digest as `tx_ref`. The allow carries `signature` and `signing_hash`, and no `signed_tx`. `stopbar decode-sig <action.json|-> <sig>` checks it independently, giving the recomputed digest, the recovered signer and the payload hash. The corpus replay runs it for every allowed off-chain step.
 
 ### 10.2 EIP-712 (co-signer, Phase 4)
 
