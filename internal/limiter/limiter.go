@@ -6,13 +6,15 @@
 // Guarantees:
 //   - All or nothing. One Reserve checks every applicable cap on every key
 //     (tenant, agent, wallet, wallet+asset, destination) before it changes
-//     anything. A single mutex serialises Reserve, Commit and Release, so the
-//     usage of every key is within its caps at every instant.
+//     anything. A single mutex serialises the checks and in-memory changes of
+//     Reserve, Commit and Release, so the usage of every key is within its
+//     caps at every instant. The mutex is not held across a durable write.
 //   - No floats. USD is integer micro-dollars in big.Int, rounded up from
 //     decimal strings. Token amounts are raw units in big.Int.
-//   - Durable before visible. Every state change is written to the Store
-//     before it is applied in memory. If the write fails, nothing changes.
-//     Restarting a process does not reset its caps.
+//   - Durable before acknowledged. Capacity is held in memory from the check
+//     on (conservative), and a change is acknowledged only once it is durable.
+//     If the write fails, the hold is given back. Restarting a process does
+//     not reset its caps.
 //   - Time comes only from the injected clock. Expiry is derived from it on
 //     every call, so there are no timers or janitor goroutine to race.
 //

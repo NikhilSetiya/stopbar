@@ -129,8 +129,17 @@ func Open(db *store.DB, bucket string, log *audit.Log, clock func() time.Time) (
 	if err != nil {
 		return nil, err
 	}
+	// One entry per key, the latest expiry: a key can be on disk twice (a
+	// best-effort compaction that did not land, then the key consumed again),
+	// and the earlier expiry must not end the later one (review finding 3).
+	latest := map[string]time.Time{}
 	for _, l := range keep {
-		s.insert(l.key, l.until)
+		if u, ok := latest[l.key]; !ok || l.until.After(u) {
+			latest[l.key] = l.until
+		}
+	}
+	for k, u := range latest {
+		s.insert(k, u)
 	}
 	return s, nil
 }
@@ -227,8 +236,10 @@ func (s *Store) prune(now time.Time) []item {
 	var gone []item
 	for len(s.exp) > 0 && !now.Before(s.exp[0].until) {
 		it := heap.Pop(&s.exp).(item)
-		delete(s.until, it.key)
-		gone = append(gone, it)
+		if u, ok := s.until[it.key]; ok && u.Equal(it.until) { // a stale heap item never ends a live key
+			delete(s.until, it.key)
+		}
+		gone = append(gone, it) // its on-disk entry (keyed by this expiry) is expired either way
 	}
 	return gone
 }
