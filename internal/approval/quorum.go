@@ -65,13 +65,17 @@ type Vote struct {
 	// through for audit records that want the raw signature alongside the
 	// kid and owner, not just Tally's own bookkeeping.
 	Sig string `json:"sig,omitempty"`
+	// PolicyBundleHash is the bundle an escalation vote was signed against
+	// (spec §2); the caller drops a stored vote once it is no longer the
+	// active bundle. Empty for breaker-reset and contact votes.
+	PolicyBundleHash string `json:"policy_bundle_hash,omitempty"`
 }
 
 // VoteFromEscalation builds the Vote to add to a Tally from a key
 // VerifyEscalation matched and the envelope it verified. Call only after
 // VerifyEscalation returns no error.
 func VoteFromEscalation(k Key, s SignedEscalation) Vote {
-	return Vote{Kid: k.Kid, Owner: k.Owner, Decision: s.Decision, Expiry: time.Unix(s.Expiry, 0), Sig: s.Sig}
+	return Vote{Kid: k.Kid, Owner: k.Owner, Decision: s.Decision, Expiry: time.Unix(s.Expiry, 0), Sig: s.Sig, PolicyBundleHash: s.PolicyBundleHash}
 }
 
 // VoteFromBreakerReset builds the Vote to add to a Tally from a key

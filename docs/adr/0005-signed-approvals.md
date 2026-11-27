@@ -100,3 +100,11 @@ thing being decided.
   writes nothing.
 - CS-134's contact-approval tier rises from "a second API key" to M-of-N
   approver signatures; ADR 0004's consequence that pointed here is met.
+
+## Amendment (CS-153)
+
+[ADR 0010](0010-approval-policy-binding.md) adds `policy_bundle_hash` to the
+escalation approval object (now v2, domain `stopbar-approval-escalation-v2`).
+v1 escalation envelopes are no longer accepted. A vote counts only while the
+bundle it was signed against is active. Breaker-reset and contact approvals are
+unchanged.

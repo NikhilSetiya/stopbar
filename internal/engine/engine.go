@@ -40,8 +40,11 @@ type Enricher interface {
 }
 
 // Policy evaluates the enriched request (CS-111/112: Cedar bundle + combiner).
+// Hash is the active bundle's hash: an escalation approval signs it and
+// counts only while it is unchanged (spec/approval-signature-v1.md §2).
 type Policy interface {
 	Evaluate(ctx context.Context, req model.EnrichedRequest) (PolicyResult, error)
+	Hash() string
 }
 
 // PolicyResult is the combined policy outcome.
@@ -435,7 +438,8 @@ func (e *Engine) submitVote(ctx context.Context, id string, sig approval.SignedE
 	if e.cfg.Approvers == nil {
 		return model.Decision{}, errors.New("engine: no approver keys configured; approvals are disabled")
 	}
-	want := approval.EscalationWant{EscalationID: id, PayloadHash: pe.payloadHash(),
+	bundle := e.PolicyBundleHash()
+	want := approval.EscalationWant{EscalationID: id, PayloadHash: pe.payloadHash(), PolicyBundleHash: bundle,
 		RequesterKeyID: pe.Requester.KeyID, RequesterAgentID: pe.Requester.AgentID}
 	k, verifyErr := approval.VerifyEscalation(e.cfg.Approvers, pe.Request.Tenant, sig, want, now)
 	if verifyErr != nil {
@@ -446,8 +450,13 @@ func (e *Engine) submitVote(ctx context.Context, id string, sig approval.SignedE
 		return model.Decision{}, verifyErr
 	}
 
+	// A stored vote counts only under the bundle it was signed against
+	// (spec §2): after a policy change (stopbard restarted on a new bundle)
+	// the old votes are dropped, and audited, with the next accepted vote.
+	live, stale := splitVotes(pe.Votes, bundle)
+	pe.Votes = live
 	tally := approval.NewTally(e.cfg.ApprovalQuorum, pe.Requester.KeyID, pe.Requester.AgentID)
-	for _, v := range pe.Votes {
+	for _, v := range live {
 		_, _ = tally.Add(v, now) // already verified when first stored; replay is deterministic
 	}
 	v := approval.VoteFromEscalation(k, sig)
@@ -466,8 +475,9 @@ func (e *Engine) submitVote(ctx context.Context, id string, sig approval.SignedE
 	switch res.Outcome {
 	case approval.Pending:
 		pe.Votes = append(pe.Votes, v)
-		rec := &model.AuditEntry{Type: model.AuditApproval, Body: addIdentity(ctx, map[string]any{
-			"request_id": id, "event": "vote", "kid": v.Kid, "owner": v.Owner, "decision": v.Decision})}
+		rec := &model.AuditEntry{Type: model.AuditApproval, Body: addIdentity(ctx, withInvalidated(map[string]any{
+			"request_id": id, "event": "vote", "kid": v.Kid, "owner": v.Owner, "decision": v.Decision,
+			"policy_bundle_hash": bundle}, stale))}
 		if err := e.record(ctx, func(ctx context.Context) error { return e.cfg.Pending.Put(ctx, pe, rec) }); err != nil {
 			e.unaudited(id, err)
 			return model.Decision{}, err
@@ -478,7 +488,7 @@ func (e *Engine) submitVote(ctx context.Context, id string, sig approval.SignedE
 		e.cfg.Alerts.Veto(pe.Request.Tenant, approval.VetoKindEscalation, *res.Veto)
 		out := e.deny(id, now, pe.payloadHash(), failed(CodeApprovalReject, fmt.Errorf("rejected by %s", res.Veto.Kid)))
 		pe.Votes = append(pe.Votes, v)
-		body := map[string]any{"request": pe.Request, "decision": out, "veto": res.Veto}
+		body := withInvalidated(map[string]any{"request": pe.Request, "decision": out, "veto": res.Veto}, stale)
 		if err := e.resolve(ctx, &pe, model.EscalationDenied, out, res.Veto.Kid, now, model.AuditDecision, body); err != nil {
 			e.unaudited(id, err)
 			return model.Decision{}, err // nothing changed: still pending
@@ -508,7 +518,7 @@ func (e *Engine) submitVote(ctx context.Context, id string, sig approval.SignedE
 			state = model.EscalationDenied
 		}
 		pe.Votes = append(pe.Votes, v)
-		body := map[string]any{"request_id": id, "state": state, "approvals": approvals, "decision": out}
+		body := withInvalidated(map[string]any{"request_id": id, "state": state, "approvals": approvals, "decision": out}, stale)
 		if err := e.resolve(ctx, &pe, state, out, v.Kid, now, model.AuditApproval, body); err != nil {
 			// The allow happened (reserved, perhaps signed and committed) but its
 			// resolution is not recorded: fail closed. The signed bytes never
@@ -518,6 +528,33 @@ func (e *Engine) submitVote(ctx context.Context, id string, sig approval.SignedE
 		}
 		return out, nil
 	}
+}
+
+// PolicyBundleHash is the active policy bundle's hash: what an escalation
+// approval must sign (GET /v1/approvals/{id}, spec/approval-signature-v1.md §2).
+func (e *Engine) PolicyBundleHash() string { return e.cfg.Policy.Hash() }
+
+// splitVotes separates stored votes signed against bundle from those signed
+// against any other (or, pre-v2, no) bundle.
+func splitVotes(votes []approval.Vote, bundle string) (live, stale []approval.Vote) {
+	for _, v := range votes {
+		if v.PolicyBundleHash == bundle {
+			live = append(live, v)
+		} else {
+			stale = append(stale, v)
+		}
+	}
+	return live, stale
+}
+
+// withInvalidated records, in the audit body of the write that drops them,
+// the stored votes a policy change invalidated.
+func withInvalidated(body map[string]any, stale []approval.Vote) map[string]any {
+	if len(stale) > 0 {
+		body["invalidated_votes"] = stale
+		body["invalidated_reason"] = "policy bundle changed"
+	}
+	return body
 }
 
 // approvalFailureCode maps a spec §6 VerifyError code to an engine reason

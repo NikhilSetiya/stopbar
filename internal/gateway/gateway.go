@@ -90,6 +90,9 @@ type Approver interface {
 	Approve(ctx context.Context, id string, sig approval.SignedEscalation) (model.Decision, error)
 	Reject(ctx context.Context, id string, sig approval.SignedEscalation) (model.Decision, error)
 	Status(ctx context.Context, id string) (model.EscalationStatus, error)
+	// PolicyBundleHash is the active policy bundle's hash, which an
+	// escalation approval signs (spec/approval-signature-v1.md §2).
+	PolicyBundleHash() string
 }
 
 // Actions settles an allowed request's reservation (CS-105, Engine.Commit and
@@ -590,7 +593,10 @@ func (g *Gateway) resolve(w http.ResponseWriter, r *http.Request, route string,
 type EscalationToSign struct {
 	EscalationID string `json:"escalation_id"`
 	PayloadHash  string `json:"payload_hash"`
-	Tenant       string `json:"tenant"`
+	// PolicyBundleHash is the active policy bundle (spec §2, v2): a vote
+	// signed against it counts only while stopbard runs this bundle.
+	PolicyBundleHash string `json:"policy_bundle_hash"`
+	Tenant           string `json:"tenant"`
 	// MaxExpiry is now (the gateway's clock) plus approval.MaxExpiryAhead:
 	// the latest expiry a signature can carry and still verify if submitted
 	// immediately.
@@ -621,8 +627,8 @@ func (g *Gateway) approvalToSign(w http.ResponseWriter, r *http.Request) error {
 		return withID(fail(CodeNotFound, "no pending escalation for that id"), id)
 	}
 	return g.writeJSON(w, "/v1/approvals", http.StatusOK, EscalationToSign{
-		EscalationID: id, PayloadHash: st.Decision.PayloadHash, Tenant: st.Request.Tenant,
-		MaxExpiry: g.clock().Add(approval.MaxExpiryAhead).Unix(),
+		EscalationID: id, PayloadHash: st.Decision.PayloadHash, PolicyBundleHash: g.approver.PolicyBundleHash(),
+		Tenant: st.Request.Tenant, MaxExpiry: g.clock().Add(approval.MaxExpiryAhead).Unix(),
 	})
 }
 

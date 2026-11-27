@@ -208,7 +208,8 @@ export class Client {
       throw new StopbarUnavailable(`could not fetch what to sign (HTTP ${status}): ${(body as ErrorBody).code ?? JSON.stringify(body)}`);
     }
     return signEscalation(seed, {
-      escalationId: String(body.escalation_id), payloadHash: String(body.payload_hash), decision,
+      escalationId: String(body.escalation_id), payloadHash: String(body.payload_hash),
+      policyBundleHash: String(body.policy_bundle_hash), decision,
       expiry: Math.floor(Date.now() / 1000) + 50 * 60, // comfortably under the 1h bound
     });
   }

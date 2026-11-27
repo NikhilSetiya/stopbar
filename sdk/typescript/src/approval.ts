@@ -103,6 +103,7 @@ function signRaw(seed: Buffer, domain: string, obj: Record<string, unknown>): st
 export interface SignedEscalation {
   escalation_id: string;
   payload_hash: string;
+  policy_bundle_hash: string;
   decision: string;
   expiry: number;
   kid: string;
@@ -119,21 +120,23 @@ export interface SignedBreakerReset {
   sig: string;
 }
 
-/** Signs an escalation approve/reject envelope (spec §2). decision is
- * APPROVE or REJECT; expiry is Unix seconds, which the server refuses if
- * not within (now, now + 1h] of its own clock. */
+/** Signs an escalation approve/reject envelope (spec §2, object v2).
+ * policyBundleHash is the active bundle from GET /v1/approvals/{id}: the vote
+ * counts only while Stopbar still runs that bundle. decision is APPROVE or
+ * REJECT; expiry is Unix seconds, which the server refuses if not within
+ * (now, now + 1h] of its own clock. */
 export function signEscalation(
   seed: Buffer,
-  params: { escalationId: string; payloadHash: string; decision: string; expiry: number },
+  params: { escalationId: string; payloadHash: string; policyBundleHash: string; decision: string; expiry: number },
 ): SignedEscalation {
   if (params.decision !== APPROVE && params.decision !== REJECT) {
     throw new Error(`decision must be "${APPROVE}" or "${REJECT}", got ${JSON.stringify(params.decision)}`);
   }
   const obj = {
     escalation_id: params.escalationId, payload_hash: params.payloadHash,
-    decision: params.decision, expiry: params.expiry,
+    policy_bundle_hash: params.policyBundleHash, decision: params.decision, expiry: params.expiry,
   };
-  const sig = signRaw(seed, "stopbar-approval-escalation-v1\n", obj);
+  const sig = signRaw(seed, "stopbar-approval-escalation-v2\n", obj);
   return { ...obj, kid: kid(publicKeyFromSeed(seed)), sig };
 }
 

@@ -108,6 +108,7 @@ func (f *fakeApprover) Reject(_ context.Context, id string, sig approval.SignedE
 	}
 	return model.Decision{RequestID: id, Outcome: model.Deny, Reasons: []model.Reason{{Code: "APPROVAL_REJECTED"}}}, nil
 }
+func (f *fakeApprover) PolicyBundleHash() string { return "sha256:" + strings.Repeat("b", 64) }
 func (f *fakeApprover) Status(ctx context.Context, id string) (model.EscalationStatus, error) {
 	if id != "e1" {
 		return model.EscalationStatus{}, model.ErrNoPending
@@ -383,6 +384,7 @@ func TestApprovalEnvelopeFailures(t *testing.T) {
 			if status == 200 {
 				maxExp, _ := got["max_expiry"].(float64)
 				if got["escalation_id"] != "e1" || got["payload_hash"] != ph || got["tenant"] != "acme" ||
+					got["policy_bundle_hash"] != "sha256:"+strings.Repeat("b", 64) ||
 					int64(maxExp) > time.Now().Add(approval.MaxExpiryAhead).Unix()+1 {
 					t.Fatalf("to-sign %v", got)
 				}

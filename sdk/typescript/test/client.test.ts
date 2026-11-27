@@ -49,11 +49,12 @@ test("deny rejects with StopbarDenied", async () => {
 test("escalate rejects with request id, then approve", async () => {
   const m = await serve((p, b, method) => {
     if (p.startsWith("/v1/approvals/") && method === "GET") {
-      return [200, { escalation_id: p.split("/").pop(), payload_hash: "sha256:" + "a".repeat(64), tenant: "demo" }];
+      return [200, { escalation_id: p.split("/").pop(), payload_hash: "sha256:" + "a".repeat(64), policy_bundle_hash: "sha256:" + "b".repeat(64), tenant: "demo" }];
     }
     if (p.startsWith("/v1/approvals/")) {
       assert.equal(b.decision, "approve");
       assert.ok(b.kid && b.sig); // genuinely signed
+      assert.equal(b.policy_bundle_hash, "sha256:" + "b".repeat(64)); // signs the bundle the server named
       return [200, { request_id: p.split("/").pop(), outcome: "allow", signed_tx: "0xabc" }];
     }
     return [202, { request_id: b.id, outcome: "escalate", reasons: [{ policy_id: "large-share-of-balance", message: "" }] }];
@@ -143,7 +144,7 @@ test("poll reports the escalation state", async () => {
 // escalationToSign answers the GET /v1/approvals/{id} half of a mock, for
 // any approve/reject test below.
 function escalationToSign(method: string): [number, unknown] | undefined {
-  if (method === "GET") return [200, { escalation_id: "req_1", payload_hash: "sha256:" + "a".repeat(64), tenant: "demo" }];
+  if (method === "GET") return [200, { escalation_id: "req_1", payload_hash: "sha256:" + "a".repeat(64), policy_bundle_hash: "sha256:" + "b".repeat(64), tenant: "demo" }];
   return undefined;
 }
 

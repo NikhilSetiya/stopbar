@@ -63,13 +63,14 @@ def test_kid_is_deterministic_rfc7638_thumbprint():
 
 def test_sign_escalation_shape_and_decision_validation():
     seed, pub = approval.generate_key()
-    s = approval.sign_escalation(seed, escalation_id="esc_1", payload_hash="sha256:" + "a" * 64, decision=approval.APPROVE, expiry=4102444800)
+    s = approval.sign_escalation(seed, escalation_id="esc_1", payload_hash="sha256:" + "a" * 64, policy_bundle_hash="sha256:" + "b" * 64, decision=approval.APPROVE, expiry=4102444800)
     body = s.to_json()
     assert body["escalation_id"] == "esc_1" and body["decision"] == "approve"
+    assert body["policy_bundle_hash"] == "sha256:" + "b" * 64
     assert body["kid"] == approval.kid(pub)
     assert body["sig"]
     with pytest.raises(ValueError):
-        approval.sign_escalation(seed, escalation_id="esc_1", payload_hash="x", decision="maybe", expiry=1)
+        approval.sign_escalation(seed, escalation_id="esc_1", payload_hash="x", policy_bundle_hash="y", decision="maybe", expiry=1)
 
 
 def test_sign_breaker_reset_shape():
@@ -90,13 +91,41 @@ def test_signature_actually_verifies_with_raw_ed25519():
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
     seed, pub = approval.generate_key()
-    s = approval.sign_escalation(seed, escalation_id="esc_1", payload_hash="sha256:" + "a" * 64, decision=approval.APPROVE, expiry=4102444800)
-    canon = approval._canonical({"escalation_id": "esc_1", "payload_hash": "sha256:" + "a" * 64, "decision": "approve", "expiry": 4102444800})
-    msg = b"stopbar-approval-escalation-v1\n" + canon
+    s = approval.sign_escalation(seed, escalation_id="esc_1", payload_hash="sha256:" + "a" * 64, policy_bundle_hash="sha256:" + "b" * 64, decision=approval.APPROVE, expiry=4102444800)
+    canon = approval._canonical({"escalation_id": "esc_1", "payload_hash": "sha256:" + "a" * 64, "policy_bundle_hash": "sha256:" + "b" * 64, "decision": "approve", "expiry": 4102444800})
+    msg = b"stopbar-approval-escalation-v2\n" + canon
     pubkey = Ed25519PublicKey.from_public_bytes(pub)
     pubkey.verify(approval._b64d(s.sig), msg)  # raises if invalid
 
     # A tampered field must not verify.
-    tampered = approval._canonical({"escalation_id": "esc_2", "payload_hash": "sha256:" + "a" * 64, "decision": "approve", "expiry": 4102444800})
+    tampered = approval._canonical({"escalation_id": "esc_2", "payload_hash": "sha256:" + "a" * 64, "policy_bundle_hash": "sha256:" + "b" * 64, "decision": "approve", "expiry": 4102444800})
     with pytest.raises(InvalidSignature):
-        pubkey.verify(approval._b64d(s.sig), b"stopbar-approval-escalation-v1\n" + tampered)
+        pubkey.verify(approval._b64d(s.sig), b"stopbar-approval-escalation-v2\n" + tampered)
+
+
+def test_matches_the_go_conformance_vectors():
+    """Signs every OK escalation and breaker-reset vector in
+    spec/vectors/approval-signature-v1.json with the vector key's seed and
+    expects the vector's exact signature (Ed25519 is deterministic), so the
+    SDK and the Go core agree byte for byte on the v2 escalation object."""
+    import json
+
+    vf = json.load(open(os.path.join(os.path.dirname(__file__), "..", "..", "..", "spec", "vectors", "approval-signature-v1.json")))
+    seeds = {k["kid"]: bytes.fromhex(k["seed_hex"]) for k in vf["keys"]}
+    checked = 0
+    for v in vf["escalations"]:
+        e = v["envelope"]
+        if v["result"] != "OK" or e["kid"] not in seeds:
+            continue
+        s = approval.sign_escalation(seeds[e["kid"]], escalation_id=e["escalation_id"], payload_hash=e["payload_hash"],
+                                     policy_bundle_hash=e["policy_bundle_hash"], decision=e["decision"], expiry=e["expiry"])
+        assert s.to_json() == e, v["name"]
+        checked += 1
+    for v in vf["breaker_resets"]:
+        e = v["envelope"]
+        if v["result"] != "OK":
+            continue
+        r = approval.sign_breaker_reset(seeds[e["kid"]], tenant=e["tenant"], trip_request_id=e["trip_request_id"], expiry=e["expiry"])
+        assert r.to_json() == e, v["name"]
+        checked += 1
+    assert checked >= 3

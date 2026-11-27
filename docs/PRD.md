@@ -147,7 +147,7 @@ IDs are referenced from the [task backlog](TASKS.md).
 ### 7.6 Escalation (FR-ESC)
 
 - FR-ESC-1: Configurable M-of-N approvers per policy.
-- FR-ESC-2: Approvals signed with WebAuthn/passkeys (phase 1: signed CLI approvals).
+- FR-ESC-2: Approvals signed with WebAuthn/passkeys (phase 1: signed CLI approvals). An approval binds the exact payload and the active policy bundle; a policy change while an escalation is pending invalidates the votes already cast (ADR 0010).
 - FR-ESC-3: Timeout → deny.
 
 ### 7.7 Audit (FR-AUD)

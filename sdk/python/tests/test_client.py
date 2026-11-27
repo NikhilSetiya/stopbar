@@ -105,11 +105,13 @@ def test_escalate_raises_with_request_id_then_approve():
         assert path == "/v1/approvals/req_1"
         assert body["decision"] == approval.APPROVE and body["escalation_id"] == "req_1"
         assert body["kid"] and body["sig"]  # genuinely signed
+        assert body["policy_bundle_hash"] == "sha256:" + "b" * 64  # signs the bundle the server named
         return (200, {"request_id": "req_1", "outcome": "allow", "signed_tx": "0xabc"})
 
     def get_responder(path):
         assert path == "/v1/approvals/req_1"
-        return (200, {"escalation_id": "req_1", "payload_hash": "sha256:" + "a" * 64, "tenant": "demo"})
+        return (200, {"escalation_id": "req_1", "payload_hash": "sha256:" + "a" * 64,
+                      "policy_bundle_hash": "sha256:" + "b" * 64, "tenant": "demo"})
 
     srv = serve(lambda path, body: (202, {"request_id": body["id"], "outcome": "escalate",
                                           "reasons": [{"policy_id": "large-share-of-balance"}]}), get_responder)
@@ -197,7 +199,7 @@ def test_poll_unknown_raises():
 def _approval_get_responder(escalation_id="req_1"):
     def get_responder(path):
         assert path == f"/v1/approvals/{escalation_id}"
-        return (200, {"escalation_id": escalation_id, "payload_hash": "sha256:" + "a" * 64, "tenant": "demo"})
+        return (200, {"escalation_id": escalation_id, "payload_hash": "sha256:" + "a" * 64, "policy_bundle_hash": "sha256:" + "b" * 64, "tenant": "demo"})
 
     return get_responder
 

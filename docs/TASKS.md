@@ -9,7 +9,7 @@ Estimates are focused build days for one engineer. IDs are stable; reference the
 | Phase | Tasks | Est. days |
 |---|---|---|
 | Phase 0 - Foundations (weeks 0-2) | 9 | 9 |
-| Phase 1 - Agent-wallet MVP (weeks 2-8) | 46 | 81 |
+| Phase 1 - Agent-wallet MVP (weeks 2-8) | 47 | 82 |
 | Phase 1R - Research track (parallel, weeks 4-10) | 13 | 25.5 |
 | Phase 2 - Corpus & community (weeks 8-12) | 6 | 12.5 |
 | Phase 3 - Code-mode agents (months 3-9) | 7 | 35 |
@@ -100,6 +100,7 @@ Everything else in Phase 1 hardens or widens the slice after it's public.
 |---|---|---|---|---|---|---|
 | CS-151 | Approver keys + CLI approvals | Ed25519 approver keys (ADR 0005, spec/approval-signature-v1.md) replace API-key approval everywhere: escalation approve/reject, breaker reset, contact additions. `stopbar approve/reject <id>`, `breaker reset`, `contacts approve` and both SDKs sign locally; M-of-N distinct owners (-approval-quorum, -breaker-quorum; >= 2 in production); a key bound to the requester cannot approve. On quorum, re-run enrich -> policy -> limiter -> sign against current state with approvals as policy context (LLD §9 step 5); never replay the escalated decision. | Wrong hash or key rejected; quorum honoured. Approval after the cap filled or price moved yields deny/escalate, not allow (test). Conformance vectors for every verification check; demos approve 2-of-2; e2e lifecycle, breaker and contacts scripts sign with approver keys. | 2d | CS-104 | FR-ESC-1,2 |
 | CS-152 | Escalation lifecycle | Create, poll (/v1/decisions), timeout -> deny, reject -> deny. | E2E: escalate -> approve -> signed tx returned. | 1.5d | CS-151 | FR-ESC-3 |
+| CS-153 | Approval binding to policy | Escalation approval object v2 (spec/approval-signature-v1.md §2, ADR 0010): sign policy_bundle_hash alongside payload_hash; GET /v1/approvals returns the active bundle hash; CLI and both SDKs sign it; v1 escalation envelopes never accepted. A stored vote counts only while its bundle is the active one (compared on every replay, so across a restart on a new bundle); discarded votes audited in the write that drops them. Breaker-reset and contact objects unchanged (no policy dependence). | Policy change with 1 of 2 votes cast: the new-bundle vote does not reach quorum alone, the old-bundle envelope is refused APPROVAL_SIG_POLICY_CHANGED and changes no state, two fresh votes allow; the same envelope twice executes once (DUPLICATE_VOTE before quorum, ALREADY_RESOLVED after); invalidated votes and refusals audited; restart on a changed bundle in e2e lifecycle; conformance vectors incl. a refused v1 signature. | 1d | CS-151,CS-152 | FR-ESC-2, LLD §9 |
 
 ### E7 Decision & signer
 

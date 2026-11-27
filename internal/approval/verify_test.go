@@ -4,6 +4,8 @@ import (
 	"crypto/ed25519"
 	"testing"
 	"time"
+
+	"github.com/NikhilSetiya/stopbar/internal/canon"
 )
 
 // fixture holds a configured tenant key set plus the raw keys needed to
@@ -54,15 +56,16 @@ func newFixture(t *testing.T) fixture {
 const (
 	wantEscID   = "esc_1"
 	wantPayload = "sha256:abc"
+	wantPolicy  = "sha256:def"
 )
 
 func (f fixture) wantEsc() EscalationWant {
-	return EscalationWant{EscalationID: wantEscID, PayloadHash: wantPayload}
+	return EscalationWant{EscalationID: wantEscID, PayloadHash: wantPayload, PolicyBundleHash: wantPolicy}
 }
 
 func signEsc(t *testing.T, priv ed25519.PrivateKey, mut func(*EscalationObject)) SignedEscalation {
 	t.Helper()
-	obj := EscalationObject{EscalationID: wantEscID, PayloadHash: wantPayload, Decision: Approve, Expiry: time.Now().Add(30 * time.Minute).Unix()}
+	obj := EscalationObject{EscalationID: wantEscID, PayloadHash: wantPayload, PolicyBundleHash: wantPolicy, Decision: Approve, Expiry: time.Now().Add(30 * time.Minute).Unix()}
 	if mut != nil {
 		mut(&obj)
 	}
@@ -110,6 +113,29 @@ func TestVerifyEscalationFailureCases(t *testing.T) {
 			want: CodePayloadMismatch,
 		},
 		{
+			name: "signed against another policy bundle (policy changed while pending)",
+			s: func() SignedEscalation {
+				return signEsc(t, f.alicePriv, func(o *EscalationObject) { o.PolicyBundleHash = "sha256:old" })
+			},
+			want: CodePolicyChanged,
+		},
+		{
+			name: "no policy bundle hash",
+			s: func() SignedEscalation {
+				return signEsc(t, f.alicePriv, func(o *EscalationObject) { o.PolicyBundleHash = "" })
+			},
+			want: CodePolicyChanged,
+		},
+		{
+			name: "v1 envelope (no policy binding, v1 domain tag)",
+			s: func() SignedEscalation {
+				s := signEsc(t, f.alicePriv, nil)
+				s.Sig = signV1Escalation(t, f.alicePriv, s.EscalationObject)
+				return s
+			},
+			want: CodeBadSignature,
+		},
+		{
 			name: "wrong escalation_id",
 			s: func() SignedEscalation {
 				return signEsc(t, f.alicePriv, func(o *EscalationObject) { o.EscalationID = "esc_other" })
@@ -120,7 +146,7 @@ func TestVerifyEscalationFailureCases(t *testing.T) {
 			name: "replayed signature on another escalation",
 			s: func() SignedEscalation {
 				// Validly signed for esc_2, replayed against esc_1's want.
-				obj := EscalationObject{EscalationID: "esc_2", PayloadHash: wantPayload, Decision: Approve, Expiry: now.Add(30 * time.Minute).Unix()}
+				obj := EscalationObject{EscalationID: "esc_2", PayloadHash: wantPayload, PolicyBundleHash: wantPolicy, Decision: Approve, Expiry: now.Add(30 * time.Minute).Unix()}
 				s, err := SignEscalation(f.alicePriv, obj)
 				if err != nil {
 					t.Fatal(err)
@@ -209,6 +235,17 @@ func TestVerifyEscalationFailureCases(t *testing.T) {
 			}
 		})
 	}
+}
+
+// signV1Escalation signs o the v1 way (spec §2.1: the v1 tag over the four
+// v1 fields), which v2 verification must never accept.
+func signV1Escalation(t *testing.T, priv ed25519.PrivateKey, o EscalationObject) string {
+	t.Helper()
+	c, err := canon.Marshal(map[string]any{"escalation_id": o.EscalationID, "payload_hash": o.PayloadHash, "decision": o.Decision, "expiry": o.Expiry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b64.EncodeToString(ed25519.Sign(priv, append([]byte("stopbar-approval-escalation-v1\n"), c...)))
 }
 
 func TestVerifyEscalationSelfApprovalByAgentID(t *testing.T) {

@@ -40,7 +40,8 @@ func fakeApprovalServer(t *testing.T, postStatus int, postBody string) (*httptes
 		case http.MethodGet:
 			got.getPath, got.getAuth = r.URL.Path, r.Header.Get("Authorization")
 			_ = json.NewEncoder(w).Encode(gateway.EscalationToSign{
-				EscalationID: "req_abc", PayloadHash: "sha256:" + strings.Repeat("a", 64), Tenant: "acme", MaxExpiry: 9999999999,
+				EscalationID: "req_abc", PayloadHash: "sha256:" + strings.Repeat("a", 64), PolicyBundleHash: "sha256:" + strings.Repeat("b", 64),
+				Tenant: "acme", MaxExpiry: 9999999999,
 			})
 		case http.MethodPost:
 			got.postPath, got.postAuth, got.method = r.URL.Path, r.Header.Get("Authorization"), r.Method
@@ -73,8 +74,9 @@ func TestApproveCmdArgOrder(t *testing.T) {
 	if got.getAuth != "Bearer stopbar_sk_test" || got.postAuth != "Bearer stopbar_sk_test" {
 		t.Fatalf("Authorization: get=%q post=%q, want bearer token on both", got.getAuth, got.postAuth)
 	}
-	if got.posted.Decision != approval.Approve || got.posted.EscalationID != "req_abc" || got.posted.PayloadHash != "sha256:"+strings.Repeat("a", 64) {
-		t.Fatalf("posted envelope = %+v, want an approve for req_abc with the fetched payload_hash", got.posted)
+	if got.posted.Decision != approval.Approve || got.posted.EscalationID != "req_abc" || got.posted.PayloadHash != "sha256:"+strings.Repeat("a", 64) ||
+		got.posted.PolicyBundleHash != "sha256:"+strings.Repeat("b", 64) {
+		t.Fatalf("posted envelope = %+v, want an approve for req_abc with the fetched payload and policy bundle hashes", got.posted)
 	}
 	if got.posted.Kid == "" || got.posted.Sig == "" {
 		t.Fatalf("posted envelope is unsigned: %+v", got.posted)

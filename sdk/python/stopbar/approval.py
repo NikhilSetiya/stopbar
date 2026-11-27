@@ -118,6 +118,7 @@ class SignedEscalation:
 
     escalation_id: str
     payload_hash: str
+    policy_bundle_hash: str
     decision: str
     expiry: int
     kid: str
@@ -126,7 +127,7 @@ class SignedEscalation:
     def to_json(self) -> dict[str, Any]:
         return {
             "escalation_id": self.escalation_id, "payload_hash": self.payload_hash,
-            "decision": self.decision, "expiry": self.expiry, "kid": self.kid, "sig": self.sig,
+            "policy_bundle_hash": self.policy_bundle_hash, "decision": self.decision, "expiry": self.expiry, "kid": self.kid, "sig": self.sig,
         }
 
 
@@ -147,16 +148,20 @@ class SignedBreakerReset:
         }
 
 
-def sign_escalation(seed: bytes, *, escalation_id: str, payload_hash: str, decision: str, expiry: int) -> SignedEscalation:
-    """Signs an escalation approve/reject envelope (spec §2). decision is
+def sign_escalation(seed: bytes, *, escalation_id: str, payload_hash: str, policy_bundle_hash: str,
+                    decision: str, expiry: int) -> SignedEscalation:
+    """Signs an escalation approve/reject envelope (spec §2, object v2).
+    policy_bundle_hash is the active bundle from GET /v1/approvals/{id}: the
+    vote counts only while Stopbar still runs that bundle. decision is
     APPROVE or REJECT; expiry is a Unix-seconds int, which the server will
     refuse if it is not within (now, now + 1h] of its own clock."""
     if decision not in (APPROVE, REJECT):
         raise ValueError(f"decision must be {APPROVE!r} or {REJECT!r}, got {decision!r}")
-    obj = {"escalation_id": escalation_id, "payload_hash": payload_hash, "decision": decision, "expiry": expiry}
-    sig = _sign(seed, b"stopbar-approval-escalation-v1\n", obj)
+    obj = {"escalation_id": escalation_id, "payload_hash": payload_hash, "policy_bundle_hash": policy_bundle_hash,
+           "decision": decision, "expiry": expiry}
+    sig = _sign(seed, b"stopbar-approval-escalation-v2\n", obj)
     pub = Ed25519PrivateKey.from_private_bytes(seed).public_key().public_bytes_raw()
-    return SignedEscalation(escalation_id, payload_hash, decision, expiry, kid(pub), sig)
+    return SignedEscalation(escalation_id, payload_hash, policy_bundle_hash, decision, expiry, kid(pub), sig)
 
 
 def sign_breaker_reset(seed: bytes, *, tenant: str, trip_request_id: str, expiry: int) -> SignedBreakerReset:

@@ -28,6 +28,13 @@ quorum.
                 with a token → poll 200 allowed → commit; an escalation left
                 past -pending-ttl polls 403 expired.
 
+  policy change a 2-of-2 escalation with one vote cast survives a restart on a
+                changed policy bundle (CS-153): the old-bundle vote no longer
+                counts, its envelope is refused APPROVAL_SIG_POLICY_CHANGED, a
+                duplicate is DUPLICATE_VOTE and a replay after quorum
+                ALREADY_RESOLVED; two votes under the new bundle allow; the
+                discarded vote is audited.
+
   gatekeeper    a second stopbard holding the wallet (-dev-wallet): escalate →
                 `stopbar approve <id> --approver-key FILE` → 200 with a signed
                 tx that `stopbar decode-tx` recovers to `from` with the
@@ -272,6 +279,88 @@ with tempfile.TemporaryDirectory() as tmp:
     check(any(who(b) == "ak_ops" and b["state"] == "allowed" for b in find("approval", lambda b: b["request_id"] == "req_life_e2")), "approval resolution audited")
     check(any(b["decision"]["request_id"] == "req_life_e3" for b in find("decision", lambda b: last_code(b) == "APPROVAL_EXPIRED")), "expiry audited as a deny")
     check(any(who(b) == "ak_other" for b in find("auth_reject", lambda b: "not the requester" in b.get("reason", ""))), "a foreign settle attempt is audited")
+
+print("-- policy change while pending: votes are bound to the bundle (CS-153, approval object v2)")
+from stopbar import approval as sbapproval  # noqa: E402
+
+
+def start(args):
+    p = subprocess.Popen([stopbard, "-listen", "127.0.0.1:0", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    line = p.stdout.readline()
+    if "listening on" not in line:
+        raise RuntimeError(f"stopbard did not start: {line!r} {p.stderr.read()}")
+    return p, line.rsplit(" ", 1)[1].strip()
+
+
+def stop(p):
+    p.terminate()
+    p.wait(timeout=10)
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    import shutil
+    world, keyfile, jwks, state, pol = (os.path.join(tmp, f) for f in ("world.json", "auth.json", "jwks.json", "state", "policies"))
+    shutil.copytree("examples/policies", pol, ignore=shutil.ignore_patterns("*.go"))
+    alice_key, bob_key, approvers_file = (os.path.join(tmp, f) for f in ("alice.key", "bob.key", "approvers.json"))
+    json.dump(setup, open(world, "w"))
+    write_auth_keys(keyfile)
+    json.dump({"approvers": [
+        {"id": "alice", "tenant": "test", "owner": {"key_id": "ak_alice_signer"}, "public_key": approver_keygen(alice_key)},
+        {"id": "bob", "tenant": "test", "owner": {"key_id": "ak_bob_signer"}, "public_key": approver_keygen(bob_key)},
+    ]}, open(approvers_file, "w"))
+    args = ["-dev-world", world, "-policies", pol, "-auth-keys", keyfile, "-approvers", approvers_file,
+            "-approval-quorum", "2", "-state-dir", state]
+    proc, addr = start(args)
+    try:
+        p1, _ = template(ESCALATE, "esc-agent", "req_life_p1")
+        s, d = http(addr, "POST", "/v1/evaluate", K["esc"], p1)
+        check(s == 202, f"policy change: escalates: HTTP {s}")
+        s, ts = http(addr, "GET", "/v1/approvals/req_life_p1", K["ops"])
+        old_hash = ts.get("policy_bundle_hash", "")
+        check(s == 200 and old_hash == d.get("policy_bundle_hash") and old_hash.startswith("sha256:"),
+              f"GET /v1/approvals returns the active policy bundle hash to sign: {old_hash}")
+        r = cli_approve("req_life_p1", addr, alice_key, K["ops"])
+        check(r.returncode != 0 and "HTTP 202" in r.stdout, "1 of 2 votes cast: still pending")
+        # Alice's vote as a raw envelope, signed under the old bundle, to retry after the change.
+        old_env = sbapproval.sign_escalation(sbapproval.load_key_file(alice_key), escalation_id="req_life_p1",
+                                             payload_hash=ts["payload_hash"], policy_bundle_hash=old_hash,
+                                             decision=sbapproval.APPROVE, expiry=int(time.time()) + 50 * 60).to_json()
+        s, d = http(addr, "POST", "/v1/approvals/req_life_p1", K["ops"], old_env)
+        check(s == 409 and d.get("code") == "DUPLICATE_VOTE", f"the same vote submitted twice is refused: HTTP {s} {d.get('code')}")
+        with urllib.request.urlopen(f"http://{addr}/v1/keys", timeout=5) as resp:
+            run1_keys = json.loads(resp.read())["keys"]  # each run has an ephemeral decision key
+    finally:
+        stop(proc)
+
+    with open(os.path.join(pol, "agent-wallet.cedar"), "a") as f:
+        f.write("\n// e2e: a policy change while an escalation is pending\n")
+    proc, addr = start(args)  # restart on the changed bundle, same state file
+    try:
+        s, ts = http(addr, "GET", "/v1/approvals/req_life_p1", K["ops"])
+        check(s == 200 and ts.get("policy_bundle_hash") not in ("", None, old_hash), "after restart the escalation is still pending, under a new bundle hash")
+        s, d = http(addr, "POST", "/v1/approvals/req_life_p1", K["ops"], old_env)
+        check(s == 403 and codes(d) == ["APPROVAL_SIG_POLICY_CHANGED"], f"a vote signed under the old bundle is refused: HTTP {s} {codes(d)}")
+        r = cli_approve("req_life_p1", addr, bob_key, K["ops"])
+        check(r.returncode != 0 and "HTTP 202" in r.stdout, "the second vote (new bundle) does not reach quorum alone: alice's old vote no longer counts")
+        r = cli_approve("req_life_p1", addr, alice_key, K["ops"])
+        check(r.returncode == 0 and '"outcome": "allow"' in r.stdout, f"alice re-signs under the new bundle: quorum, allow ({r.returncode})")
+        s, d = http(addr, "POST", "/v1/approvals/req_life_p1", K["ops"], old_env)
+        check(s == 409 and d.get("code") == "ALREADY_RESOLVED", f"a replay after quorum executes nothing: HTTP {s} {d.get('code')}")
+        with urllib.request.urlopen(f"http://{addr}/v1/keys", timeout=5) as resp:
+            ks = json.loads(resp.read())
+        ks["keys"] += run1_keys
+        json.dump(ks, open(jwks, "w"))
+    finally:
+        stop(proc)
+    v = subprocess.run([stopbar_cli, "audit", "verify", "--state-dir", state, "--keys", jwks, "--require-covered"], capture_output=True, text=True)
+    check(v.returncode == 0, f"policy change audit verify: {(v.stdout or v.stderr).strip()}")
+    ex = subprocess.run([stopbar_cli, "audit", "export", "--state-dir", state], capture_output=True, text=True, check=True)
+    recs = [json.loads(l) for l in ex.stdout.splitlines()]
+    check(any(r["type"] == "approval" and r["body"].get("request_id") == "req_life_p1" and
+              [x.get("policy_bundle_hash") for x in r["body"].get("invalidated_votes") or []] == [old_hash] for r in recs),
+          "the invalidated vote is audited when it is discarded")
+    check(any(r["type"] == "decision" and codes(r["body"].get("decision", {})) == ["APPROVAL_SIG_POLICY_CHANGED"] for r in recs),
+          "the old-bundle refusal is audited")
 
 print("-- gatekeeper: escalate → approve → signed tx (CS-152 acceptance)")
 ANVIL_KEY = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"  # public test key, never funded

@@ -86,12 +86,13 @@ func TestDomainsDoNotCollide(t *testing.T) {
 }
 
 func TestCanonicalEscalationDiffersOnAnyFieldChange(t *testing.T) {
-	base := EscalationObject{EscalationID: "e1", PayloadHash: "sha256:x", Decision: Approve, Expiry: 100}
+	base := EscalationObject{EscalationID: "e1", PayloadHash: "sha256:x", PolicyBundleHash: "sha256:p", Decision: Approve, Expiry: 100}
 	variants := []EscalationObject{
-		{EscalationID: "e2", PayloadHash: "sha256:x", Decision: Approve, Expiry: 100},
-		{EscalationID: "e1", PayloadHash: "sha256:y", Decision: Approve, Expiry: 100},
-		{EscalationID: "e1", PayloadHash: "sha256:x", Decision: Reject, Expiry: 100},
-		{EscalationID: "e1", PayloadHash: "sha256:x", Decision: Approve, Expiry: 101},
+		{EscalationID: "e2", PayloadHash: "sha256:x", PolicyBundleHash: "sha256:p", Decision: Approve, Expiry: 100},
+		{EscalationID: "e1", PayloadHash: "sha256:y", PolicyBundleHash: "sha256:p", Decision: Approve, Expiry: 100},
+		{EscalationID: "e1", PayloadHash: "sha256:x", PolicyBundleHash: "sha256:q", Decision: Approve, Expiry: 100},
+		{EscalationID: "e1", PayloadHash: "sha256:x", PolicyBundleHash: "sha256:p", Decision: Reject, Expiry: 100},
+		{EscalationID: "e1", PayloadHash: "sha256:x", PolicyBundleHash: "sha256:p", Decision: Approve, Expiry: 101},
 	}
 	cb, err := canonicalEscalation(base)
 	if err != nil {
