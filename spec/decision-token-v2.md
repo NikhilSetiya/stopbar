@@ -31,6 +31,30 @@ payload_hash = "sha256:" + hex( SHA-256( JCS( canonical_action ) ) )
 
 `evm_tx` (complete unsigned EIP-1559 transaction, every field bound) and `tool_call` are bound exactly as in v1 §2.1–2.3. `withdrawal`, contract creation, legacy and EIP-2930 transactions and access lists have no binding, and no token can be issued for them.
 
+v2 adds two kinds for off-chain signature requests (CS-514, [ADR 0007](../docs/adr/0007-offchain-signatures.md)). They are additions only: the bindings above, and their vectors, are unchanged. A verifier that doesn't know these kinds MUST refuse them.
+
+### 2.4 `evm_typed_data`
+
+```json
+{"v": 1, "kind": "evm_typed_data", "chain_id": 8453, "from": "0x…",
+ "typed_data": {"types": {…}, "primaryType": "…", "domain": {…}, "message": {…}}}
+```
+
+- `from` is lower-cased.
+- `typed_data` is hashed as JCS of the JSON value as received, the same as `tool_call.args`. The action MUST first pass `ActionRequest` validation, which pins each value to the one JSON shape its EIP-712 type allows. For example, integers are decimal strings or JSON integers within ±2^53, never hex. Validation also requires `domain.chainId` = `chain_id`.
+- **The core never computes or accepts the EIP-712 digest**, because keccak-256 is edge code. The signer adapter derives the digest only from the bound `typed_data`. It recomputes the digest from these canonical bytes and refuses a mismatch, and it requires the recovered signer to equal `from` (LLD §10.1a).
+
+### 2.5 `evm_personal_sign`
+
+```json
+{"v": 1, "kind": "evm_personal_sign", "chain_id": 8453, "from": "0x…", "message": "0x…"}
+```
+
+- `message` is the EIP-191 payload bytes as lower-case 0x hex, at least one byte. Upper-case input binds the same way.
+- The adapter signs `keccak256("\x19Ethereum Signed Message:\n" || len || message)`.
+
+Vectors: `typed_data*` and `personal_sign*` in [`vectors/decision-token-v2.json`](vectors/decision-token-v2.json). These cover a tampered amount, a tampered spender, a typed-data token presented for a transaction, and non-canonical hex.
+
 ## 3. Token
 
 `BASE64URL(header) "." BASE64URL(payload) "." BASE64URL(signature)` uses unpadded base64url (RFC 7515). The signature is Ed25519 over the ASCII bytes of the first two segments joined by `"."`.
@@ -117,3 +141,12 @@ Everything in v1 §5, plus:
 ## 6. Versioning
 
 Any change to the header, the claims, the canonical action or the verification order bumps `v` and the `typ`. Verifiers reject versions they don't know. The production verifier accepts v2 only.
+
+Before the freeze (§ "Freeze rule"), a new action kind is added without a bump. Its binding is new, every existing binding stays byte-for-byte the same, and a verifier that predates the kind refuses it (`ErrNoBinding`: no token can be verified for it). Once v2 is frozen, a new kind bumps `v` like any other change to the canonical action.
+
+## 7. Changelog
+
+| Date | Change | Version |
+|---|---|---|
+| 2026-11-25 | Draft: v2 binds the authenticated requester identity (CS-103 increment 2, ADR 0003). | v2 |
+| 2026-11-26 | Added the off-chain signature kinds `evm_typed_data` (§2.4) and `evm_personal_sign` (§2.5) (CS-514, ADR 0007). The change is additive and needs no version bump: the `evm_tx` and `tool_call` bindings and their vectors are unchanged, and older verifiers refuse the new kinds. New vectors: `typed_data*`, `personal_sign*`. | v2 (unchanged) |

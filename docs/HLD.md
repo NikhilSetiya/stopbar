@@ -201,6 +201,7 @@ Controls are rated by tier (PRD §2.4): T1 injected model, T2 agent error, T3 co
 | Scheming agent (T4) | Hidden side task; launders taint; stays under thresholds | Caps, allowlists, circuit breaker only in v1; field-level taint in sandbox bindings (Phase 3); evaluated in Phase 1R |
 | Salami draining | Many sub-threshold transfers | Velocity caps + per-destination count caps |
 | Allowed-but-destructive action | Swap via allowlisted DEX with `amountOutMin = 0` | `min_out_zero` / `excessive_slippage` flags → deny/escalate |
+| Off-chain signature phishing | "Sign to log in" drainer: a Permit2 max permit, or a Seaport listing for 0 | Off-chain requests (`evm_typed_data`, `evm_personal_sign`) are decoded into the approval or transfer they authorise, with the same flags plus `long_expiry` / `zero_consideration`. Unreadable bytes are `opaque` and escalate. The gatekeeper signs only the digest of the bound payload (CS-514, ADR 0007) |
 | Approval fatigue | Approver rubber-stamps | Escalation-rate budget; rendering bound to payload hash |
 
 Full STRIDE table maintained in LLD §14.

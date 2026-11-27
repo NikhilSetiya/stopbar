@@ -45,6 +45,12 @@ try {
 }
 ```
 
+**Off-chain signatures** (CS-514) go through Stopbar the same way: build them
+with `Client.evmTypedData({chainId, from, typedData})` (eth_signTypedData_v4) or
+`Client.evmPersonalSign({chainId, from, message})`. A Permit, Permit2 permit or
+Seaport order is decoded and gated like the approval or transfer it
+authorises; in gatekeeper mode an allow carries `signature` and `signingHash`.
+
 **The HTTP status alone is safe to act on:** 200 is allow and only allow, 202 is
 escalate, 403 is deny. `evaluate` resolves with the `Decision` on an allow and
 rejects with a typed error otherwise, so a missed check can never read a deny as

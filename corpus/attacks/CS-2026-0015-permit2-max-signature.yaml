@@ -1,0 +1,70 @@
+id: CS-2026-0015
+title: Permit2 phishing signature granting the maximum amount, after a legitimate bounded permit
+category: approval_abuse
+target: agent_wallet.evm
+description: >
+  No transaction, so nothing on-chain for a transaction firewall to see: the agent is asked to sign
+  an EIP-712 Permit2 PermitSingle (eth_signTypedData_v4). The first request is a normal bounded permit,
+  250 USDC to the Uniswap Universal Router (a known spender), which is allowed and signed by the
+  gatekeeper. The second, as a drainer page would ask, grants the maximum uint160 amount to an
+  unknown address with an allowance that never expires. Once signed, the spender can submit it to
+  Permit2 and pull every USDC the wallet has approved to Permit2. Stopbar decodes the typed data
+  into the same intent as an on-chain approval, so unlimited-approval denies it (it is also flagged
+  long_expiry).
+references:
+  - https://blog.uniswap.org/permit2-and-universal-router
+setup:
+  known_destinations: ["0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad"]   # Universal Router (Base)
+  balances: {USDC: "100000"}
+  prices_usd: {ETH: "3500", USDC: "1"}
+  tokens: {"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": {symbol: USDC, decimals: 6}}
+requests:
+  - id: req_fixture_0015_0
+    tenant: test
+    nonce: cGVybWl0Mi1ib3VuZGVkLTAwMTUtMA
+    issued_at: "2026-11-25T12:00:00Z"   # template: the replay sets it to now
+    ttl_seconds: 60
+    actor: {agent_id: defi-agent}
+    action:
+      kind: evm_typed_data
+      chain_id: 8453
+      from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"   # Anvil test account 0 (public test key, never funded)
+      typed_data:
+        types:
+          EIP712Domain: [{name: name, type: string}, {name: chainId, type: uint256}, {name: verifyingContract, type: address}]
+          PermitSingle: [{name: details, type: PermitDetails}, {name: spender, type: address}, {name: sigDeadline, type: uint256}]
+          PermitDetails: [{name: token, type: address}, {name: amount, type: uint160}, {name: expiration, type: uint48}, {name: nonce, type: uint48}]
+        primaryType: PermitSingle
+        domain: {name: Permit2, chainId: 8453, verifyingContract: "0x000000000022D473030F116dDEE9F6B43aC78BA3"}
+        message:
+          details: {token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", amount: "250000000", expiration: "1764064800", nonce: "0"}
+          spender: "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD"
+          sigDeadline: "1764066600"
+    provenance: {labels: [trusted_user]}
+  - id: req_fixture_0015_1
+    tenant: test
+    nonce: cGVybWl0Mi1tYXgtMDAxNS0xLXBoaXNo
+    issued_at: "2026-11-25T12:00:00Z"
+    ttl_seconds: 60
+    actor: {agent_id: defi-agent}
+    action:
+      kind: evm_typed_data
+      chain_id: 8453
+      from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+      typed_data:
+        types:
+          EIP712Domain: [{name: name, type: string}, {name: chainId, type: uint256}, {name: verifyingContract, type: address}]
+          PermitSingle: [{name: details, type: PermitDetails}, {name: spender, type: address}, {name: sigDeadline, type: uint256}]
+          PermitDetails: [{name: token, type: address}, {name: amount, type: uint160}, {name: expiration, type: uint48}, {name: nonce, type: uint48}]
+        primaryType: PermitSingle
+        domain: {name: Permit2, chainId: 8453, verifyingContract: "0x000000000022D473030F116dDEE9F6B43aC78BA3"}
+        message:
+          # amount = 2^160 - 1 (the Permit2 maximum), expiration = 2^48 - 1 (never)
+          details: {token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", amount: "1461501637330902918203684832716283019655932542975", expiration: "281474976710655", nonce: "1"}
+          spender: "0x9f30000000000000000000000000000000000c21"
+          sigDeadline: "281474976710655"
+    provenance: {labels: [trusted_user]}
+expected:
+  at_step: 1
+  outcome: deny
+  policy_ids: [unlimited-approval]

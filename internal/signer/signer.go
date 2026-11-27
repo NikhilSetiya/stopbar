@@ -21,6 +21,7 @@ package signer
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -28,10 +29,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 
 	"github.com/NikhilSetiya/stopbar/internal/auth"
 	"github.com/NikhilSetiya/stopbar/internal/decision"
@@ -43,6 +46,7 @@ var (
 	ErrNoKey           = errors.New("signer: adapter holds no key for this from address")
 	ErrNotBindable     = errors.New("signer: transaction does not match its approved payload")
 	ErrDelegatedWallet = errors.New("signer: signing wallet carries unexpected delegation code (EIP-7702)")
+	ErrDigestMismatch  = errors.New("signer: off-chain digest does not match the approved payload")
 )
 
 // delegationPrefix marks an EIP-7702 delegated account: 0xef0100 followed by
@@ -130,31 +134,31 @@ func (b boundSpent) Consume(key string, until time.Time) (bool, error) {
 	return b.s.ConsumeCtx(b.ctx, key, until)
 }
 
+// verify runs the core verifier with the spent token joining the caller's
+// state unit, if any (CS-197): the token is spent in the same transaction as
+// the evaluation's commit, and nothing is released before that is durable.
+func (a *Adapter) verify(ctx context.Context, token string, act model.Action, requester auth.Identity) (decision.Claims, error) {
+	v := *a.verifier
+	if cs, ok := v.Spent.(ctxSpent); ok {
+		v.Spent = boundSpent{ctx, cs}
+	}
+	return v.Verify(token, act, requester)
+}
+
 // SignTx returns the raw signed transaction and its hash. requester is the
 // authenticated identity of the request act came from (the zero Identity
 // when auth is off); a token bound to any other identity is refused.
 func (a *Adapter) SignTx(ctx context.Context, token string, act model.Action, requester auth.Identity) ([]byte, common.Hash, error) {
-	v := *a.verifier // the spent token joins the caller's state unit, if any (CS-197)
-	if cs, ok := v.Spent.(ctxSpent); ok {
-		v.Spent = boundSpent{ctx, cs}
+	if act.Kind != model.KindEVMTx {
+		return nil, common.Hash{}, ErrNotBindable
 	}
-	claims, err := v.Verify(token, act, requester) // step 1: core first
+	claims, err := a.verify(ctx, token, act, requester) // step 1: core first
 	if err != nil {
 		return nil, common.Hash{}, err
 	}
-	from := common.HexToAddress(act.From)
-	key, ok := a.keys[from]
-	if !ok || !strings.EqualFold(from.Hex(), act.From) {
-		return nil, common.Hash{}, fmt.Errorf("%w: %s", ErrNoKey, act.From)
-	}
-	if a.codeAt != nil { // refuse to sign for a delegated (EIP-7702) wallet
-		code, err := a.codeAt(ctx, from)
-		if err != nil {
-			return nil, common.Hash{}, fmt.Errorf("%w: code read failed: %v", ErrDelegatedWallet, err)
-		}
-		if to, ok := DelegatedTo(code); ok && !a.expected[to] {
-			return nil, common.Hash{}, fmt.Errorf("%w: %s -> %s", ErrDelegatedWallet, from.Hex(), to.Hex())
-		}
+	from, key, err := a.keyFor(ctx, act.From) // step 2
+	if err != nil {
+		return nil, common.Hash{}, err
 	}
 	tx, err := buildTx(act) // step 3
 	if err != nil {
@@ -181,6 +185,112 @@ func (a *Adapter) SignTx(ctx context.Context, token string, act model.Action, re
 		return nil, common.Hash{}, err
 	}
 	return raw, signed.Hash(), nil
+}
+
+// keyFor returns the key for from, refusing an address the adapter doesn't
+// hold and a wallet carrying unexpected EIP-7702 delegation code.
+func (a *Adapter) keyFor(ctx context.Context, fromHex string) (common.Address, *ecdsa.PrivateKey, error) {
+	from := common.HexToAddress(fromHex)
+	key, ok := a.keys[from]
+	if !ok || !strings.EqualFold(from.Hex(), fromHex) {
+		return from, nil, fmt.Errorf("%w: %s", ErrNoKey, fromHex)
+	}
+	if a.codeAt != nil { // refuse to sign for a delegated (EIP-7702) wallet
+		code, err := a.codeAt(ctx, from)
+		if err != nil {
+			return from, nil, fmt.Errorf("%w: code read failed: %v", ErrDelegatedWallet, err)
+		}
+		if to, ok := DelegatedTo(code); ok && !a.expected[to] {
+			return from, nil, fmt.Errorf("%w: %s -> %s", ErrDelegatedWallet, from.Hex(), to.Hex())
+		}
+	}
+	return from, key, nil
+}
+
+// SignMessage answers an off-chain signature request (evm_typed_data,
+// evm_personal_sign; CS-514) with a 65-byte signature (v = 27/28) and the
+// digest it signs. In order:
+//  1. Verify the token (decision-token-v2 §4) against the exact action, as
+//     SignTx does. The core binds the typed data's bytes, never a digest.
+//  2. Find the key for `from` (and refuse a delegated wallet).
+//  3. Compute the digest from the bound action only: EIP-712 for typed data
+//     (whose domain.chainId must equal the action's chain_id), EIP-191 for
+//     personal_sign. No digest from the requester is ever accepted.
+//  4. Recompute the digest from the payload's canonical bytes (what
+//     payload_hash covers) and refuse any mismatch, so the signer cannot hash
+//     anything other than what was bound.
+//  5. Sign, recover the signer, and require it to equal `from`.
+func (a *Adapter) SignMessage(ctx context.Context, token string, act model.Action, requester auth.Identity) ([]byte, common.Hash, error) {
+	if act.Kind != model.KindEVMTypedData && act.Kind != model.KindEVMPersonalSign {
+		return nil, common.Hash{}, ErrNotBindable
+	}
+	if _, err := a.verify(ctx, token, act, requester); err != nil { // step 1: core first, spent in the unit
+		return nil, common.Hash{}, err
+	}
+	from, key, err := a.keyFor(ctx, act.From) // step 2
+	if err != nil {
+		return nil, common.Hash{}, err
+	}
+	digest, err := MessageDigest(act) // step 3
+	if err != nil {
+		return nil, common.Hash{}, err
+	}
+	canonical, err := decision.CanonicalAction(act) // step 4
+	if err != nil {
+		return nil, common.Hash{}, err
+	}
+	var bound model.Action
+	if err := json.Unmarshal(canonical, &bound); err != nil {
+		return nil, common.Hash{}, fmt.Errorf("signer: canonical action: %w", err)
+	}
+	bound.Kind, bound.ChainID = act.Kind, act.ChainID
+	if again, err := MessageDigest(bound); err != nil || again != digest {
+		return nil, common.Hash{}, fmt.Errorf("%w: digest of the bound payload differs", ErrDigestMismatch)
+	}
+	sig, err := crypto.Sign(digest[:], key) // step 5
+	if err != nil {
+		return nil, common.Hash{}, fmt.Errorf("signer: %w", err)
+	}
+	pub, err := crypto.SigToPub(digest[:], sig)
+	if err != nil || crypto.PubkeyToAddress(*pub) != from {
+		return nil, common.Hash{}, fmt.Errorf("%w: recovered signer is not %s", ErrDigestMismatch, from.Hex())
+	}
+	sig[64] += 27 // the v wallets and ecrecover expect
+	return sig, digest, nil
+}
+
+// MessageDigest is the hash a wallet signs for an off-chain request: the
+// EIP-712 digest of typed data, or the EIP-191 personal_sign hash.
+func MessageDigest(act model.Action) (common.Hash, error) {
+	switch act.Kind {
+	case model.KindEVMPersonalSign:
+		msg, err := hexutil.Decode(act.Message)
+		if err != nil || len(msg) == 0 {
+			return common.Hash{}, fmt.Errorf("%w: personal_sign message is not hex", ErrNotBindable)
+		}
+		return common.BytesToHash(accounts.TextHash(msg)), nil
+	case model.KindEVMTypedData:
+		if act.TypedData == nil || act.ChainID == nil {
+			return common.Hash{}, ErrNotBindable
+		}
+		raw, err := json.Marshal(act.TypedData)
+		if err != nil {
+			return common.Hash{}, err
+		}
+		var td apitypes.TypedData
+		if err := json.Unmarshal(raw, &td); err != nil {
+			return common.Hash{}, fmt.Errorf("%w: typed data: %v", ErrNotBindable, err)
+		}
+		if td.Domain.ChainId == nil || (*big.Int)(td.Domain.ChainId).Cmp(new(big.Int).SetUint64(*act.ChainID)) != 0 {
+			return common.Hash{}, fmt.Errorf("%w: domain.chainId is not the action's chain_id", ErrNotBindable)
+		}
+		h, _, err := apitypes.TypedDataAndHash(td)
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("%w: EIP-712: %v", ErrNotBindable, err)
+		}
+		return common.BytesToHash(h), nil
+	}
+	return common.Hash{}, ErrNotBindable
 }
 
 func decimal(name, v string) (*big.Int, error) {

@@ -11,6 +11,7 @@ import base64
 import datetime
 import json
 import os
+import re
 import ssl
 import time
 import urllib.error
@@ -53,6 +54,16 @@ class Decision:
     @property
     def tx_hash(self) -> str | None:
         return self.body.get("tx_hash")
+
+    @property
+    def signature(self) -> str | None:
+        """Gatekeeper mode, off-chain requests: the 65-byte signature (0x hex)."""
+        return self.body.get("signature")
+
+    @property
+    def signing_hash(self) -> str | None:
+        """The EIP-712 / EIP-191 digest ``signature`` signs."""
+        return self.body.get("signing_hash")
 
     @property
     def token(self) -> str | None:
@@ -158,6 +169,25 @@ class Client:
             "gas_limit": str(gas_limit), "max_fee_per_gas": str(max_fee_per_gas),
             "max_priority_fee_per_gas": str(max_priority_fee_per_gas),
         }
+
+    @staticmethod
+    def evm_typed_data(*, chain_id: int, from_addr: str, typed_data: dict[str, Any]) -> dict[str, Any]:
+        """Build an off-chain EIP-712 signature request (eth_signTypedData_v4).
+        Stopbar decodes it like the approval or transfer it authorises (Permit,
+        Permit2, Seaport) and binds the exact payload. Integers become decimal
+        strings, since uint256 values exceed 2^53."""
+        return {"kind": "evm_typed_data", "chain_id": chain_id, "from": from_addr.lower(),
+                "typed_data": _typed_json(typed_data)}
+
+    @staticmethod
+    def evm_personal_sign(*, chain_id: int, from_addr: str, message: str | bytes) -> dict[str, Any]:
+        """Build an EIP-191 personal_sign request. ``message`` is text (UTF-8)
+        or raw bytes; a 0x-hex string is taken as bytes, as wallets do."""
+        if isinstance(message, str):
+            hexed = message[2:] if re.fullmatch(r"0x(?:[0-9a-fA-F]{2})+", message) else message.encode().hex()
+        else:
+            hexed = bytes(message).hex()
+        return {"kind": "evm_personal_sign", "chain_id": chain_id, "from": from_addr.lower(), "message": "0x" + hexed.lower()}
 
     # ---- evaluate / approve ----
 
@@ -358,6 +388,20 @@ def _approval() -> Any:
     from . import approval
 
     return approval
+
+
+def _typed_json(v: Any) -> Any:
+    """Typed data as Stopbar takes it: ints as decimal strings (never JSON
+    numbers beyond 2^53), bytes as 0x hex."""
+    if isinstance(v, dict):
+        return {k: _typed_json(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_typed_json(x) for x in v]
+    if isinstance(v, int) and not isinstance(v, bool):
+        return str(v)
+    if isinstance(v, (bytes, bytearray)):
+        return "0x" + bytes(v).hex()
+    return v
 
 
 def _seg(request_id: str) -> str:

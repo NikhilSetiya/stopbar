@@ -2,7 +2,7 @@
 // Outcomes: @outcome("deny") > @outcome("escalate") > permit. No permit match = deny.
 
 @id("base-permit")
-permit (principal, action in [Stopbar::Action::"transfer", Stopbar::Action::"contract_call"], resource);
+permit (principal, action in [Stopbar::Action::"transfer", Stopbar::Action::"contract_call", Stopbar::Action::"sign_message"], resource);
 
 // Approvals are permitted only when bounded, to a known spender (the tenant's
 // allowlist), and worth at most $1,000. Anything else is default-denied, and
@@ -69,5 +69,16 @@ forbid (principal, action, resource) when { context.price_stale };
 forbid (principal, action in [Stopbar::Action::"transfer", Stopbar::Action::"contract_call"], resource)
 when { context.price_stale && context has amount_tokens && context.amount_tokens.greaterThan(decimal("1000.0")) };
 
-@id("unknown-call") @message("Contract call could not be decoded") @outcome("escalate")
+// Off-chain signatures (CS-514): a signed Permit/Permit2 is an approval and a
+// signed Seaport order a transfer, so the rules above apply to them as they do
+// on chain (unlimited-approval, bounded-approval, taint). These two cover what
+// only an off-chain grant has. Unknown typed data and unreadable personal_sign
+// bytes are flagged unknown_call / opaque and escalate below.
+@id("zero-consideration") @message("Order gives assets away and pays the signer nothing") @outcome("deny")
+forbid (principal, action, resource) when { context.flags.contains("zero_consideration") };
+
+@id("long-expiry") @message("Signed approval stays usable for more than 31 days (a standing grant)") @outcome("escalate")
+forbid (principal, action, resource) when { context.flags.contains("long_expiry") };
+
+@id("unknown-call") @message("Contract call or signed message could not be decoded") @outcome("escalate")
 forbid (principal, action, resource) when { context.flags.containsAny(["unknown_call","opaque"]) };

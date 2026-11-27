@@ -120,9 +120,17 @@ func TestContactValidate(t *testing.T) {
 }
 
 func TestDecisionFixture(t *testing.T) {
-	d := roundTrip[Decision](t, "../../spec/fixtures/decision.deny.json")
-	if err := d.Validate(); err != nil {
-		t.Fatal(err)
+	for _, f := range []string{"decision.deny.json", "decision.allow_offchain.json"} {
+		d := roundTrip[Decision](t, "../../spec/fixtures/"+f)
+		if err := d.Validate(); err != nil {
+			t.Fatal(f, err)
+		}
+	}
+	// Only an allow may carry an off-chain signature.
+	d := roundTrip[Decision](t, "../../spec/fixtures/decision.allow_offchain.json")
+	d.Outcome, d.Token, d.Reasons = Deny, "", []Reason{{Code: "POLICY", Message: "m"}}
+	if err := d.Validate(); err == nil {
+		t.Fatal("deny carrying a signature validated")
 	}
 }
 
