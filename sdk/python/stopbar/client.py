@@ -230,7 +230,7 @@ class Client:
             raise StopbarUnavailable(f"could not fetch what to sign (HTTP {status}): {decoded.get('code') or decoded}")
         return approval.sign_escalation(
             seed, escalation_id=decoded["escalation_id"], payload_hash=decoded["payload_hash"],
-            decision=decision, expiry=int(time.time()) + 50 * 60,  # comfortably under the 1h bound
+            policy_bundle_hash=decoded["policy_bundle_hash"], decision=decision, expiry=int(time.time()) + 50 * 60,  # comfortably under the 1h bound
         )
 
     def poll(self, request_id: str) -> EscalationStatus:

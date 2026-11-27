@@ -26,6 +26,7 @@ const (
 	CodeBadDecision       = "BAD_DECISION"
 	CodeWrongEscalationID = "WRONG_ESCALATION_ID"
 	CodePayloadMismatch   = "PAYLOAD_MISMATCH"
+	CodePolicyChanged     = "POLICY_CHANGED"
 	CodeExpired           = "EXPIRED"
 	CodeExpiryTooFarAhead = "EXPIRY_TOO_FAR_AHEAD"
 	CodeSelfApproval      = "SELF_APPROVAL"
@@ -35,7 +36,9 @@ const (
 
 // EscalationWant is the escalation's current state, recomputed by the
 // caller (never taken from the envelope being verified): the id being
-// resolved, the payload hash of the action about to be re-run, and the
+// resolved, the payload hash of the action about to be re-run, the active
+// policy bundle's hash (spec §2: a vote counts only under the bundle it was
+// signed against), and the
 // requester's identity for the self-approval check (spec §7) — both
 // RequesterKeyID and RequesterAgentID from the escalation's authenticated
 // requester (auth.Identity / PendingEscalation.Requester). Either may be
@@ -43,6 +46,7 @@ const (
 type EscalationWant struct {
 	EscalationID     string
 	PayloadHash      string
+	PolicyBundleHash string
 	RequesterKeyID   string
 	RequesterAgentID string
 }
@@ -77,6 +81,9 @@ func VerifyEscalation(keys *KeySet, tenant string, s SignedEscalation, want Esca
 	}
 	if s.PayloadHash != want.PayloadHash {
 		return Key{}, verr(CodePayloadMismatch)
+	}
+	if want.PolicyBundleHash == "" || s.PolicyBundleHash != want.PolicyBundleHash {
+		return Key{}, verr(CodePolicyChanged)
 	}
 	if !now.Before(time.Unix(s.Expiry, 0)) {
 		return Key{}, verr(CodeExpired)

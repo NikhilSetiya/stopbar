@@ -58,6 +58,8 @@ func (f policyFunc) Evaluate(ctx context.Context, r model.EnrichedRequest) (Poli
 	return f(ctx, r)
 }
 
+func (policyFunc) Hash() string { return bundle }
+
 func outcome(o model.Outcome) policyFunc {
 	return func(context.Context, model.EnrichedRequest) (PolicyResult, error) {
 		pr := PolicyResult{Outcome: o, BundleHash: bundle}
@@ -649,7 +651,7 @@ func signEsc(t testing.TB, name, id, payloadHash, dec string) approval.SignedEsc
 		t.Fatalf("no test approver key named %q", name)
 	}
 	s, err := approval.SignEscalation(priv, approval.EscalationObject{
-		EscalationID: id, PayloadHash: payloadHash, Decision: dec, Expiry: rigNow.Add(time.Minute).Unix(),
+		EscalationID: id, PayloadHash: payloadHash, PolicyBundleHash: bundle, Decision: dec, Expiry: rigNow.Add(time.Minute).Unix(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1086,7 +1088,7 @@ func TestApprovalSignatureFailures(t *testing.T) {
 	const escReason = "taint-unknown-destination"
 	ph := escFixturePayloadHash(t, "r1")
 	resign := func(name string, f func(*approval.EscalationObject)) approval.SignedEscalation {
-		o := approval.EscalationObject{EscalationID: "r1", PayloadHash: ph, Decision: approval.Approve, Expiry: rigNow.Add(time.Minute).Unix()}
+		o := approval.EscalationObject{EscalationID: "r1", PayloadHash: ph, PolicyBundleHash: bundle, Decision: approval.Approve, Expiry: rigNow.Add(time.Minute).Unix()}
 		f(&o)
 		s, err := approval.SignEscalation(approverPrivs[name], o)
 		if err != nil {
@@ -1095,7 +1097,7 @@ func TestApprovalSignatureFailures(t *testing.T) {
 		return s
 	}
 	outsider := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	unknown, err := approval.SignEscalation(outsider, approval.EscalationObject{EscalationID: "r1", PayloadHash: ph, Decision: approval.Approve, Expiry: rigNow.Add(time.Minute).Unix()})
+	unknown, err := approval.SignEscalation(outsider, approval.EscalationObject{EscalationID: "r1", PayloadHash: ph, PolicyBundleHash: bundle, Decision: approval.Approve, Expiry: rigNow.Add(time.Minute).Unix()})
 	if err != nil {
 		t.Fatal(err)
 	}

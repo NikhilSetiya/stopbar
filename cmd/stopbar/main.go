@@ -381,7 +381,7 @@ func signedApprovalCall(verb string, args []string, dec, suffix string) (httpRes
 		return httpResult{}, err
 	}
 	sig, err := approval.SignEscalation(priv, approval.EscalationObject{
-		EscalationID: toSign.EscalationID, PayloadHash: toSign.PayloadHash, Decision: dec,
+		EscalationID: toSign.EscalationID, PayloadHash: toSign.PayloadHash, PolicyBundleHash: toSign.PolicyBundleHash, Decision: dec,
 		Expiry: time.Now().Add(50 * time.Minute).Unix(), // comfortably under the 1h bound, clock skew included
 	})
 	if err != nil {

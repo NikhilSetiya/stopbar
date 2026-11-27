@@ -26,6 +26,7 @@ type Engine interface {
 	ApproveWith(ctx context.Context, id string, sig approval.SignedEscalation, exec engine.Execute) (model.Decision, error)
 	Reject(ctx context.Context, id string, sig approval.SignedEscalation) (model.Decision, error)
 	Status(ctx context.Context, id string) (model.EscalationStatus, error)
+	PolicyBundleHash() string
 	Commit(ctx context.Context, requestID, txRef string) error
 	Release(ctx context.Context, requestID, reason string) error
 }
@@ -105,6 +106,10 @@ func (g *Gatekeeper) Reject(ctx context.Context, id string, sig approval.SignedE
 func (g *Gatekeeper) Status(ctx context.Context, id string) (model.EscalationStatus, error) {
 	return g.Engine.Status(ctx, id)
 }
+
+// PolicyBundleHash is the active policy bundle's hash, which an escalation
+// approval signs (spec/approval-signature-v1.md §2).
+func (g *Gatekeeper) PolicyBundleHash() string { return g.Engine.PolicyBundleHash() }
 
 func (g *Gatekeeper) release(ctx context.Context, id, reason string) {
 	if err := g.Engine.Release(context.WithoutCancel(ctx), id, reason); err != nil {

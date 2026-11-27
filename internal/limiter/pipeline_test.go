@@ -46,11 +46,12 @@ func testApprovers(t *testing.T) (*approval.KeySet, map[string]ed25519.PrivateKe
 	return ks, privs
 }
 
-// signApprove builds a signed escalation-approval envelope for id/payloadHash.
-func signApprove(t *testing.T, priv ed25519.PrivateKey, id, payloadHash string) approval.SignedEscalation {
+// signApprove builds a signed escalation-approval envelope for id/payloadHash
+// under the policy bundle bundleHash.
+func signApprove(t *testing.T, priv ed25519.PrivateKey, id, payloadHash, bundleHash string) approval.SignedEscalation {
 	t.Helper()
 	s, err := approval.SignEscalation(priv, approval.EscalationObject{
-		EscalationID: id, PayloadHash: payloadHash, Decision: approval.Approve, Expiry: time.Now().Add(time.Minute).Unix(),
+		EscalationID: id, PayloadHash: payloadHash, PolicyBundleHash: bundleHash, Decision: approval.Approve, Expiry: time.Now().Add(time.Minute).Unix(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -224,7 +225,7 @@ func TestCircuitBreakerThroughEngine(t *testing.T) {
 			t.Fatalf("%s after trip: %s %v, want deny CIRCUIT_OPEN", id, d.Outcome, d.Reasons)
 		}
 	}
-	if d, _ := p.eng.Approve(bg, "req_esc", signApprove(t, p.approv["alice"], "req_esc", escD.PayloadHash)); d.Outcome != model.Deny || code(d) != engine.CodeCircuitOpen {
+	if d, _ := p.eng.Approve(bg, "req_esc", signApprove(t, p.approv["alice"], "req_esc", escD.PayloadHash, p.eng.PolicyBundleHash())); d.Outcome != model.Deny || code(d) != engine.CodeCircuitOpen {
 		t.Fatalf("approval after trip: %s %v, want deny CIRCUIT_OPEN", d.Outcome, d.Reasons)
 	}
 	if d, _ := p.eng.Evaluate(bg, transfer("req_other", "other-tenant", tinyAmount)); d.Outcome != model.Allow {
@@ -277,7 +278,7 @@ func TestOpenClawEscalatesAndPerTxCapsSurviveApproval(t *testing.T) {
 			if d.Outcome != model.Escalate || len(ids) != 1 || ids[0] != "large-share-of-balance" {
 				t.Fatalf("OpenClaw: %s %v, want escalate [large-share-of-balance]", d.Outcome, d.Reasons)
 			}
-			d, err := p.eng.Approve(bg, "req_openclaw", signApprove(t, p.approv["approver"], "req_openclaw", d.PayloadHash))
+			d, err := p.eng.Approve(bg, "req_openclaw", signApprove(t, p.approv["approver"], "req_openclaw", d.PayloadHash, p.eng.PolicyBundleHash()))
 			if err != nil {
 				t.Fatal(err)
 			}

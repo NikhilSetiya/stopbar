@@ -19,20 +19,25 @@ const ResetDecision = "reset"
 
 // Domain tags prefix the signing input of each object kind (spec §4), so a
 // signature over one can never verify as the other, or as any other signed
-// thing in the codebase (a decision token, an audit checkpoint).
+// thing in the codebase (a decision token, an audit checkpoint). The
+// escalation object is at v2 (spec §2: it binds policy_bundle_hash); the v1
+// tag is never accepted, so a v1 signature cannot count as a vote.
 const (
-	escalationDomain   = "stopbar-approval-escalation-v1\n"
+	escalationDomain   = "stopbar-approval-escalation-v2\n"
 	breakerResetDomain = "stopbar-approval-breaker-reset-v1\n"
 	contactDomain      = "stopbar-approval-contact-v1\n"
 )
 
 // EscalationObject is the exact JCS-canonical object an escalation
-// approval signature covers (spec §2).
+// approval signature covers (spec §2, v2).
 type EscalationObject struct {
 	EscalationID string `json:"escalation_id"`
 	PayloadHash  string `json:"payload_hash"`
-	Decision     string `json:"decision"` // Approve or Reject
-	Expiry       int64  `json:"expiry"`   // unix seconds
+	// PolicyBundleHash is the active policy bundle the approver signed
+	// against (policy.Bundle.Hash). A vote counts only while it still is.
+	PolicyBundleHash string `json:"policy_bundle_hash"`
+	Decision         string `json:"decision"` // Approve or Reject
+	Expiry           int64  `json:"expiry"`   // unix seconds
 }
 
 // BreakerResetObject is the exact JCS-canonical object a breaker reset

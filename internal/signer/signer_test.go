@@ -403,6 +403,7 @@ func (f *fakeEngine) Status(context.Context, string) (model.EscalationStatus, er
 	return model.EscalationStatus{}, model.ErrNoPending
 }
 
+func (f *fakeEngine) PolicyBundleHash() string { return "sha256:" + strings.Repeat("a", 64) }
 func (f *fakeEngine) Commit(_ context.Context, id, txRef string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

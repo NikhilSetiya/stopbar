@@ -1,11 +1,15 @@
 # Approval signature — v1
 
-Status: draft (CS-151). Decision: [ADR 0005](../docs/adr/0005-signed-approvals.md).
+Status: draft (CS-151; escalation object v2 by CS-153). Decisions: [ADR 0005](../docs/adr/0005-signed-approvals.md),
+[ADR 0010](../docs/adr/0010-approval-policy-binding.md) (escalation approvals bind the policy bundle).
+
+This document versions each signed object separately (§11). Current versions:
+escalation approval **v2** (§2), breaker reset v1 (§3), contact approval v1 (§3a).
 
 A signed approval is Stopbar's replacement for API-key approval (issue #32). It
 is a human (or second-agent) countersignature, made with an **approver key**
 that is separate from every API key, over the exact thing being decided: which
-escalation, which payload, approve or reject, and until when. The engine never
+escalation, which payload, under which policy bundle, approve or reject, and until when. The engine never
 trusts an approval it cannot verify against a configured approver key, and
 never counts two approvals from the same key as two.
 
@@ -22,20 +26,50 @@ The key words MUST, MUST NOT and SHOULD are used as in RFC 2119.
 | Expiry bound at verification time, not issuance time | The object carries no `iat`. A verifier with a trustworthy clock enforces `now < expiry ≤ now + 1h` **when it checks the signature**, so a signature cannot be pre-dated to stay valid indefinitely, and "how long ago it was signed" never has to be tracked or trusted. |
 | Quorum state is pure and storage-agnostic | `Tally` (§5) takes votes and returns a resolution; it persists nothing. Whatever stores pending escalations or breaker trips (`internal/store`, bbolt) owns durability; `Tally` owns only the counting rule, so it is identical for escalation approvals and breaker resets. |
 
-## 2. Escalation approval object
+## 2. Escalation approval object (v2)
 
 ```json
-{"decision":"approve","escalation_id":"<id>","expiry":1700000000,"payload_hash":"sha256:<hex>"}
+{"decision":"approve","escalation_id":"<id>","expiry":1700000000,"payload_hash":"sha256:<hex>","policy_bundle_hash":"sha256:<hex>"}
 ```
 
-JCS-canonical, exactly these four members:
+JCS-canonical, exactly these five members:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `escalation_id` | string | The pending escalation this approval is for. |
 | `payload_hash` | string | `sha256:<hex>` of the JCS-canonical action, recomputed by the engine at re-run time (decision-token-v2 §2). Binds the approval to the exact transaction, not to whatever the approver was shown. |
+| `policy_bundle_hash` | string | `sha256:<hex>` of the policy bundle the engine is running (`policy.Bundle.Hash`, the same value a decision's `policy_bundle_hash` carries). `GET /v1/approvals/{id}` returns it. Binds the approval to the policy it was given under: a vote counts only while the engine's active bundle hash is still this value. |
 | `decision` | string | `approve` or `reject`. Nothing else. |
 | `expiry` | int | Unix seconds. The signature counts for nothing at or after this instant. |
+
+**A policy change invalidates the votes already cast.** The active bundle is
+what decided this escalates, and what the quorum's re-run (LLD §9 step 5) will
+evaluate under. An approver who signed under bundle H agreed to H's rules
+(which escalation reasons exist, what an approval waives, which caps deny), not
+to a later bundle's. So:
+
+- An envelope whose `policy_bundle_hash` is not the active bundle is refused
+  (§6 step 8, `POLICY_CHANGED`); it is audited and changes no state.
+- A stored vote counts toward quorum only while its `policy_bundle_hash` equals
+  the active bundle (§9). The engine compares them every time it replays the
+  stored votes, including after a restart on a different bundle, since pending
+  escalations and their votes survive restarts in the state file. Votes that no
+  longer match are discarded, and listed (`invalidated_votes`) in the audit
+  record of the write that discards them: the next accepted vote on that
+  escalation. Approvers re-sign against the new hash.
+- A vote stored before v2 has no `policy_bundle_hash` and so never counts.
+
+### 2.1 Escalation approval object v1 (superseded, never accepted)
+
+```json
+{"decision":"approve","escalation_id":"<id>","expiry":1700000000,"payload_hash":"sha256:<hex>"}
+```
+
+The four v1 members are as in §2 without `policy_bundle_hash`, signed under the
+domain tag `"stopbar-approval-escalation-v1\n"`. Because it carries no policy
+binding, a verifier MUST NOT accept a v1 escalation envelope once v2 exists:
+`stopbard` reconstructs only the v2 object under the v2 tag, so a v1 signature
+fails §6 step 4 (`BAD_SIGNATURE`) whatever fields are posted alongside it.
 
 ## 3. Breaker reset object
 
@@ -76,7 +110,7 @@ JCS-canonical, exactly these five members:
 signature = Ed25519(priv, domain || JCS(object))
 ```
 
-- Escalation approval domain: the 31 ASCII bytes `"stopbar-approval-escalation-v1\n"`.
+- Escalation approval domain (v2): the 31 ASCII bytes `"stopbar-approval-escalation-v2\n"`. (v1, §2.1, used `"stopbar-approval-escalation-v1\n"` and is no longer accepted.)
 - Breaker reset domain: the 34 ASCII bytes `"stopbar-approval-breaker-reset-v1\n"`.
 - Contact approval domain: the 28 ASCII bytes `"stopbar-approval-contact-v1\n"`.
 
@@ -111,7 +145,7 @@ The object's own fields, plus:
 
 ## 6. Verification (escalation approval)
 
-A verifier is given: the configured approver set for the tenant, the escalation's *current* `{escalation_id, payload_hash}` (recomputed at re-run time, never taken from the approval itself), the requester's identity — both its `key_id` and `agent_id`, from the authenticated requester the escalation was created with — for the self-approval check, a clock, and the envelope to check. It MUST run these checks in order and stop at the first failure.
+A verifier is given: the configured approver set for the tenant, the escalation's *current* `{escalation_id, payload_hash}` (recomputed at re-run time, never taken from the approval itself), the active policy bundle hash, the requester's identity — both its `key_id` and `agent_id`, from the authenticated requester the escalation was created with — for the self-approval check, a clock, and the envelope to check. It MUST run these checks in order and stop at the first failure.
 
 | # | Check | Error code |
 |---|---|---|
@@ -122,15 +156,16 @@ A verifier is given: the configured approver set for the tenant, the escalation'
 | 5 | `decision` is `approve` or `reject` | `BAD_DECISION` |
 | 6 | `escalation_id` equals the escalation being resolved | `WRONG_ESCALATION_ID` |
 | 7 | `payload_hash` equals the one just recomputed from the action about to be re-run | `PAYLOAD_MISMATCH` |
-| 8 | `now < expiry` | `EXPIRED` |
-| 9 | `expiry ≤ now + 1h` | `EXPIRY_TOO_FAR_AHEAD` |
-| 10 | If `decision` is `approve`: the key is not bound (§7) to the escalation's requester | `SELF_APPROVAL` |
+| 8 | `policy_bundle_hash` is non-empty and equals the active policy bundle's hash | `POLICY_CHANGED` |
+| 9 | `now < expiry` | `EXPIRED` |
+| 10 | `expiry ≤ now + 1h` | `EXPIRY_TOO_FAR_AHEAD` |
+| 11 | If `decision` is `approve`: the key is not bound (§7) to the escalation's requester | `SELF_APPROVAL` |
 
 A signature that fails any check counts for nothing: it is not a vote, live or expired, and is not stored. Step 6 is also what makes a replayed signature from one escalation worthless on another — `escalation_id` simply will not match.
 
 ## 7. Self-approval
 
-A requester MUST NOT approve its own escalation (separation of duties). Because approver keys and API keys are different credential types, the binding is explicit and **mandatory**: every configured approver entry has an `owner` naming the requester identity it also represents, via `agent_id`, `key_id`, or both (§5). Step 10 refuses the approval with `SELF_APPROVAL`, regardless of quorum otherwise being met, when **either**:
+A requester MUST NOT approve its own escalation (separation of duties). Because approver keys and API keys are different credential types, the binding is explicit and **mandatory**: every configured approver entry has an `owner` naming the requester identity it also represents, via `agent_id`, `key_id`, or both (§5). Step 11 refuses the approval with `SELF_APPROVAL`, regardless of quorum otherwise being met, when **either**:
 
 - `owner.key_id` is set and equals the escalation's requester `key_id`, or
 - `owner.agent_id` is set and equals the escalation's requester `agent_id`.
@@ -181,6 +216,7 @@ All three flows resolve the same way, via `approval.Tally`:
 - **Reject wins immediately: a single-approver veto, by design.** One valid `reject`, from any one configured approver, resolves the escalation as rejected outright — it needs no quorum of its own and is not outvoted by however many `approve` votes are already held, even a full quorum's worth. This is deliberately asymmetric with approval (which needs `M` distinct votes): it is the fail-closed direction. Escalation exists because the engine was not confident enough to allow outright; requiring agreement to let it through but only one dissent to stop it keeps that posture — a single approver can always fall back to denying, but no minority can force an allow past an objection. (A breaker reset and a contact approval have no reject; a vote is either cast or not. A contact addition is turned down by removing it.)
 - **`M` distinct OWNERS, never double-counted — not `M` distinct keys.** `Tally` dedupes on the matched key's `owner` (§5), not on `kid`. Two keys configured with the exact same `owner` (both `agent_id` and `key_id` equal, including both empty) are the same owner and count once between them: one person holding two approver key files cannot satisfy a 2-of-N quorum alone. The owner identity is deliberately an **exact** match of the whole `owner` object (`agent_id + "\x00" + key_id` as a canonical string) — not the either-field match §7's self-approval check uses — because quorum dedup only merges entries an operator configured identically on purpose; it never guesses that two differently-configured entries are "probably" the same person. `M` is the configured quorum (`MinQuorumProduction` = 2; `stopbard` refuses to start with a lower quorum unless run with `-dev-world`). A second valid vote whose owner already holds a live vote is refused (`ErrDuplicateVote`); it does not add a second count, and it does not replace the first — this covers both "the same key voted twice" and "a different key with the same owner voted."
 - **A vote owned by the escalation's requester never counts, as defence in depth.** `Tally` is constructed with the requester's `key_id`/`agent_id` to exclude (`NewTally(required, excludeKeyID, excludeAgentID)`; both `""` for a breaker reset, which has no requester, §8). `Add` runs the same either-field check as §7's `SELF_APPROVAL` and refuses such a vote the same way, even though `VerifyEscalation` should already have refused it before it ever reached `Tally` — this is a second, independent enforcement point, not the primary one.
+- **Escalation votes are bound to the policy bundle.** Before replaying an escalation's stored votes into `Tally`, the caller drops every vote whose `policy_bundle_hash` (carried on `Vote`) is not the active bundle's, and audits them (§2). `Tally` itself stays pure and does not know about bundles. Breaker-reset and contact votes carry no bundle hash (ADR 0010).
 - **Votes expire.** A vote's own `expiry` (§2/§3) bounds how long it counts. `Tally` discards expired votes before counting toward `M`, so an owner whose vote expired may vote again (a fresh signature, not a resurrected one).
 - **Once resolved, stays resolved.** After `Tally` returns a non-pending resolution (quorum met, or a reject), every later `Add` is refused (`ErrAlreadyResolved`) rather than re-opening or re-counting. This is what makes "approve after reject" and "approve after the quorum already executed" refusals rather than silent no-ops.
 
@@ -199,14 +235,16 @@ A single-approver veto is unusual enough to page on, and the record of who cast 
 | A valid approval replayed on a different, later escalation for the same tenant | §6 step 6: `escalation_id` is bound and checked. |
 | A valid breaker-reset signature replayed on the *next* trip for the same tenant | §8 step 7: `trip_request_id` is bound and checked. |
 | A contact approval moved to a different (look-alike) address or entry | §8a step 7: both `contact_id` and `address` are bound and checked. |
+| A vote cast under one policy bundle counted after the bundle changed (a loosened policy approved under, or a tightened one bypassed with, votes given for the old rules) | §2 / §6 step 8: the object binds `policy_bundle_hash`; a stored vote counts only while it is the active bundle, and an old-bundle envelope is refused `POLICY_CHANGED`. |
+| A v1 (unbound) escalation signature submitted after v2 | §2.1: only the v2 object under the v2 tag is ever verified; a v1 signature is `BAD_SIGNATURE`. |
 | A stale approval used long after signing, or a signature pre-dated to stay valid forever | §6/§8 steps 8–9: checked at verification time, bounded to a 1-hour window, with no `iat` to trust. |
 | The same approver counted twice toward quorum, including by holding a second approver key file | `Tally` dedupes by `owner`, not `kid` (§9): a second live vote whose owner already holds one is refused (`ErrDuplicateVote`), whether it is the same key or a different key configured with the same owner. |
-| A compromised requester signs its own approval with a stolen or colluding approver key | §7: an approver key whose required `owner` matches the requester's `key_id` or `agent_id` is refused at step 10, independent of quorum. |
+| A compromised requester signs its own approval with a stolen or colluding approver key | §7: an approver key whose required `owner` matches the requester's `key_id` or `agent_id` is refused at step 11, independent of quorum. |
 | An approval, reset or contact signature read as another kind, or as a decision token / audit checkpoint | Domain separation (§4): each signing input starts with a distinct, versioned tag. |
 | A decision reached, then "re-approved" after it changed (quorum met, then a late reject; or executed, then approved again) | `Tally`'s `ErrAlreadyResolved` (§9): the first resolution is final. |
 
 ## 11. Versioning
 
-Any change to an object's fields, the domain tags, or the verification order bumps the object's own version (`-v1` → `-v2` in its domain tag) and both versions are specified side by side, as for decision tokens.
+Any change to an object's fields, the domain tags, or the verification order bumps the object's own version (`-v1` → `-v2` in its domain tag) and both versions are specified side by side, as for decision tokens. The escalation approval object is at v2 (§2, adding `policy_bundle_hash`; v1 in §2.1, no longer accepted). The breaker reset (§3) and contact approval (§3a) objects are unchanged at v1. The document keeps its `-v1` name and its vector file, which hold each object at its current version.
 
-Test vectors: [`vectors/approval-signature-v1.json`](vectors/approval-signature-v1.json), generated and checked by `internal/approval/vectors_test.go` (`go test ./internal/approval -run TestApprovalSignatureVectors -update`). They include negative vectors for every check in §6, §8 and §8a.
+Test vectors: [`vectors/approval-signature-v1.json`](vectors/approval-signature-v1.json), generated and checked by `internal/approval/vectors_test.go` (`go test ./internal/approval -run TestApprovalSignatureVectors -update`). They include negative vectors for every check in §6, §8 and §8a, and a v1 escalation signature (§2.1), which must be refused.
