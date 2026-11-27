@@ -97,6 +97,7 @@ E = "E11 DX & release"
 t("CS-195","P1",E,"CLI: init","`stopbar init --persona agent-wallet` generates config + policies + keys.","Fresh machine to protected agent < 30 min (timed).",1.5,"CS-113","FR-DX-1,3")
 t("CS-196","P1",E,"Docker image + binaries","goreleaser; signed releases (cosign); SBOM.","Release artifacts signed and verifiable.",1,"CS-003","FR-DX-2, NFR-7")
 t("CS-197","P1",E,"Benchmarks","Latency/throughput benchmarks vs. NFR-1/2.","p99 < 25ms sidecar at 1k rps published in docs.",1.5,"CS-104")
+t("CS-199","P1",E,"Official benchmark method","Dedicated machine for stopbard and a separate load-generator host; scripts/bench gains a remote-target mode; hardware, kernel, file system and disk recorded.","NFR-1/2 measured on a dedicated machine with the harness on another host, published in docs/benchmarks.md.",1,"CS-197","NFR-1,NFR-2")
 t("CS-198","P1",E,"Quickstart + E2E demo","Anvil + sample agent + attack replay video/GIF.","Demo reproducible from README.",1.5,"CS-195,CS-193")
 
 # ---------------- Phase 2 ----------------

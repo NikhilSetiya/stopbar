@@ -14,7 +14,7 @@ Latency and throughput of the `stopbard` sidecar against the PRD's targets:
 On a GitHub-hosted Linux runner:
 
 - **NFR-2 is met.** In each of the three official 60 s runs, 1,000 requests/s were answered on schedule with 0 errors, and at most 163 requests were ever in flight.
-- **NFR-1 is met in two of the three official runs and missed in one:** p99 was 23.19 ms, 21.13 ms and **28.22 ms**. It is therefore not met reliably.
+- **NFR-1 p99: met in 2 of 3 runs on a shared runner; tail from noisy neighbours.** p99 was 23.19 ms, 21.13 ms and **28.22 ms** (run 45859183281). That is the whole claim: it is not shown to hold on every run.
 - On macOS with full fsync, the earlier four-commit design could not get under about 25 ms even when idle. The current design measured 23.4 ms p99 there, but only on a dev machine, so that number is not official.
 
 Official numbers come only from GitHub-hosted runners or from an idle machine whose specs are written here. Every number below says where it was measured. A number from a loaded machine is never evidence that a target is met.
@@ -47,6 +47,15 @@ go run ./scripts/bench -h               # harness flags (rate, duration, warm-up
 ```
 
 `make bench` builds both binaries and runs `sync` before the load starts, so kernel writeback of the build does not land in the middle of the run. The official measurement is the `bench` workflow (`gh workflow run bench.yml`, or Actions → bench → Run workflow). It runs `make bench` on `ubuntu-latest` and first prints the runner's CPU, memory and disk. CI's required `go` job runs only a 5 s, 100 rps **correctness smoke** of the harness. It fails on any wrong outcome or error and is not a latency gate.
+
+### Official method (later)
+
+These runs were made on a shared 4-vCPU GitHub runner, where the harness and `stopbard` compete for CPU and the disk is shared with other tenants. The official method for a release claim is:
+- a dedicated machine (not a shared VM) running only `stopbard`;
+- a separate load-generator host running `scripts/bench` against it over the network (the harness needs a mode that targets a remote `stopbard`, which it does not have yet: CS-199);
+- the hardware, kernel, file system and disk recorded with the numbers.
+
+Until such a run exists, the numbers here are shared-runner numbers and are labelled as such.
 
 ## Results
 
@@ -133,7 +142,7 @@ Unchanged: fail-closed mapping, every audit record in the same transaction as it
 ## Gap statement
 
 - **NFR-2 (≥ 1,000 evaluations/s): met** on the GitHub-hosted runner. Each of three 60 s runs at 1,000 rps kept the schedule with 0 errors.
-- **NFR-1 (p99 < 25 ms sidecar): met in two of the three official runs (23.19 ms and 21.13 ms) and missed in one (28.22 ms).** It is met in most runs on current hardware, not in every run. The remaining tail is a few seconds per run with requests over 100 ms, on a shared 4-vCPU VM where the harness competes with `stopbard`.
+- **NFR-1 (p99 < 25 ms sidecar): met in 2 of 3 runs on a shared runner; tail from noisy neighbours** (23.19 ms, 21.13 ms, 28.22 ms). The tail is a few seconds per run with requests over 100 ms, on a shared 4-vCPU VM where the harness competes with `stopbard`. A dedicated-machine run (Official method, above) has not been made.
 - **Bytes written per request.** About 42 KB per request still reaches the disk: about 2.7 GB for 65,000 requests in 45858269289. The audit records themselves are 3.7 KB; the rest is bbolt rewriting each touched B+tree path on every commit. Reducing that further would mean a different storage engine (an append-only log), which is a separate design decision.
 - **Runner variance.** On one runner type (EPYC 9V74), earlier code gave p99 over 1 s, and the latest storage changes are unmeasured there.
 - **macOS:** 23.4 ms p99 at 1,000 rps on the M3 dev machine with full fsync, under moderate load (load average about 3.6). This is not official.

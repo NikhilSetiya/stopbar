@@ -63,3 +63,17 @@ Each request also wrote about 5.2 KB of audit records. The decision record repea
   - store: a unit is one transaction; a failed write or a failed commit fails every write of the unit and writes nothing; late writes still land; group-commit isolation;
   - limiter: reserve and commit in one unit, rolled back together; capacity held while a commit is in flight; the concurrency property against a slow store that fails one write in ten; compaction never touches the audit log;
   - gateway: a failed unit answers 500, writes nothing and leaves the nonce reusable.
+
+## Amendment (2026-11-27): follow-ups to #146
+
+- **Bounded store wait.** The gateway waits at most `-store-timeout` (default 5 s) for the unit. After that it answers `FAIL_CLOSED_STORE`, a deny with no token and no signed tx, and abandons the unit.
+  - A unit that has not committed then fails, and everything it held rolls back.
+  - A unit that was already committing still lands. `engine.Abandon` then voids its reservation and denies a pending escalation (LLD §12).
+- **A failed commit breaks the store.** A commit or fsync error is not retried: every writer fails, and the state file must be re-opened.
+- **A panicking write still runs every rollback callback.**
+- **Audit bodies are snapshotted at write time.**
+- **Engine stages get deep copies.**
+- **Legacy limiter keys migrate only at open.**
+- **Nonces keep the latest expiry per key.**
+- **The breaker trip is written outside the limiter lock.**
+- **Resolved escalations are compacted after `-escalation-retention`** (default 30 days). Pending escalations and the audit log are never compacted.
