@@ -669,6 +669,7 @@ func concurrentCaps(t *testing.T, st Store) {
 		}()
 	}
 	const opsPerWorker = 20
+	var clockMu sync.RWMutex
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := range workers {
@@ -678,7 +679,19 @@ func concurrentCaps(t *testing.T, st Store) {
 			rng := rand.New(rand.NewPCG(uint64(i), 7))
 			<-start // all 1,000 contend from the same instant
 			for op := range opsPerWorker {
+				clockMu.Lock()
 				c.Advance(10 * time.Millisecond) // 20,000 ops ≈ 200s: TTLs lapse mid-run, the 1h window never rolls
+				clockMu.Unlock()
+				// A commit must not be late: a late commit records spend past the
+				// cap by design ("loss bounding counts what happened"), which this
+				// invariant would flag. So the clock does not move between a
+				// committing worker's reserve and its commit. Releases and lapses
+				// still race the clock, and their writes, freely.
+				p := rng.IntN(20)
+				committing := p < 2
+				if committing {
+					clockMu.RLock()
+				}
 				wallet := walletA
 				if rng.IntN(2) == 0 {
 					wallet = walletB
@@ -688,17 +701,21 @@ func concurrentCaps(t *testing.T, st Store) {
 				id := fmt.Sprintf("req-%d-%d", i, op)
 				ttl := time.Duration(30+rng.IntN(90)) * time.Second
 				if err := l.Reserve(bg, id, req(wallet, dest, amt, fmt.Sprint(rng.IntN(400)), true), ttl, nil); err != nil {
+					if committing {
+						clockMu.RUnlock()
+					}
 					if !errors.Is(err, engine.ErrCapExceeded) && !errors.Is(err, errFlaky) {
 						t.Errorf("reserve: %v", err)
 					}
 					continue
 				}
 				o := &outcome{wallet: wallet, usd: mustUSD(amt), state: StateReserved}
-				switch p := rng.IntN(20); {
-				case p < 2: // 10% commit; the rest release or lapse, so capacity recycles
+				switch {
+				case committing: // 10% commit; the rest release or lapse, so capacity recycles
 					err := l.Commit(bg, id, "0x"+id, nil)
+					clockMu.RUnlock()
 					switch {
-					case err == nil, errors.Is(err, ErrReservationExpired): // late commit still records spend
+					case err == nil:
 						o.state = StateCommitted
 					case errors.Is(err, errFlaky): // not recorded: the reservation lapses
 					default:
