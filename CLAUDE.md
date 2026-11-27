@@ -98,6 +98,7 @@ gateway → normalize → decode intent (`decode/evm`) → enrich (price, balanc
 - **Product first.** Phase 1 exit criteria (PRD §10) come before demos, research harnesses and release polish. The Phase 1R pilots (#98–#110) and demo work (#111–#123) are where the build drifted. Don't repeat it.
 - **Least code that fully meets the spec.** Reuse existing packages and helpers, delete what a change makes dead, and don't add speculative abstraction.
 - **Orchestration.** The lead session keeps the overview, splits work into one task per agent (own worktree and branch), and verifies each result against its acceptance criteria and `make e2e` before a PR goes up.
+- **Check a PR's state before deleting its branch.** Run `gh pr view <n> --json state` first, and never trust "merged" without checking. Deleting an open PR's head branch closes the PR.
 
 ## Working with the maintainer
 
